@@ -1,0 +1,20 @@
+{
+  "name": "cloudgear",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Parses a TypeScript infra-shorthand file via AST and generates an AWS CDK stack from a convention-based plugin per resource type.",
+  "type": "module",
+  "module": "factory.ts",
+  "scripts": {
+    "generate": "bun factory.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "ts-morph": "^24.0.0"
+  }
+}

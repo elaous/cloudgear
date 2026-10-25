@@ -257,7 +257,10 @@ Rules the analyzer enforces:
   and warns about `rateLimit`.
 - A `dry` bucket is not created or deleted, but the CDN still adds one
   statement to its bucket policy (and removes it again), which `generate`
-  warns about. The bucket (or its `path`) is public through the CDN, so
+  warns about. The CDN's bucket policy statement only allows `s3:GetObject`
+  under the site's path, for that one distribution; because it cannot list
+  the bucket, a missing file is answered with 403 rather than 404. The bucket
+  (or its `path`) is public through the CDN, so
   `generate` also warns when a function uses the same files.
 - Routes become CloudFront path patterns. Patterns are ordered so a longer one
   is matched before one that would swallow it (`/users/*/posts/*` before

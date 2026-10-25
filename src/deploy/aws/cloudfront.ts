@@ -99,10 +99,15 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const objectArn = `arn:aws:s3:::${spec.bucket}/${spec.path}*`;
     const condition = { StringEquals: { "AWS:SourceArn": distributionArn } };
     const statements = policy.Statement.filter((s: { Sid?: string }) => !s.Sid?.startsWith(`cloudgear-cdn-${id}`));
-    statements.push(
-      { Sid: `cloudgear-cdn-${id}-read`, Effect: "Allow", Principal: { Service: CLOUDFRONT }, Action: "s3:GetObject", Resource: objectArn, Condition: condition },
-      { Sid: `cloudgear-cdn-${id}-list`, Effect: "Allow", Principal: { Service: CLOUDFRONT }, Action: "s3:ListBucket", Resource: `arn:aws:s3:::${spec.bucket}`, Condition: condition },
-    );
+    // The CDN only reads objects; earlier versions also granted ListBucket, which is dropped here on the next apply.
+    statements.push({
+      Sid: `cloudgear-cdn-${id}-read`,
+      Effect: "Allow",
+      Principal: { Service: CLOUDFRONT },
+      Action: "s3:GetObject",
+      Resource: objectArn,
+      Condition: condition,
+    });
     await deps.s3.send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: statements }) }));
   }
 

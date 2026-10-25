@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import type { CloudgearConfig } from "../src/config/schema";
@@ -150,9 +151,9 @@ describe("applying the edge", () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const policy = JSON.parse(aws.of("PutBucketPolicyCommand")[0].Policy);
     const condition = { StringEquals: { "AWS:SourceArn": "arn:aws:cloudfront::1:distribution/E1" } };
-    expect(policy.Statement).toMatchObject([
-      { Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*", Condition: condition },
-      { Action: "s3:ListBucket", Resource: "arn:aws:s3:::data", Condition: condition },
+    // reading objects is all the CDN needs, and only under the site's path
+    expect(policy.Statement).toEqual([
+      expect.objectContaining({ Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*", Condition: condition }),
     ]);
 
     const grants = aws.of("AddPermissionCommand").filter((i) => i.Principal === "cloudfront.amazonaws.com");
@@ -174,8 +175,21 @@ describe("applying the edge", () => {
     await applyAll({ ...cdnConfig(), cdn: { ...cdnConfig().cdn!, behavior: [{ path_pattern: "/x/*", function: "foo", method: ["GET"] }] } }, state, aws);
 
     const sids = JSON.parse(stored).Statement.map((s: { Sid: string }) => s.Sid);
-    expect(sids).toHaveLength(3);
+    expect(sids).toHaveLength(2);
     expect(sids[0]).toBe("other");
+  });
+
+  test("a ListBucket statement written by an earlier version is removed on the next apply", async () => {
+    const id = createHash("sha256").update(DOMAIN).digest("hex").slice(0, 12);
+    const old = [
+      { Sid: "other", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/public/*" },
+      { Sid: `cloudgear-cdn-${id}-read`, Effect: "Allow", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*" },
+      { Sid: `cloudgear-cdn-${id}-list`, Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:aws:s3:::data" },
+    ];
+    let stored = JSON.stringify({ Version: "2012-10-17", Statement: old });
+    const aws = fakeAws({ GetBucketPolicyCommand: () => ({ Policy: stored }), PutBucketPolicyCommand: (input) => void (stored = input.Policy) });
+    await applyAll(cdnConfig(), emptyState(), aws);
+    expect(JSON.parse(stored).Statement.map((s: { Sid: string }) => s.Sid)).toEqual(["other", `cloudgear-cdn-${id}-read`]);
   });
 
   test("updating reuses the distribution with its caller reference and etag", async () => {

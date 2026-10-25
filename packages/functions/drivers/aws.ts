@@ -49,16 +49,8 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
       : "";
     const contentType = headers["content-type"] ?? null;
 
-    let resolved: Resolved | undefined;
-    try {
-      resolved = resolveInput(compiled, event, text, contentType, options.trustContext ?? false);
-    } catch (err) {
-      return toLambda({ status: 400, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: (err as Error).message }) });
-    }
-    if (!resolved) {
-      return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
-    }
-    let context = resolved.context;
+    // Unauthenticated callers learn nothing about routes: verify before parsing or routing.
+    let context: RequestContext | undefined;
     if (options.authenticate && !options.anonymous) {
       const req = new Request("https://function.invalid/", { headers });
       let principal: Awaited<ReturnType<Authenticator>>;
@@ -71,7 +63,17 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
       if (!principal) return toLambda(json(401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" }));
       context = { auth: principal };
     }
-    const result = await invoke(fn, resolved.input, context);
+
+    let resolved: Resolved | undefined;
+    try {
+      resolved = resolveInput(compiled, event, text, contentType, options.trustContext ?? false);
+    } catch (err) {
+      return toLambda({ status: 400, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: (err as Error).message }) });
+    }
+    if (!resolved) {
+      return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
+    }
+    const result = await invoke(fn, resolved.input, context ?? resolved.context);
     // A HEAD request served by a GET route gets the headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
   };

@@ -625,7 +625,7 @@ describe("aws createHandler token verification", () => {
     }
   });
 
-  test("a failing verifier is 503, and unknown paths never reach it", async () => {
+  test("a failing verifier is 503, and unauthenticated callers get 401 for unknown paths too", async () => {
     const calls: string[] = [];
     const handler = createHandler(whoami, routes, {
       authenticate: async () => {
@@ -637,11 +637,13 @@ describe("aws createHandler token verification", () => {
     console.error = () => {};
     try {
       expect((await handler(event({ "x-auth-token": "good" }))).statusCode).toBe(503);
-      expect((await handler({ ...event({}), rawPath: "/nope" })).statusCode).toBe(404);
     } finally {
       console.error = originalError;
     }
     expect(calls).toHaveLength(1);
+    const guarded = createHandler(whoami, routes, { authenticate });
+    expect((await guarded({ ...event({}), rawPath: "/nope" })).statusCode).toBe(401);
+    expect((await guarded({ ...event({ "x-auth-token": "good" }), rawPath: "/nope" })).statusCode).toBe(404);
   });
 
   test("the invoke protocol is verified too, and its context is never trusted", async () => {

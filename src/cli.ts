@@ -101,7 +101,7 @@ async function main() {
             log: (message) => console.log(`cloudgear: ${message}`),
           });
           console.log(`cloudgear: ${command} complete`);
-          for (const entry of Object.values(state.entries)) {
+          for (const entry of command === "apply" ? Object.values(state.entries) : []) {
             if (entry.type !== "@aws.CloudFront" || !entry.outputs.domain_name) continue;
             const status = entry.outputs.status === "Deployed" ? "live" : "still deploying";
             console.log(`cloudgear: site https://${entry.name} (${status}; distribution ${entry.outputs.id}, ${entry.outputs.domain_name})`);

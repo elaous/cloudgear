@@ -212,6 +212,12 @@ describe("bucket regions", () => {
     expect(virginia.of("CreateBucketCommand")).toEqual([{ Bucket: "data", CreateBucketConfiguration: undefined }]);
   });
 
+  test("naming the region the bucket already lives in is not a move", async () => {
+    const state = emptyState();
+    await applyAll(withRegion(), state);
+    await expect(applyAll(withRegion("eu-west-1"), state)).resolves.toBeDefined();
+  });
+
   test("a bucket cannot be moved to another region", async () => {
     const state = emptyState();
     await applyAll(withRegion("eu-central-1"), state);

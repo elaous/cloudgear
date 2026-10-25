@@ -639,7 +639,7 @@ function readRouteOptions(options: Node | undefined, at: string): { name?: strin
 }
 
 // "eu-west-1", "us-gov-east-1", "cn-north-1"
-const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
+const REGION = /^[a-z]{2,5}(-[a-z]+)+-\d$/;
 
 function readRegion(options: Node | undefined, at: string): string | undefined {
   const region = readStringOption(options, "region", `${at} options`);

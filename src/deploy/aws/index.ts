@@ -204,11 +204,11 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },
       async update(entry, current) {
-        const before = (current.spec.region as string | undefined) ?? "";
-        const after = (entry.spec.region as string | undefined) ?? "";
+        const before = (current.spec.region as string | undefined) || current.outputs.region || options.region;
+        const after = (entry.spec.region as string | undefined) || options.region;
         if (before !== after) {
           throw new Error(
-            `Bucket "${entry.physical_name}" cannot move from region "${before || "default"}" to "${after || "default"}"; destroy it (after emptying it) and apply again`,
+            `Bucket "${entry.physical_name}" cannot move from region "${before}" to "${after}"; destroy it (after emptying it) and apply again`,
           );
         }
         return {};

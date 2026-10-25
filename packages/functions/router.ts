@@ -33,6 +33,8 @@ export interface EndpointsFile {
   provider: string;
   routes: Record<string, string>;
   auth?: EndpointAuth;
+  // The deployed CDN, written by `cloudgear apply`; read by `CDN.url()`.
+  cdn?: { domain: string; url: string; id?: string };
 }
 
 export interface RateLimit {

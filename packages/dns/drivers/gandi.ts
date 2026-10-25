@@ -1,6 +1,9 @@
 import { DEFAULT_TTL, quoteTxt, relativeName, withTrailingDot, type DnsDriver, type DnsRecord, type DnsRecordType } from "../driver";
 
 const API = "https://api.gandi.net/v5/livedns";
+// Bounds Gandi documents for rrset_ttl.
+const MIN_TTL = 300;
+const MAX_TTL = 2_592_000;
 
 export interface GandiOptions {
   // A Gandi personal access token; defaults to $GANDI_TOKEN. $GANDI_API_KEY (legacy key) also works.
@@ -18,7 +21,7 @@ export class GandiDnsDriver implements DnsDriver {
   async upsert(record: DnsRecord) {
     await this.call("PUT", record.name, record.type, {
       rrset_values: record.values.map((value) => format(record.type, value)),
-      rrset_ttl: record.ttl ?? DEFAULT_TTL,
+      rrset_ttl: Math.min(MAX_TTL, Math.max(MIN_TTL, record.ttl ?? DEFAULT_TTL)),
     });
   }
 

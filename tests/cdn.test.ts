@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
-import { CDN, Cert } from "@cloudgear/cdn";
+import { CDN, Cert, registerCdnDriver, registerCertDriver, type CdnDriver, type CertDriver } from "@cloudgear/cdn";
+import { CloudFrontCdnDriver } from "../packages/cdn/drivers/cloudfront";
+import { MemoryCdnDriver } from "../packages/cdn/drivers/memory-cdn";
+import { AcmCertDriver } from "../packages/cdn/drivers/acm";
+import { MemoryCertDriver } from "../packages/cdn/drivers/memory";
 import { DNS } from "@cloudgear/dns";
 import { FunctionRouter } from "@cloudgear/functions";
 import { decodeConfig } from "../src/config/schema";
@@ -22,7 +26,6 @@ describe("Cert and CDN", () => {
     const cdn = new CDN("aws", dns, { cert, bucket: site() });
     expect(cert.domain).toBe("cdn.example.com");
     expect(cdn.domain).toBe("cdn.example.com");
-    expect(cdn.url).toBe("https://cdn.example.com");
   });
 
   test("reject a certificate for another domain, another provider and a foreign bucket", () => {
@@ -31,6 +34,134 @@ describe("Cert and CDN", () => {
     expect(() => new CDN("aws", dns, { cert: new Cert("aws", other), bucket: site() })).toThrow(/certificate covers "www.example.com" but the CDN serves "cdn.example.com"/);
     expect(() => new Cert("gcp" as "aws", dns)).toThrow(/not supported yet/);
     expect(() => new CDN("aws", dns, { cert: new Cert("aws", dns), bucket: new BlobStore("gcp", "://b") })).toThrow(/bucket uses "gcp"/);
+  });
+});
+
+describe("Cert drivers", () => {
+  const dns = new DNS("aws", "cdn.example.com");
+
+  test("status goes through the driver, which can be injected", async () => {
+    const driver = new MemoryCertDriver(new Map());
+    const cert = new Cert("aws", dns, { driver });
+    expect(await cert.status()).toEqual({ state: "none" });
+    driver.set("cdn.example.com", { state: "issued", id: "arn:1" });
+    expect(await cert.status()).toEqual({ state: "issued", id: "arn:1" });
+  });
+
+  test("CLOUDGEAR_CERT_DRIVER=memory and registered drivers replace the built-in one", async () => {
+    process.env.CLOUDGEAR_CERT_DRIVER = "memory";
+    try {
+      expect(await new Cert("aws", dns).status()).toEqual({ state: "none" });
+    } finally {
+      delete process.env.CLOUDGEAR_CERT_DRIVER;
+    }
+    const custom: CertDriver = { describe: async (domain) => ({ state: "pending", id: domain }) };
+    registerCertDriver("aws", () => custom);
+    try {
+      expect(await new Cert("aws", dns).status()).toEqual({ state: "pending", id: "cdn.example.com" });
+    } finally {
+      registerCertDriver("aws", (await import("../packages/cdn/drivers/acm")).createAcmDriver);
+    }
+  });
+
+  test("the ACM driver prefers an issued certificate, then the newest, for exactly that domain", async () => {
+    const inputs: unknown[] = [];
+    const summary = (arn: string, status: string, at: number, domain = "cdn.example.com") => ({ DomainName: domain, CertificateArn: arn, Status: status, CreatedAt: new Date(at) });
+    const client = {
+      send: async (command: { input: Record<string, unknown> }) => {
+        inputs.push(command.input);
+        return command.input.NextToken
+          ? { CertificateSummaryList: [summary("arn:newer-failed", "FAILED", 4000), summary("arn:pending", "PENDING_VALIDATION", 3000)] }
+          : { NextToken: "t", CertificateSummaryList: [summary("arn:issued", "ISSUED", 1000), summary("arn:other", "ISSUED", 5000, "other.example.com")] };
+      },
+    };
+    const driver = new AcmCertDriver(client as never);
+    expect(await driver.describe("cdn.example.com")).toEqual({ state: "issued", id: "arn:issued" });
+    expect((inputs[0] as { CertificateStatuses: string[] }).CertificateStatuses).toContain("PENDING_VALIDATION");
+    const pendingOnly = { send: async () => ({ CertificateSummaryList: [summary("arn:p", "PENDING_VALIDATION", 1), summary("arn:f", "FAILED", 2)] }) };
+    expect(await new AcmCertDriver(pendingOnly as never).describe("cdn.example.com")).toEqual({ state: "pending", id: "arn:p" });
+    expect(await new AcmCertDriver({ send: async () => ({}) } as never).describe("x.example.com")).toEqual({ state: "none" });
+  });
+});
+
+describe("CDN status() and url()", () => {
+  const dns = new DNS("gandi", "cdn.example.com");
+  const make = (driver: CdnDriver) => new CDN("aws", dns, { cert: new Cert("aws", dns), bucket: site(), driver });
+  const inDir = async <T>(files: Record<string, unknown>, run: () => Promise<T>): Promise<T> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cdn-url-"));
+    fs.writeFileSync(path.join(dir, "package.json"), "{}");
+    fs.mkdirSync(path.join(dir, ".cloudgear"));
+    for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, ".cloudgear", name), JSON.stringify(content));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      return await run();
+    } finally {
+      process.chdir(cwd);
+    }
+  };
+
+  test("status() and url() come from the driver when nothing was written by apply", async () => {
+    const driver = new MemoryCdnDriver(new Map());
+    const cdn = make(driver);
+    expect(await cdn.status()).toEqual({ state: "none" });
+    await expect(cdn.url()).rejects.toThrow(/is not deployed; run cloudgear apply/);
+    driver.set("cdn.example.com", { state: "deploying", id: "E1", url: "https://d111.cloudfront.net" });
+    expect(await cdn.status()).toEqual({ state: "deploying", id: "E1", url: "https://d111.cloudfront.net" });
+    expect(await cdn.url()).toBe("https://d111.cloudfront.net");
+  });
+
+  test("url() prefers the endpoints file for this domain and never calls the driver", async () => {
+    const driver: CdnDriver = { describe: async () => Promise.reject(new Error("no calls expected")) };
+    const cdn = make(driver);
+    const written = { provider: "aws", routes: {}, cdn: { domain: "cdn.example.com", url: "https://d222.cloudfront.net" } };
+    expect(await inDir({ "endpoints.json": written }, () => cdn.url())).toBe("https://d222.cloudfront.net");
+    const other = { ...written, cdn: { domain: "www.example.com", url: "https://d333.cloudfront.net" } };
+    await expect(inDir({ "endpoints.json": other }, () => cdn.url())).rejects.toThrow("no calls expected");
+    await expect(inDir({}, () => cdn.url())).rejects.toThrow("no calls expected");
+  });
+
+  test("registered drivers and CLOUDGEAR_CDN_DRIVER=memory replace the built-in one", async () => {
+    process.env.CLOUDGEAR_CDN_DRIVER = "memory";
+    try {
+      expect(await new CDN("aws", dns, { cert: new Cert("aws", dns), bucket: site() }).status()).toEqual({ state: "none" });
+    } finally {
+      delete process.env.CLOUDGEAR_CDN_DRIVER;
+    }
+    registerCdnDriver("aws", () => ({ describe: async (domain) => ({ state: "deployed", id: domain }) }));
+    try {
+      expect(await new CDN("aws", dns, { cert: new Cert("aws", dns), bucket: site() }).status()).toEqual({ state: "deployed", id: "cdn.example.com" });
+    } finally {
+      registerCdnDriver("aws", (await import("../packages/cdn/drivers/cloudfront")).createCloudFrontDriver);
+    }
+  });
+
+  test("the CloudFront driver finds the distribution by alias across pages", async () => {
+    const markers: (string | undefined)[] = [];
+    const client = {
+      send: async (command: { input: { Marker?: string } }) => {
+        markers.push(command.input.Marker);
+        return command.input.Marker
+          ? { DistributionList: { IsTruncated: false, Items: [{ Id: "E2", Status: "InProgress", DomainName: "d2.cloudfront.net", Aliases: { Items: ["cdn.example.com"] } }] } }
+          : { DistributionList: { IsTruncated: true, NextMarker: "m1", Items: [{ Id: "E1", Status: "Deployed", DomainName: "d1.cloudfront.net", Aliases: { Items: ["other.example.com"] } }] } };
+      },
+    };
+    expect(await new CloudFrontCdnDriver(client as never).describe("cdn.example.com")).toEqual({ state: "deploying", id: "E2", url: "https://d2.cloudfront.net" });
+    expect(markers).toEqual([undefined, "m1"]);
+    const empty = { send: async () => ({ DistributionList: { IsTruncated: false } }) };
+    expect(await new CloudFrontCdnDriver(empty as never).describe("cdn.example.com")).toEqual({ state: "none" });
+    const done = { send: async () => ({ DistributionList: { Items: [{ Id: "E", Status: "Deployed", DomainName: "d.cloudfront.net", Aliases: { Items: ["cdn.example.com"] } }] } }) };
+    expect((await new CloudFrontCdnDriver(done as never).describe("cdn.example.com")).state).toBe("deployed");
+  });
+});
+
+describe("a Cert without a CDN", () => {
+  test("is analyzed and written to the config, even on the zone apex", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cert-only-"));
+    const { config } = await generate({ entry: fixture("cdn/cert-only.ts"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "certonly" });
+    expect(config.certificate).toEqual({ domain: "example.com" });
+    expect(config.dns).toMatchObject({ provider: "aws", domain: "example.com" });
+    expect(config.cdn).toBeUndefined();
   });
 });
 

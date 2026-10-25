@@ -203,6 +203,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       outputs.id = created.Distribution.Id;
       outputs.arn = created.Distribution.ARN;
       outputs.domain_name = created.Distribution.DomainName;
+      outputs.url = `https://${outputs.domain_name}`;
       deps.log(`distribution ${outputs.id} will be served from ${outputs.domain_name}`);
     } else {
       deps.log(`updating distribution ${outputs.id}`);

@@ -129,6 +129,11 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
   }
 }
 
+// Whether there is anything worth writing to the endpoints file.
+export function hasEndpoints(endpoints: EndpointsFile): boolean {
+  return Object.keys(endpoints.routes).length > 0 || !!endpoints.cdn;
+}
+
 export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsFile {
   const routes: Record<string, string> = {};
   for (const fn of config.function) {
@@ -136,5 +141,9 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
     if (!url) continue;
     for (const route of fn.route) routes[`${route.method} ${route.path}`] = url;
   }
-  return { provider: config.provider, routes, auth: config.authenticated };
+  const distribution = config.cdn && state.entries[stateKey({ type: "@aws.CloudFront", name: config.cdn.domain })];
+  const cdn = distribution?.outputs.domain_name
+    ? { domain: config.cdn!.domain, url: distribution.outputs.url ?? `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }
+    : undefined;
+  return { provider: config.provider, routes, auth: config.authenticated, ...(cdn ? { cdn } : {}) };
 }

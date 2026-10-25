@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import type { CloudgearConfig } from "../src/config/schema";
-import { apply, endpointsFrom } from "../src/deploy/apply";
+import { apply, endpointsFrom, hasEndpoints } from "../src/deploy/apply";
 import { awsDrivers } from "../src/deploy/aws";
 import { allowedMethods, buildDistributionConfig, invalidateDistribution } from "../src/deploy/aws/cloudfront";
 import { formatPlan, plan, type CdnComparable } from "../src/deploy/plan";
@@ -333,6 +333,27 @@ describe("applying the edge", () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
     expect(endpointsFrom(cdnConfig(), state).routes).toEqual({ "POST /foo/{param}": "https://app-foo.lambda-url.eu-west-1.on.aws/" });
+  });
+
+  test("a CDN without any routed function still has endpoints to write", async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    const siteOnly = cdnConfig({ function: [], cdn: { ...cdnConfig().cdn!, behavior: [] } });
+    const endpoints = endpointsFrom(siteOnly, state);
+    expect(endpoints.routes).toEqual({});
+    expect(hasEndpoints(endpoints)).toBe(true);
+    expect(hasEndpoints({ provider: "aws", routes: {} })).toBe(false);
+  });
+
+  test("the endpoints file also records the deployed distribution, once it exists", async () => {
+    expect(endpointsFrom(cdnConfig(), emptyState()).cdn).toBeUndefined();
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    expect(state.entries[CDN_KEY]!.outputs.url).toBe("https://d111.cloudfront.net");
+    expect(endpointsFrom(cdnConfig(), state).cdn).toEqual({ domain: DOMAIN, url: "https://d111.cloudfront.net", id: "E1" });
+    delete state.entries[CDN_KEY]!.outputs.url;
+    expect(endpointsFrom(cdnConfig(), state).cdn!.url).toBe("https://d111.cloudfront.net");
+    expect(endpointsFrom(cdnConfig({ cdn: undefined }), state).cdn).toBeUndefined();
   });
 });
 

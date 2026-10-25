@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
-import { CDN, Cert } from "@cloudgear/cdn";
+import { CDN, Cert, registerCertDriver, type CertDriver } from "@cloudgear/cdn";
+import { AcmCertDriver } from "../packages/cdn/drivers/acm";
+import { MemoryCertDriver } from "../packages/cdn/drivers/memory";
 import { DNS } from "@cloudgear/dns";
 import { FunctionRouter } from "@cloudgear/functions";
 import { decodeConfig } from "../src/config/schema";
@@ -31,6 +33,69 @@ describe("Cert and CDN", () => {
     expect(() => new CDN("aws", dns, { cert: new Cert("aws", other), bucket: site() })).toThrow(/certificate covers "www.example.com" but the CDN serves "cdn.example.com"/);
     expect(() => new Cert("gcp" as "aws", dns)).toThrow(/not supported yet/);
     expect(() => new CDN("aws", dns, { cert: new Cert("aws", dns), bucket: new BlobStore("gcp", "://b") })).toThrow(/bucket uses "gcp"/);
+  });
+});
+
+describe("Cert drivers", () => {
+  const dns = new DNS("aws", "cdn.example.com");
+
+  test("status goes through the driver, which can be injected", async () => {
+    const driver = new MemoryCertDriver(new Map());
+    const cert = new Cert("aws", dns, { driver });
+    expect(await cert.status()).toEqual({ state: "none" });
+    driver.set("cdn.example.com", { state: "issued", id: "arn:1" });
+    expect(await cert.status()).toEqual({ state: "issued", id: "arn:1" });
+  });
+
+  test("CLOUDGEAR_CERT_DRIVER=memory and registered drivers replace the built-in one", async () => {
+    process.env.CLOUDGEAR_CERT_DRIVER = "memory";
+    try {
+      expect(await new Cert("aws", dns).status()).toEqual({ state: "none" });
+    } finally {
+      delete process.env.CLOUDGEAR_CERT_DRIVER;
+    }
+    const custom: CertDriver = { describe: async (domain) => ({ state: "pending", id: domain }) };
+    registerCertDriver("aws", () => custom);
+    try {
+      expect(await new Cert("aws", dns).status()).toEqual({ state: "pending", id: "cdn.example.com" });
+    } finally {
+      registerCertDriver("aws", (await import("../packages/cdn/drivers/acm")).createAcmDriver);
+    }
+  });
+
+  test("the ACM driver picks the newest certificate for exactly that domain", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+        sent.push([command.constructor.name, command.input]);
+        if (command.constructor.name === "ListCertificatesCommand") {
+          return command.input.NextToken
+            ? { CertificateSummaryList: [{ DomainName: "cdn.example.com", CertificateArn: "arn:new", CreatedAt: new Date(2000) }] }
+            : {
+                NextToken: "t",
+                CertificateSummaryList: [
+                  { DomainName: "cdn.example.com", CertificateArn: "arn:old", CreatedAt: new Date(1000) },
+                  { DomainName: "other.example.com", CertificateArn: "arn:other", CreatedAt: new Date(3000) },
+                ],
+              };
+        }
+        return { Certificate: { Status: "PENDING_VALIDATION" } };
+      },
+    };
+    const driver = new AcmCertDriver(client as never);
+    expect(await driver.describe("cdn.example.com")).toEqual({ state: "pending", id: "arn:new" });
+    expect(sent.at(-1)).toEqual(["DescribeCertificateCommand", { CertificateArn: "arn:new" }]);
+    expect(await new AcmCertDriver({ send: async () => ({}) } as never).describe("x.example.com")).toEqual({ state: "none" });
+  });
+});
+
+describe("a Cert without a CDN", () => {
+  test("is analyzed and written to the config, even on the zone apex", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cert-only-"));
+    const { config } = await generate({ entry: fixture("cdn/cert-only.ts"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "certonly" });
+    expect(config.certificate).toEqual({ domain: "example.com" });
+    expect(config.dns).toMatchObject({ provider: "aws", domain: "example.com" });
+    expect(config.cdn).toBeUndefined();
   });
 });
 

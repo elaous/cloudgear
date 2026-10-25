@@ -394,9 +394,6 @@ export function analyzeApp(entryPath: string): AppModel {
         throw new Error(`${at}: ${(err as Error).message}`);
       }
       domainName = dns.domain;
-      if (dns.domain === dns.zone) {
-        throw new Error(`${at}: "${dns.domain}" is the zone apex, which cannot be a CNAME; serve the site from a subdomain`);
-      }
     }
 
     let certificate: EdgeModel["certificate"];
@@ -414,6 +411,9 @@ export function analyzeApp(entryPath: string): AppModel {
       const [providerArg, dnsArg, optionsArg] = cdnExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
       if (!dnsExpr || initializerOf(dnsArg, "the CDN's DNS", at) !== dnsExpr) throw new Error(`${at}: the CDN must use the app's DNS`);
+      if (dns!.domain === dns!.zone) {
+        throw new Error(`${at}: "${dns!.domain}" is the zone apex, which cannot be a CNAME; serve the site from a subdomain`);
+      }
       if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with cert and bucket`);
 
       let bucketStore: Store | undefined;

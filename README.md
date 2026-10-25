@@ -299,10 +299,3 @@ Early draft. Only the `aws` provider has inference rules and deploy drivers;
 the router needs AWS credentials (see Authentication); end-user
 authentication is not part of the router yet. Input objects are not
 validated against their TypeScript types at runtime.
-
-## Legacy: CDK shorthand
-
-`bun factory.ts <source-file.ts> [outDir]` still compiles the original
-`new aws.Lambda("name", "./src")` / `new aws.DynamoTable("name")` shorthand
-into an AWS CDK stack via `plugins/<ResourceType>.ts`. See
-`examples/api-stack.ts`.

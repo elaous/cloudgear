@@ -4,12 +4,11 @@
   "private": true,
   "description": "Serverless function router plus AST-inferred infrastructure: generate a prototxt config from a TypeScript app, then plan/apply it to AWS.",
   "type": "module",
-  "module": "factory.ts",
+  "module": "src/cli.ts",
   "scripts": {
-    "generate": "bun factory.ts",
+    "generate": "bun src/cli.ts generate",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "cloudgear": "bun src/cli.ts"
+    "test": "bun test"
   },
   "devDependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",

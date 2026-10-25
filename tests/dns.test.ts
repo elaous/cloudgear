@@ -112,6 +112,9 @@ describe("GandiDnsDriver", () => {
     await driver.upsert({ name: "example.com", type: "TXT", values: ["hello world"] });
     expect(calls[0]!.url).toEndWith("/records/@/TXT");
     expect(calls[0]!.body).toEqual({ rrset_values: ['"hello world"'], rrset_ttl: 300 });
+    await driver.upsert({ name: "a.example.com", type: "A", values: ["192.0.2.1"], ttl: 60 });
+    await driver.upsert({ name: "b.example.com", type: "A", values: ["192.0.2.1"], ttl: 99_999_999 });
+    expect(calls.slice(-2).map((c) => (c.body as { rrset_ttl: number }).rrset_ttl)).toEqual([300, 2_592_000]);
   });
 
   test("get returns the record or null, remove tolerates a missing record", async () => {

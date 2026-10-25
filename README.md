@@ -320,7 +320,10 @@ place on destroy, because ACM shares it between certificates for a domain.
 Uploading the site's files is not part of cloudgear yet.
 
 Things that have not been checked against real services: all of the
-CloudFront, ACM, Route 53 and Gandi calls are tested against fakes only. AWS
+CloudFront, ACM, Route 53 and Gandi calls are tested against fakes only. The
+Gandi driver's URLs, authentication, field names, status codes and TTL bounds
+were checked against Gandi's published LiveDNS reference (api.gandi.net/docs/livedns),
+but never against a live account. AWS
 documents that a POST or PUT through CloudFront to a Lambda function URL needs
 the client to send `x-amz-content-sha256` (the SHA-256 of the body), and an
 origin access control may replace the `Authorization` header with its own

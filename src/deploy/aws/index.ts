@@ -9,6 +9,10 @@ import {
 } from "@aws-sdk/client-iam";
 import {
   AddPermissionCommand,
+  DeleteFunctionConcurrencyCommand,
+  PutFunctionConcurrencyCommand,
+  RemovePermissionCommand,
+  UpdateFunctionUrlConfigCommand,
   CreateFunctionCommand,
   CreateFunctionUrlConfigCommand,
   DeleteFunctionCommand,
@@ -17,6 +21,7 @@ import {
   UpdateFunctionCodeCommand,
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda";
+import { createHash } from "node:crypto";
 import { CreateBucketCommand, DeleteBucketCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
@@ -69,6 +74,87 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     await iam.send(
       new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec) }),
     );
+  }
+
+  const statementId = (kind: string, principal: string) =>
+    `cloudgear-${kind}-${createHash("sha256").update(principal).digest("hex").slice(0, 12)}`;
+
+  // A retry after a partial failure meets statements that already exist; that is fine.
+  // The same error also means "update in progress", which must not be skipped.
+  const addPermission = async (input: ConstructorParameters<typeof AddPermissionCommand>[0]) => {
+    try {
+      await lambda.send(new AddPermissionCommand(input));
+    } catch (err) {
+      const e = err as { name?: string; message?: string };
+      if (e.name === "ResourceConflictException" && /statement id.*already exists/i.test(e.message ?? "")) return;
+      throw err;
+    }
+  };
+
+  async function addInvokers(functionName: string, principals: string[]) {
+    for (const principal of principals) {
+      await addPermission({
+        FunctionName: functionName,
+        StatementId: statementId("url", principal),
+        Action: "lambda:InvokeFunctionUrl",
+        Principal: principal,
+        FunctionUrlAuthType: "AWS_IAM",
+      });
+      await addPermission({
+        FunctionName: functionName,
+        StatementId: statementId("invoke", principal),
+        Action: "lambda:InvokeFunction",
+        Principal: principal,
+        InvokedViaFunctionUrl: true,
+      });
+    }
+  }
+
+  async function removeInvokers(functionName: string, principals: string[]) {
+    for (const principal of principals) {
+      for (const kind of ["url", "invoke"]) {
+        await ignore(
+          lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: statementId(kind, principal) })),
+          "ResourceNotFoundException",
+        );
+      }
+    }
+  }
+
+  const PUBLIC_STATEMENTS = ["cloudgear-public-url", "cloudgear-public-invoke"];
+
+  async function addPublic(functionName: string) {
+    await addPermission({
+      FunctionName: functionName,
+      StatementId: PUBLIC_STATEMENTS[0],
+      Action: "lambda:InvokeFunctionUrl",
+      Principal: "*",
+      FunctionUrlAuthType: "NONE",
+    });
+    await addPermission({
+      FunctionName: functionName,
+      StatementId: PUBLIC_STATEMENTS[1],
+      Action: "lambda:InvokeFunction",
+      Principal: "*",
+      InvokedViaFunctionUrl: true,
+    });
+  }
+
+  async function removePublic(functionName: string) {
+    for (const id of PUBLIC_STATEMENTS) {
+      await ignore(
+        lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: id })),
+        "ResourceNotFoundException",
+      );
+    }
+  }
+
+  async function setConcurrency(functionName: string, reserved: number) {
+    if (reserved > 0) {
+      await lambda.send(new PutFunctionConcurrencyCommand({ FunctionName: functionName, ReservedConcurrentExecutions: reserved }));
+    } else {
+      await ignore(lambda.send(new DeleteFunctionConcurrencyCommand({ FunctionName: functionName })), "ResourceNotFoundException");
+    }
   }
 
   function environment(spec: FunctionComparable) {
@@ -146,25 +232,12 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           undo.push(() => lambda.send(new DeleteFunctionCommand({ FunctionName: entry.physical_name })));
           await waitForFunction(entry.physical_name);
 
-          const url = await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: "NONE" }));
-          await lambda.send(
-            new AddPermissionCommand({
-              FunctionName: entry.physical_name,
-              StatementId: "cloudgear-url",
-              Action: "lambda:InvokeFunctionUrl",
-              Principal: "*",
-              FunctionUrlAuthType: "NONE",
-            }),
+          const url = await lambda.send(
+            new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),
           );
-          await lambda.send(
-            new AddPermissionCommand({
-              FunctionName: entry.physical_name,
-              StatementId: "cloudgear-url-invoke",
-              Action: "lambda:InvokeFunction",
-              Principal: "*",
-              InvokedViaFunctionUrl: true,
-            }),
-          );
+          if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
+          else await addPublic(entry.physical_name);
+          if (spec.reserved_concurrency > 0) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
           return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, url: url.FunctionUrl };
         } catch (err) {
           for (const step of undo.reverse()) await step().catch(() => {});
@@ -192,6 +265,21 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
             }),
           );
           await waitForFunction(entry.physical_name);
+          const previous = Number(current.spec.reserved_concurrency ?? 0);
+          if (spec.reserved_concurrency !== previous) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
+        }
+        const before = (current.spec.invokers as string[] | undefined) ?? [];
+        if (changes.includes("auth")) {
+          await lambda.send(
+            new UpdateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),
+          );
+          if ((current.spec.auth ?? "iam") === "iam") await removeInvokers(entry.physical_name, before);
+          else await removePublic(entry.physical_name);
+          if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
+          else await addPublic(entry.physical_name);
+        } else if (changes.includes("invokers")) {
+          await removeInvokers(entry.physical_name, before.filter((p) => !spec.invokers.includes(p)));
+          await addInvokers(entry.physical_name, spec.invokers.filter((p) => !before.includes(p)));
         }
         return {};
       },
@@ -211,14 +299,28 @@ export function policyDocument(spec: FunctionComparable): string {
   const statements = spec.permissions.flatMap((p) => {
     if (p.type !== "@aws.S3") throw new Error(`No IAM mapping for permissions on ${p.type}`);
     const bucketArn = `arn:aws:s3:::${p.physical_name}`;
+    const prefix = p.path ?? "";
     const bucketActions = p.actions.filter((a) => a === "s3:ListBucket");
     const objectActions = p.actions.filter((a) => a !== "s3:ListBucket");
     return [
-      ...(objectActions.length ? [{ Effect: "Allow", Action: objectActions, Resource: `${bucketArn}/*` }] : []),
-      ...(bucketActions.length ? [{ Effect: "Allow", Action: bucketActions, Resource: bucketArn }] : []),
+      ...(objectActions.length ? [{ Effect: "Allow", Action: objectActions, Resource: `${bucketArn}/${prefix}*` }] : []),
+      ...(bucketActions.length
+        ? [
+            {
+              Effect: "Allow",
+              Action: bucketActions,
+              Resource: bucketArn,
+              ...(prefix ? { Condition: { StringLike: { "s3:prefix": [`${prefix}*`] } } } : {}),
+            },
+          ]
+        : []),
     ];
   });
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
+}
+
+function urlAuthType(auth: "iam" | "none"): "AWS_IAM" | "NONE" {
+  return auth === "iam" ? "AWS_IAM" : "NONE";
 }
 
 function roleNameFor(functionName: string): string {

@@ -22,17 +22,41 @@ export const BLOB_OPERATIONS = {
   list: ["list"],
 } as const satisfies Partial<Record<keyof BlobStore, readonly BlobAccess[]>>;
 
+export interface BlobStoreOptions {
+  // Confines the store to keys under this prefix; `cloudgear generate` scopes its permissions to it.
+  path?: string;
+  driver?: BlobDriver;
+}
+
+// "/img-cache" and "img-cache/" both become "img-cache/"; the bucket root is "".
+export function normalizeBlobPath(path: string): string {
+  const trimmed = path.replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`Invalid blob path "${path}": empty, "." and ".." segments are not allowed`);
+  }
+  // These would widen the generated IAM resource ("a*") or be expanded by it ("${aws:username}").
+  if (/[*?$]/.test(trimmed)) throw new Error(`Invalid blob path "${path}": "*", "?" and "$" are not allowed`);
+  return `${trimmed}/`;
+}
+
+// Declares that the enclosing function needs these accesses on a store the analyzer cannot trace.
+// A no-op at runtime; `cloudgear generate` reads it and stops widening on values passed around.
+export function grant(_store: BlobStore, ..._accesses: BlobAccess[]): void {}
+
 export class BlobStore {
   readonly name: string;
+  readonly path: string;
   private driverPromise?: Promise<BlobDriver>;
 
   constructor(
     readonly provider: BlobProvider,
     uri: string,
-    driver?: BlobDriver,
+    options: BlobStoreOptions = {},
   ) {
     this.name = parseBlobUri(provider, uri);
-    if (driver) this.driverPromise = Promise.resolve(driver);
+    this.path = normalizeBlobPath(options.path ?? "");
+    if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }
 
   // Env var holding a store's physical name once deployed; `cloudgear generate` sets it.
@@ -45,7 +69,7 @@ export class BlobStore {
   }
 
   async get(key: string): Promise<Uint8Array | null> {
-    return (await this.driver()).get(key);
+    return (await this.driver()).get(this.path + key);
   }
 
   async getText(key: string): Promise<string | null> {
@@ -59,24 +83,29 @@ export class BlobStore {
   }
 
   async exists(key: string): Promise<boolean> {
-    return (await this.driver()).exists(key);
+    return (await this.driver()).exists(this.path + key);
   }
 
   async put(key: string, data: BlobData | object, options: { contentType?: string } = {}): Promise<void> {
     const driver = await this.driver();
     if (typeof data === "string") {
-      return driver.put(key, new TextEncoder().encode(data), options.contentType ?? "text/plain");
+      return driver.put(this.path + key, new TextEncoder().encode(data), options.contentType ?? "text/plain");
     }
-    if (data instanceof Uint8Array) return driver.put(key, data, options.contentType);
-    return driver.put(key, new TextEncoder().encode(JSON.stringify(data)), options.contentType ?? "application/json");
+    if (data instanceof Uint8Array) return driver.put(this.path + key, data, options.contentType);
+    return driver.put(
+      this.path + key,
+      new TextEncoder().encode(JSON.stringify(data)),
+      options.contentType ?? "application/json",
+    );
   }
 
   async delete(key: string): Promise<void> {
-    return (await this.driver()).delete(key);
+    return (await this.driver()).delete(this.path + key);
   }
 
   async list(prefix = ""): Promise<string[]> {
-    return (await this.driver()).list(prefix);
+    const keys = await (await this.driver()).list(this.path + prefix);
+    return keys.map((key) => key.slice(this.path.length));
   }
 
   private driver(): Promise<BlobDriver> {

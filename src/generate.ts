@@ -12,7 +12,11 @@ export interface GenerateOptions {
   configPath: string;
   buildDir: string;
   project?: string;
+  invokers?: string[];
+  reservedConcurrency?: number;
 }
+
+const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
   const model = analyzeApp(options.entry);
@@ -45,17 +49,31 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     physicalNames.set(physical, fn.name);
   }
 
+  const invokers = [...new Set(options.invokers ?? [])].sort();
+  for (const invoker of invokers) {
+    if (!INVOKER.test(invoker)) {
+      throw new Error(`Invalid invoker "${invoker}"; expected an IAM role/user ARN or a 12-digit account id`);
+    }
+  }
+  const reservedConcurrency = options.reservedConcurrency ?? 0;
+  if (!Number.isInteger(reservedConcurrency) || reservedConcurrency < 0) {
+    throw new Error(`Invalid reserved concurrency "${reservedConcurrency}"; expected a non-negative integer`);
+  }
+
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
     const bundle = await bundleFunction({
       name: fn.name,
       sourceFile: fn.file,
       exportName: fn.exportName,
+      member: fn.member,
       routes: fn.routes,
       provider: model.provider,
+      authenticated: model.authenticated,
       outDir: options.buildDir,
     });
-    const used = [...fn.uses].filter(([, accesses]) => accesses.size > 0);
+    const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);
+    const usedResources = [...new Set(used.map((use) => use.resource))];
     functions.push({
       name: fn.name,
       type: profile.function.type,
@@ -63,14 +81,16 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       runtime: profile.function.runtime,
       memory_mb: profile.function.memoryMb,
       timeout_s: profile.function.timeoutS,
-      source: { file: fromConfig(fn.file), export: fn.exportName, input_type: fn.inputType },
+      source: { file: fromConfig(fn.file), export: fn.exportName, member: fn.member, input_type: fn.inputType },
       route: fn.routes,
       bundle: { path: fromConfig(bundle.file), sha256: bundle.sha256 },
-      permission: used.map(([resource, accesses]) => ({
-        resource,
-        action: [...new Set([...accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
+      permission: used.map((use) => ({
+        resource: use.resource,
+        path: use.path,
+        action: [...new Set([...use.accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
       })),
-      env: used.map(([resource]) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
+      env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
+      reserved_concurrency: reservedConcurrency,
     });
   }
 
@@ -85,6 +105,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       source: `${fromConfig(r.file)}:${r.line}`,
     })),
     function: functions,
+    invoker: invokers,
+    authenticated: model.authenticated,
   };
 
   fs.mkdirSync(configDir, { recursive: true });

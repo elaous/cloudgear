@@ -6,6 +6,8 @@ export interface CloudgearConfig {
   provider: string;
   resource: ResourceSpec[];
   function: FunctionSpec[];
+  invoker: string[];
+  authenticated: "iam" | "none";
 }
 
 export interface ResourceSpec {
@@ -23,12 +25,13 @@ export interface FunctionSpec {
   runtime: string;
   memory_mb: number;
   timeout_s: number;
-  source: { file: string; export: string; input_type?: string };
-  route: { method: string; path: string }[];
+  source: { file: string; export: string; member?: string; input_type?: string };
+  route: { method: string; path: string; name: string }[];
   bundle: { path: string; sha256: string };
-  permission: { resource: string; action: string[] }[];
+  permission: { resource: string; path: string; action: string[] }[];
   // value_from names a resource whose physical name becomes the value.
   env: { key: string; value?: string; value_from?: string }[];
+  reserved_concurrency: number;
 }
 
 const REPEATED = new Set([
@@ -38,6 +41,7 @@ const REPEATED = new Set([
   "function.permission",
   "function.permission.action",
   "function.env",
+  "invoker",
 ]);
 
 export function encodeConfig(config: CloudgearConfig): string {
@@ -53,6 +57,8 @@ export function decodeConfig(text: string): CloudgearConfig {
   const config: CloudgearConfig = {
     project: str(raw, "project"),
     provider: str(raw, "provider"),
+    invoker: (raw.invoker ?? []).map(String),
+    authenticated: raw.authenticated === "none" ? "none" : "iam",
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
       type: str(r, "type"),
@@ -67,16 +73,23 @@ export function decodeConfig(text: string): CloudgearConfig {
       runtime: str(f, "runtime"),
       memory_mb: Number(f.memory_mb ?? 128),
       timeout_s: Number(f.timeout_s ?? 10),
-      source: { file: str(f.source ?? {}, "file"), export: str(f.source ?? {}, "export"), input_type: f.source?.input_type },
-      route: (f.route ?? []).map((r: Record<string, any>) => ({ method: str(r, "method"), path: str(r, "path") })),
+      source: {
+        file: str(f.source ?? {}, "file"),
+        export: str(f.source ?? {}, "export"),
+        member: f.source?.member,
+        input_type: f.source?.input_type,
+      },
+      route: (f.route ?? []).map((r: Record<string, any>) => ({ method: str(r, "method"), path: str(r, "path"), name: String(r.name ?? "") })),
       bundle: { path: str(f.bundle ?? {}, "path"), sha256: str(f.bundle ?? {}, "sha256") },
       permission: (f.permission ?? []).map((p: Record<string, any>) => ({
         resource: str(p, "resource"),
+        path: String(p.path ?? ""),
         action: (p.action ?? []).map(String),
       })),
       env: (f.env ?? []).map((e: Record<string, any>) =>
         e.value_from !== undefined ? { key: str(e, "key"), value_from: str(e, "value_from") } : { key: str(e, "key"), value: String(e.value ?? "") },
       ),
+      reserved_concurrency: Number(f.reserved_concurrency ?? 0),
     })),
   };
   return config;

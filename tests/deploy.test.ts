@@ -18,10 +18,11 @@ const fn = (overrides: Partial<FunctionSpec> = {}): FunctionSpec => ({
   memory_mb: 256,
   timeout_s: 10,
   source: { file: "server/api.ts", export: "foo" },
-  route: [{ method: "POST", path: "/foo/{param}" }],
+  route: [{ method: "POST", path: "/foo/{param}", name: "foo" }],
   bundle: { path: "build/foo/index.mjs", sha256: "v1" },
-  permission: [{ resource: "data", action: ["s3:PutObject", "s3:ListBucket"] }],
+  permission: [{ resource: "data", path: "", action: ["s3:PutObject", "s3:ListBucket"] }],
   env: [{ key: "CLOUDGEAR_BLOB_DATA", value_from: "data" }],
+  reserved_concurrency: 0,
   ...overrides,
 });
 
@@ -33,6 +34,8 @@ const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig =
     { name: "legacy", type: "@aws.S3", physical_name: "legacy", dry: true, source: "a.ts:2" },
   ],
   function: [fn()],
+  invoker: [],
+  authenticated: "iam",
   ...overrides,
 });
 
@@ -133,12 +136,12 @@ describe("plan", () => {
     expect(actions[0]).toMatchObject({ op: "noop", key: "@aws.S3.data" });
     const spec = actions[2]!.desired!.spec as unknown as FunctionComparable;
     expect(spec.env).toEqual({ CLOUDGEAR_BLOB_DATA: "existing-bucket" });
-    expect(spec.permissions).toEqual([{ type: "@aws.S3", physical_name: "existing-bucket", actions: ["s3:ListBucket", "s3:PutObject"] }]);
+    expect(spec.permissions).toEqual([{ type: "@aws.S3", physical_name: "existing-bucket", path: "", actions: ["s3:ListBucket", "s3:PutObject"] }]);
   });
 });
 
 describe("aws drivers", () => {
-  test("apply creates the bucket, then role, policy, function and public URL", async () => {
+  test("apply creates the bucket, then role, policy, function and IAM-protected URL", async () => {
     const state = emptyState();
     const aws = await applyAll(baseConfig(), state);
 
@@ -150,8 +153,6 @@ describe("aws drivers", () => {
       "CreateFunctionCommand",
       "GetFunctionConfigurationCommand",
       "CreateFunctionUrlConfigCommand",
-      "AddPermissionCommand",
-      "AddPermissionCommand",
     ]);
     expect(aws.calls[0]!.input).toEqual({ Bucket: "data", CreateBucketConfiguration: { LocationConstraint: "eu-west-1" } });
     expect(JSON.parse(aws.calls[3]!.input.PolicyDocument)).toEqual({
@@ -174,6 +175,7 @@ describe("aws drivers", () => {
     });
     expect(endpointsFrom(baseConfig(), state)).toEqual({
       provider: "aws",
+      auth: "iam",
       routes: { "POST /foo/{param}": "https://app-foo.lambda-url.test/" },
     });
   });
@@ -231,6 +233,27 @@ describe("aws drivers", () => {
     expect(Object.keys(state.entries)).toEqual(["@aws.S3.data"]);
   });
 
+  test("policyDocument scopes object access and listing to a store's path", () => {
+    const doc = JSON.parse(
+      policyDocument({
+        permissions: [
+          { type: "@aws.S3", physical_name: "shared", path: "img-cache/", actions: ["s3:GetObject", "s3:ListBucket"] },
+          { type: "@aws.S3", physical_name: "shared", path: "", actions: ["s3:PutObject"] },
+        ],
+      } as unknown as FunctionComparable),
+    );
+    expect(doc.Statement).toEqual([
+      { Effect: "Allow", Action: ["s3:GetObject"], Resource: "arn:aws:s3:::shared/img-cache/*" },
+      {
+        Effect: "Allow",
+        Action: ["s3:ListBucket"],
+        Resource: "arn:aws:s3:::shared",
+        Condition: { StringLike: { "s3:prefix": ["img-cache/*"] } },
+      },
+      { Effect: "Allow", Action: ["s3:PutObject"], Resource: "arn:aws:s3:::shared/*" },
+    ]);
+  });
+
   test("policyDocument refuses resource types it has no mapping for", () => {
     expect(() =>
       policyDocument({ permissions: [{ type: "@gcp.Storage", physical_name: "x", actions: [] }] } as unknown as FunctionComparable),
@@ -238,25 +261,134 @@ describe("aws drivers", () => {
   });
 });
 
-describe("invoke token", () => {
-  test("is part of every function's env and of the endpoints file", async () => {
-    const state = emptyState();
-    state.invoke_token = "tok";
-    const spec = plan(baseConfig(), state).find((a) => a.kind === "function")!.desired!.spec as unknown as FunctionComparable;
-    expect(spec.env).toMatchObject({ CLOUDGEAR_INVOKE_TOKEN: "tok", CLOUDGEAR_BLOB_DATA: "data" });
+describe("function URL access", () => {
+  const ROLE = "arn:aws:iam::123456789012:role/vercel";
 
-    const aws = await applyAll(baseConfig(), state);
-    const create = aws.calls.find((c) => c.name === "CreateFunctionCommand")!;
-    expect(create.input.Environment.Variables.CLOUDGEAR_INVOKE_TOKEN).toBe("tok");
-    expect(endpointsFrom(baseConfig(), state).token).toBe("tok");
+  test("URLs require AWS_IAM and nobody is granted access unless named as an invoker", async () => {
+    const aws = await applyAll(baseConfig(), emptyState());
+    const url = aws.calls.find((c) => c.name === "CreateFunctionUrlConfigCommand")!;
+    expect(url.input.AuthType).toBe("AWS_IAM");
+    expect(aws.names()).not.toContain("AddPermissionCommand");
   });
 
-  test("rotating it is a config update", async () => {
+  test("each invoker gets InvokeFunctionUrl and InvokeFunction, scoped to the URL", async () => {
+    const aws = await applyAll(baseConfig({ invoker: [ROLE] }), emptyState());
+    const grants = aws.calls.filter((c) => c.name === "AddPermissionCommand").map((c) => c.input);
+    expect(grants).toMatchObject([
+      { Action: "lambda:InvokeFunctionUrl", Principal: ROLE, FunctionUrlAuthType: "AWS_IAM" },
+      { Action: "lambda:InvokeFunction", Principal: ROLE, InvokedViaFunctionUrl: true },
+    ]);
+    expect(new Set(grants.map((g) => g.StatementId)).size).toBe(2);
+  });
+
+  test("changing invokers adds and removes only the difference", async () => {
+    const other = "123456789012";
     const state = emptyState();
-    state.invoke_token = "one";
+    await applyAll(baseConfig({ invoker: [ROLE] }), state);
+    const next = baseConfig({ invoker: [other] });
+    expect(plan(next, state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["invokers"] });
+
+    const aws = await applyAll(next, state);
+    expect(aws.names()).toEqual([
+      "RemovePermissionCommand",
+      "RemovePermissionCommand",
+      "AddPermissionCommand",
+      "AddPermissionCommand",
+    ]);
+    expect(aws.calls.filter((c) => c.name === "AddPermissionCommand").every((c) => c.input.Principal === other)).toBe(true);
+  });
+
+  test("reserved concurrency is set on create and updated or cleared on change", async () => {
+    const state = emptyState();
+    const created = await applyAll(baseConfig({ function: [fn({ reserved_concurrency: 5 })] }), state);
+    expect(created.calls.find((c) => c.name === "PutFunctionConcurrencyCommand")!.input).toEqual({
+      FunctionName: "app-foo",
+      ReservedConcurrentExecutions: 5,
+    });
+
+    const raised = await applyAll(baseConfig({ function: [fn({ reserved_concurrency: 8 })] }), state);
+    expect(raised.names()).toEqual(["UpdateFunctionConfigurationCommand", "GetFunctionConfigurationCommand", "PutFunctionConcurrencyCommand"]);
+
+    const cleared = await applyAll(baseConfig(), state);
+    expect(cleared.names()).toContain("DeleteFunctionConcurrencyCommand");
+  });
+
+  test("authenticated: none creates a public URL and ignores invokers", async () => {
+    const aws = await applyAll(baseConfig({ authenticated: "none", invoker: [ROLE] }), emptyState());
+    expect(aws.calls.find((c) => c.name === "CreateFunctionUrlConfigCommand")!.input.AuthType).toBe("NONE");
+    expect(aws.calls.filter((c) => c.name === "AddPermissionCommand").map((c) => c.input)).toMatchObject([
+      { Action: "lambda:InvokeFunctionUrl", Principal: "*", FunctionUrlAuthType: "NONE" },
+      { Action: "lambda:InvokeFunction", Principal: "*", InvokedViaFunctionUrl: true },
+    ]);
+  });
+
+  test("switching between iam and none swaps the URL auth type and its permissions", async () => {
+    const state = emptyState();
+    await applyAll(baseConfig({ invoker: [ROLE] }), state);
+
+    const toPublic = baseConfig({ authenticated: "none", invoker: [ROLE] });
+    expect(plan(toPublic, state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["auth", "invokers"] });
+    const opened = await applyAll(toPublic, state);
+    expect(opened.names()).toEqual([
+      "UpdateFunctionUrlConfigCommand",
+      "RemovePermissionCommand",
+      "RemovePermissionCommand",
+      "AddPermissionCommand",
+      "AddPermissionCommand",
+    ]);
+    expect(opened.calls[0]!.input.AuthType).toBe("NONE");
+
+    const closed = await applyAll(baseConfig({ invoker: [ROLE] }), state);
+    expect(closed.calls[0]!.input.AuthType).toBe("AWS_IAM");
+    expect(closed.calls.filter((c) => c.name === "RemovePermissionCommand").map((c) => c.input.StatementId)).toEqual([
+      "cloudgear-public-url",
+      "cloudgear-public-invoke",
+    ]);
+    expect(closed.calls.filter((c) => c.name === "AddPermissionCommand").every((c) => c.input.Principal === ROLE)).toBe(true);
+  });
+
+  test("retrying after a partial permission update tolerates statements that already exist", async () => {
+    const aws = fakeAws({
+      AddPermissionCommand: () => {
+        throw Object.assign(new Error("The statement id (cloudgear-url-abc) provided already exists. Please provide a new statement id."), {
+          name: "ResourceConflictException",
+        });
+      },
+    });
+    await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).resolves.toBeDefined();
+    expect(aws.names().filter((n) => n === "AddPermissionCommand")).toHaveLength(2);
+  });
+
+  test("a conflict because the function is mid-update is not swallowed", async () => {
+    const aws = fakeAws({
+      AddPermissionCommand: () => {
+        throw Object.assign(new Error("The operation cannot be performed at this time. An update is in progress for resource."), {
+          name: "ResourceConflictException",
+        });
+      },
+    });
+    await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).rejects.toThrow(/update is in progress/);
+  });
+
+  test("other permission errors still fail", async () => {
+    const aws = fakeAws({
+      AddPermissionCommand: () => {
+        throw Object.assign(new Error("denied"), { name: "AccessDeniedException" });
+      },
+    });
+    await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).rejects.toThrow("denied");
+  });
+
+  test("endpoints record the authentication mode", async () => {
+    const state = emptyState();
+    await applyAll(baseConfig({ authenticated: "none" }), state);
+    expect(endpointsFrom(baseConfig({ authenticated: "none" }), state).auth).toBe("none");
+  });
+
+  test("endpoints are marked as IAM-authenticated", async () => {
+    const state = emptyState();
     await applyAll(baseConfig(), state);
-    state.invoke_token = "two";
-    expect(plan(baseConfig(), state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["config"] });
+    expect(endpointsFrom(baseConfig(), state).auth).toBe("iam");
   });
 });
 

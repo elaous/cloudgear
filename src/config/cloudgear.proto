@@ -9,6 +9,10 @@ message Config {
   string provider = 2;
   repeated Resource resource = 3;
   repeated Function function = 4;
+  // IAM principals (role/user ARNs or account ids) allowed to invoke the functions.
+  repeated string invoker = 5;
+  // "iam" (callers must sign requests) or "none" (public function URLs).
+  string authenticated = 6;
 }
 
 message Resource {
@@ -36,17 +40,23 @@ message Function {
   Bundle bundle = 9;
   repeated Permission permission = 10;
   repeated Env env = 11;
+  // 0 leaves concurrency unreserved.
+  int32 reserved_concurrency = 12;
 }
 
 message Source {
   string file = 1;
   string export = 2;
   string input_type = 3;
+  // Set when the function is a method of the exported object `export`.
+  string member = 4;
 }
 
 message Route {
   string method = 1;
   string path = 2;
+  // Nickname used as the key in FunctionRouter.listen() results.
+  string name = 3;
 }
 
 message Bundle {
@@ -59,6 +69,8 @@ message Permission {
   // Logical name of a Resource.
   string resource = 1;
   repeated string action = 2;
+  // Key prefix the access is confined to; empty means the whole bucket.
+  string path = 3;
 }
 
 message Env {

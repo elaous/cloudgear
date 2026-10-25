@@ -1,3 +1,3 @@
 import { FunctionRouter } from "@cloudgear/functions";
 
-new FunctionRouter("aws").add("GET", "/inline", () => ({}));
+new FunctionRouter("aws").url("GET", "/inline", () => ({}));

@@ -29,10 +29,23 @@ describe("cloudgear CLI", () => {
   });
 
   test("generate, plan, import, plan", () => {
-    const generated = run("generate", entry, "--project", "demo");
+    const generated = run(
+      "generate",
+      entry,
+      "--project",
+      "demo",
+      "--invoker",
+      "arn:aws:iam::123456789012:role/vercel",
+      "--reserved-concurrency",
+      "3",
+    );
     expect(generated.err).toBe("");
     expect(generated.out).toMatch(/3 function\(s\), 2 resource\(s\)/);
     expect(fs.existsSync(path.join(dir, ".cloudgear/build/foo/index.mjs"))).toBe(true);
+
+    const text = fs.readFileSync(config(), "utf8");
+    expect(text).toContain('invoker: "arn:aws:iam::123456789012:role/vercel"');
+    expect(text.match(/reserved_concurrency: 3/g)).toHaveLength(3);
 
     const first = run("plan");
     expect(first.out).toContain("= @aws.S3 myblob (dry");
@@ -45,6 +58,12 @@ describe("cloudgear CLI", () => {
     const second = run("plan");
     expect(second.out).toContain("Plan: 3 to create");
     expect(second.out).not.toContain("+ @aws.S3");
+  });
+
+  test("generate rejects a malformed invoker", () => {
+    const res = run("generate", entry, "--invoker", "not-an-arn");
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/Invalid invoker "not-an-arn"/);
   });
 
   test("import refuses to replace a resource cloudgear manages", () => {

@@ -1,5 +1,3 @@
 node_modules/
-generated-stack.ts
-resources.toml
 .cloudgear/
 cloudgear.prototxt

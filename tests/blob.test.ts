@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   BLOB_OPERATIONS,
   BlobStore,
+  grant,
+  normalizeBlobPath,
   registerBlobDriver,
   parseBlobUri,
   type BlobDriver,
@@ -26,7 +28,7 @@ describe("parseBlobUri", () => {
 
 describe("BlobStore", () => {
   test("round-trips text, JSON and bytes through any driver", async () => {
-    const store = new BlobStore("aws", "://test", new MemoryBlobDriver());
+    const store = new BlobStore("aws", "://test", { driver: new MemoryBlobDriver() });
     await store.put("a.txt", "hello");
     await store.put("b.json", { n: 1 });
     await store.put("c.bin", new Uint8Array([1, 2]));
@@ -51,7 +53,7 @@ describe("BlobStore", () => {
       ...new MemoryBlobDriver(),
       put: async (key, _data, contentType) => void puts.push([key, contentType]),
     } as BlobDriver;
-    const store = new BlobStore("aws", "://ct", driver);
+    const store = new BlobStore("aws", "://ct", { driver });
     await store.put("t", "x");
     await store.put("j", { a: 1 });
     await store.put("b", new Uint8Array(1));
@@ -117,6 +119,44 @@ describe("BlobStore", () => {
   });
 });
 
+describe("BlobStore path prefix", () => {
+  test("normalizeBlobPath accepts slashes either way and rejects odd segments", () => {
+    expect(normalizeBlobPath("/img-cache/")).toBe("img-cache/");
+    expect(normalizeBlobPath("img-cache")).toBe("img-cache/");
+    expect(normalizeBlobPath("a/b")).toBe("a/b/");
+    expect(normalizeBlobPath("/")).toBe("");
+    expect(normalizeBlobPath("")).toBe("");
+    for (const bad of ["a//b", "../x", "a/./b", "a/../b"]) expect(() => normalizeBlobPath(bad)).toThrow(/Invalid blob path/);
+    for (const bad of ["a*", "a?b", "${aws:username}", "x/$y"]) {
+      expect(() => normalizeBlobPath(bad)).toThrow(/"\*", "\?" and "\$" are not allowed/);
+    }
+  });
+
+  test("keys are stored under the prefix and list() strips it again", async () => {
+    const shared = new MemoryBlobDriver();
+    const root = new BlobStore("aws", "://bucket", { driver: shared });
+    const images = new BlobStore("aws", "://bucket", { path: "/img-cache/", driver: shared });
+    await root.put("other.txt", "outside");
+    await images.put("a.png", "A");
+    await images.put("nested/b.png", "B");
+
+    expect(await root.list()).toEqual(["img-cache/a.png", "img-cache/nested/b.png", "other.txt"]);
+    expect(await images.list()).toEqual(["a.png", "nested/b.png"]);
+    expect(await images.list("nested/")).toEqual(["nested/b.png"]);
+    expect(await images.getText("a.png")).toBe("A");
+    expect(await images.exists("other.txt")).toBe(false);
+    expect(await images.getText("other.txt")).toBeNull();
+
+    await images.delete("a.png");
+    expect(await root.exists("img-cache/a.png")).toBe(false);
+    expect(images.path).toBe("img-cache/");
+  });
+
+  test("grant is a runtime no-op", () => {
+    expect(grant(new BlobStore("aws", "://g"), "read", "write")).toBeUndefined();
+  });
+});
+
 describe("S3BlobDriver", () => {
   const client = (respond: (name: string, input: any) => any) =>
     ({ send: async (command: any) => respond(command.constructor.name, command.input) }) as any;
@@ -131,6 +171,12 @@ describe("S3BlobDriver", () => {
     const denied = new S3BlobDriver("b", client(() => { throw notFound("AccessDenied"); }));
     await expect(denied.get("k")).rejects.toThrow("AccessDenied");
     await expect(denied.exists("k")).rejects.toThrow("AccessDenied");
+  });
+
+  test("explains that AccessDenied can mean a missing key", async () => {
+    const driver = new S3BlobDriver("b", client(() => { throw notFound("AccessDenied"); }));
+    await expect(driver.get("k")).rejects.toThrow(/AccessDenied.*missing key when the caller cannot list the whole bucket/);
+    await expect(driver.exists("k")).rejects.toThrow(/missing key/);
   });
 
   test("sends bucket, key and content type, and pages through list results", async () => {

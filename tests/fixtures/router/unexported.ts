@@ -4,4 +4,4 @@ function hidden() {
   return {};
 }
 
-new FunctionRouter("aws").add("GET", "/hidden", hidden);
+new FunctionRouter("aws").url("GET", "/hidden", hidden);

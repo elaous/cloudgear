@@ -6,9 +6,6 @@ export type Provider = "aws" | "gcp" | "azure";
 // Body of a router -> function call: the already-assembled input object.
 export const INVOKE_CONTENT_TYPE = "application/vnd.cloudgear.invoke+json";
 export const ROUTE_HEADER = "x-cloudgear-route";
-export const TOKEN_HEADER = "x-cloudgear-token";
-// Set on deployed functions; the router must present it to invoke them.
-export const TOKEN_ENV = "CLOUDGEAR_INVOKE_TOKEN";
 
 export type PathParams<P extends string> = P extends `${string}{${infer Name}}${infer Rest}`
   ? Name | PathParams<Rest>
@@ -24,7 +21,17 @@ export interface CloudgearResponse<T = unknown> {
 }
 
 // O may include CloudgearResponse values to set status or headers.
-export type Handler<I = any, O = unknown> = (input: I) => O | Promise<O>;
+export type Handler<I = any, O = unknown> = (input: I, context: RequestContext) => O | Promise<O>;
+
+// Who is calling, as established by the router's `authenticate` hook.
+export interface Principal {
+  subject: string;
+  claims: Record<string, unknown>;
+}
+
+export interface RequestContext {
+  auth?: Principal;
+}
 
 export interface RouteSpec {
   method: Method;
@@ -118,9 +125,9 @@ export function parseBody(text: string, contentType: string | null): unknown {
   return text;
 }
 
-export async function invoke(fn: Handler, input: unknown): Promise<HttpResult> {
+export async function invoke(fn: Handler, input: unknown, context: RequestContext = {}): Promise<HttpResult> {
   try {
-    return toHttpResult(await fn(input));
+    return toHttpResult(await fn(input, context));
   } catch (err) {
     console.error(err);
     return toHttpResult(response({ error: "Internal Server Error" }, { status: 500 }));

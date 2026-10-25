@@ -5,8 +5,12 @@ export interface BundleRequest {
   name: string;
   sourceFile: string;
   exportName: string;
+  // Method name when the routed function lives on the exported object `exportName`.
+  member?: string;
   routes: { method: string; path: string }[];
   provider: string;
+  // Whether the function trusts the router-supplied caller identity.
+  authenticated: "iam" | "none";
   outDir: string;
 }
 
@@ -15,7 +19,7 @@ export interface BundleResult {
   sha256: string;
 }
 
-const ADAPTERS: Record<string, string> = { aws: "@cloudgear/functions/aws" };
+const ADAPTERS: Record<string, string> = { aws: "@cloudgear/functions/drivers/aws" };
 
 // One self-contained ESM file per function: its module, every import it
 // reaches and their node_modules, wrapped in the provider's handler adapter.
@@ -35,8 +39,13 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
     entry,
     [
       `import { createHandler } from ${JSON.stringify(adapterPath)};`,
-      `import { ${req.exportName} as fn } from ${JSON.stringify(source)};`,
-      `export const handler = createHandler(fn, ${JSON.stringify(req.routes)});`,
+      ...(req.member
+        ? [
+            `import { ${req.exportName} as root } from ${JSON.stringify(source)};`,
+            `const fn = root[${JSON.stringify(req.member)}].bind(root);`,
+          ]
+        : [`import { ${req.exportName} as fn } from ${JSON.stringify(source)};`]),
+      `export const handler = createHandler(fn, ${JSON.stringify(req.routes)}, { trustContext: ${req.authenticated === "iam"} });`,
       "",
     ].join("\n"),
   );

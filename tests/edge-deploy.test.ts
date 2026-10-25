@@ -118,6 +118,27 @@ describe("applying the edge", () => {
     expect(state.entries[CDN_KEY]!.deps).toEqual([CERT_KEY, "@aws.S3.data", "@aws.Lambda.foo"]);
   });
 
+  test("each step is reported, in order, as it happens", async () => {
+    const aws = await applyAll(cdnConfig(), emptyState());
+    const steps = [
+      /requested a certificate for cdn\.example\.com/,
+      /waiting for ACM's DNS validation record/,
+      /wrote validation record _v1\.cdn\.example\.com/,
+      /waiting for the certificate to be issued/,
+      /certificate issued/,
+      /creating origin access controls/,
+      /creating the distribution for cdn\.example\.com/,
+      /distribution E1 will be served from d111\.cloudfront\.net/,
+      /allowing the distribution to read data and call 1 function\(s\)/,
+      /pointing cdn\.example\.com at d111\.cloudfront\.net/,
+      /waiting for the distribution to deploy/,
+      /cdn\.example\.com is live/,
+    ];
+    const positions = steps.map((step) => aws.logs.findIndex((line) => step.test(line)));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
   test("the distribution serves the site from the bucket and routes to the function", async () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const config = aws.of("CreateDistributionCommand")[0].DistributionConfig;

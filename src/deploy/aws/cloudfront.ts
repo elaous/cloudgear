@@ -190,6 +190,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
     }
 
+    deps.log("creating origin access controls");
     outputs.oac_s3 = await ensureOac(`cloudgear-${spec.domain}-s3`, "s3", outputs.oac_s3);
     if (origins.size) outputs.oac_lambda = await ensureOac(`cloudgear-${spec.domain}-lambda`, "lambda", outputs.oac_lambda);
 
@@ -197,21 +198,28 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: deps.region, oacS3: outputs.oac_s3!, oacLambda: outputs.oac_lambda, origins, reference, enabled });
 
     if (!outputs.id) {
+      deps.log(`creating the distribution for ${spec.domain}`);
       const created = await deps.cloudfront.send(new CreateDistributionCommand({ DistributionConfig: config(`cloudgear-${tag(spec.domain)}-${Date.now()}`) }));
       outputs.id = created.Distribution.Id;
       outputs.arn = created.Distribution.ARN;
       outputs.domain_name = created.Distribution.DomainName;
+      deps.log(`distribution ${outputs.id} will be served from ${outputs.domain_name}`);
     } else {
+      deps.log(`updating distribution ${outputs.id}`);
       const current = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: outputs.id }));
       await deps.cloudfront.send(
         new UpdateDistributionCommand({ Id: outputs.id, IfMatch: current.ETag, DistributionConfig: config(current.DistributionConfig.CallerReference) }),
       );
     }
 
+    deps.log(`allowing the distribution to read ${spec.bucket} and call ${origins.size} function(s)`);
     await putBucketStatements(spec, outputs.arn!);
     for (const origin of origins.values()) await allowDistribution(origin.physical, spec.domain, outputs.arn!);
+    deps.log(`pointing ${spec.domain} at ${outputs.domain_name}`);
     await dns.upsert({ name: spec.domain, type: "CNAME", values: [outputs.domain_name!], ttl: 300 });
+    deps.log("waiting for the distribution to deploy");
     outputs.status = (await waitDeployed(outputs.id!)) ? "Deployed" : "InProgress";
+    if (outputs.status === "Deployed") deps.log(`${spec.domain} is live`);
     return outputs;
   }
 

@@ -339,7 +339,10 @@ describe("applying the edge", () => {
     expect(endpointsFrom(cdnConfig(), emptyState()).cdn).toBeUndefined();
     const state = emptyState();
     await applyAll(cdnConfig(), state);
+    expect(state.entries[CDN_KEY]!.outputs.url).toBe("https://d111.cloudfront.net");
     expect(endpointsFrom(cdnConfig(), state).cdn).toEqual({ domain: DOMAIN, url: "https://d111.cloudfront.net", id: "E1" });
+    delete state.entries[CDN_KEY]!.outputs.url;
+    expect(endpointsFrom(cdnConfig(), state).cdn!.url).toBe("https://d111.cloudfront.net");
     expect(endpointsFrom(cdnConfig({ cdn: undefined }), state).cdn).toBeUndefined();
   });
 });

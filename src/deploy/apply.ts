@@ -138,7 +138,7 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
   }
   const distribution = config.cdn && state.entries[stateKey({ type: "@aws.CloudFront", name: config.cdn.domain })];
   const cdn = distribution?.outputs.domain_name
-    ? { domain: config.cdn!.domain, url: `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }
+    ? { domain: config.cdn!.domain, url: distribution.outputs.url ?? `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }
     : undefined;
   return { provider: config.provider, routes, auth: config.authenticated, ...(cdn ? { cdn } : {}) };
 }

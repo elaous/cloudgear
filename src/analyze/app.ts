@@ -98,6 +98,8 @@ export interface AppModel extends EdgeModel {
 
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
 const KNOWN_DIRECTIVES = new Set(["dry"]);
+const PERMISSIONS = { Get: "read", Put: "write", Delete: "delete", List: "list" } as const;
+const permissionName = (access: BlobAccess) => `permissions.${Object.entries(PERMISSIONS).find(([, a]) => a === access)![0]}`;
 const ALL_ACCESS = [...new Set(Object.values(BLOB_OPERATIONS).flat())] as BlobAccess[];
 
 export function analyzeApp(entryPath: string): AppModel {
@@ -215,7 +217,19 @@ export function analyzeApp(entryPath: string): AppModel {
       };
       const tallies = new Map<string, Tally>();
       collectUsage(fnNode, tallies, new Set());
+      const policies = readPolicies(fnNode, fn.name);
+      for (const [key, allowed] of policies) {
+        const tally = tallies.get(key);
+        const extra = [...(tally ? [...tally.ops, ...tally.grants] : [])].filter((access) => !allowed.has(access));
+        if (tally && extra.length) {
+          throw new Error(
+            `${where(decl)}: "${fn.name}" needs ${[...new Set(extra)].map((a) => permissionName(a)).join(", ")} on "${tally.store.resource.name}", which its @policy does not allow`,
+          );
+        }
+      }
       for (const [key, tally] of tallies) {
+        const policy = policies.get(key);
+        if (policy) continue;
         let accesses = new Set([...tally.ops, ...tally.grants]);
         if (tally.widenedAt && tally.grants.size === 0) {
           accesses = new Set(ALL_ACCESS);
@@ -224,6 +238,10 @@ export function analyzeApp(entryPath: string): AppModel {
           );
         }
         fn.uses.set(key, { resource: tally.store.resource.name, path: tally.store.path, accesses });
+      }
+      for (const [key, accesses] of policies) {
+        const [resource, storePath] = key.split("\0") as [string, string];
+        fn.uses.set(key, { resource, path: storePath, accesses });
       }
       functions.set(decl, fn);
     }
@@ -283,6 +301,8 @@ export function analyzeApp(entryPath: string): AppModel {
       if (!Node.isIdentifier(node)) return;
       for (const decl of declarationsOf(node)) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
+        // `@policy(store, ...)` is read separately, and is not a use of the store.
+        if (node.getFirstAncestorByKind(SyntaxKind.Decorator)) continue;
         const store = resourceByDecl.get(decl);
         if (store) {
           const key = `${store.resource.name}\0${store.path}`;
@@ -545,6 +565,49 @@ export function analyzeApp(entryPath: string): AppModel {
         }
       }
     }
+  }
+
+  // Permissions a routed method declares with `@policy(store, { permissions: [...] })`, by store key.
+  function readPolicies(fnNode: Node, fnName: string): Map<string, Set<BlobAccess>> {
+    const result = new Map<string, Set<BlobAccess>>();
+    if (!Node.isMethodDeclaration(fnNode)) return result;
+    for (const decorator of fnNode.getDecorators()) {
+      const call = decorator.getCallExpression();
+      const callee = call?.getExpression();
+      const decl = callee && Node.isIdentifier(callee) ? resolveSymbol(callee.getSymbol())?.getDeclarations()[0] : undefined;
+      const isPolicy =
+        !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "policy" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob";
+      if (!call || !isPolicy) continue;
+      const at = where(decorator);
+      const [storeArg, optionsArg] = call.getArguments();
+      const storeDecl = storeArg && Node.isIdentifier(storeArg) ? resolveSymbol(storeArg.getSymbol())?.getDeclarations()[0] : undefined;
+      const store = storeDecl && resourceByDecl.get(storeDecl);
+      if (!store) throw new Error(`${at}: @policy needs a BlobStore variable declared in your project as its first argument`);
+      const list =
+        optionsArg && Node.isObjectLiteralExpression(optionsArg)
+          ? optionsArg.getProperties().find((p) => propName(p) === "permissions")
+          : undefined;
+      const array = list && Node.isPropertyAssignment(list) ? list.getInitializer() : undefined;
+      if (!array || !Node.isArrayLiteralExpression(array)) throw new Error(`${at}: @policy needs { permissions: [...] } as an array literal`);
+      const accesses = new Set<BlobAccess>();
+      for (const element of array.getElements()) accesses.add(readPermission(element, at));
+      if (accesses.size === 0) throw new Error(`${at}: @policy for "${fnName}" lists no permissions`);
+      const key = `${store.resource.name}\0${store.path}`;
+      result.set(key, new Set([...(result.get(key) ?? []), ...accesses]));
+    }
+    return result;
+  }
+
+  function readPermission(element: Node, at: string): BlobAccess {
+    if (Node.isPropertyAccessExpression(element)) {
+      const root = element.getExpression();
+      const decl = Node.isIdentifier(root) ? resolveSymbol(root.getSymbol())?.getDeclarations()[0] : undefined;
+      const access = PERMISSIONS[element.getName() as keyof typeof PERMISSIONS];
+      if (access && decl && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob") return access;
+    } else if (Node.isStringLiteral(element) && ALL_ACCESS.includes(element.getLiteralValue() as BlobAccess)) {
+      return element.getLiteralValue() as BlobAccess;
+    }
+    throw new Error(`${at}: @policy permissions must be permissions.Get/Put/Delete/List from @cloudgear/blob, got: ${element.getText()}`);
   }
 
   function accessesAt(start: Node): { ops?: BlobAccess[]; grants?: BlobAccess[]; widened?: true } {
@@ -814,6 +877,10 @@ function exportTargetOf(decl: Node): { exportName: string; member?: string } | u
   if (direct) return { exportName: direct };
   if (!Node.isMethodDeclaration(decl) && !Node.isPropertyAssignment(decl)) return undefined;
   const object = decl.getParent();
+  if (Node.isMethodDeclaration(decl) && Node.isClassDeclaration(object)) {
+    const exported = exportNameOf(object);
+    return exported && decl.isStatic() && /^[A-Za-z_$][\w$]*$/.test(decl.getName()) ? { exportName: exported, member: decl.getName() } : undefined;
+  }
   const variable = Node.isObjectLiteralExpression(object) ? object.getParentIfKind(SyntaxKind.VariableDeclaration) : undefined;
   const exportName = variable && variable.getInitializer() === object ? exportNameOf(variable) : undefined;
   const member = decl.getName();

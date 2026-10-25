@@ -47,6 +47,20 @@ export function normalizeBlobPath(path: string): string {
 // A no-op at runtime; `cloudgear generate` reads it and stops widening on values passed around.
 export function grant(_store: BlobStore, ..._accesses: BlobAccess[]): void {}
 
+// Names for `@policy` permission lists: `permissions.Get`, `permissions.Put`, ...
+export const permissions = { Get: "read", Put: "write", Delete: "delete", List: "list" } as const satisfies Record<string, BlobAccess>;
+
+export interface PolicyOptions {
+  permissions: readonly BlobAccess[];
+}
+
+// Method decorator for a static method of an exported class: the routed function gets exactly these
+// permissions on `store`, and `cloudgear generate` fails if the function does more. Needs literals.
+// A no-op at runtime.
+export function policy(_store: BlobStore, _options: PolicyOptions) {
+  return (_method: unknown, _context: ClassMethodDecoratorContext): void => {};
+}
+
 export class BlobStore {
   readonly name: string;
   readonly path: string;

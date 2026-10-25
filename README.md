@@ -246,6 +246,15 @@ Rules the analyzer enforces:
 
 - One `DNS`, one `Cert` and one `CDN` per app, each assigned to a variable
   with literal arguments, and the `Cert` and `CDN` MUST use that `DNS`.
+- A `Cert` needs no `CDN`: declare only `DNS` and `Cert` to get a validated
+  certificate (it may then cover the zone apex, which a CDN cannot serve).
+  Like `BlobStore` and `DNS`, `Cert` has drivers: `cert.status()` asks AWS
+  Certificate Manager (`us-east-1`) for the newest certificate of the domain
+  and returns `{ state: "none" | "pending" | "issued" | "failed", id? }`.
+  Register another with `registerCertDriver()`, or set
+  `CLOUDGEAR_CERT_DRIVER=memory` for tests.
+- `examples/cdn-app` is a complete app: DNS, certificate, CDN and a routed
+  function with a `@policy`.
 - The router's `cdn` MUST be that `CDN`, and CloudFront reaches functions
   through an origin access control, so the router MUST be `authenticated:
   "iam"` (the default).
@@ -397,6 +406,26 @@ When a function calls `grant(store, ...)`, that store is no longer widened
 to every operation for being passed around; the granted accesses (plus any
 direct calls) are used instead.
 
+Alternatively declare a function's permissions with `@policy`, a method
+decorator. TypeScript only decorates class members, so the routed function is
+a `static` method of an exported class:
+
+```ts
+import { BlobStore, permissions, policy } from "@cloudgear/blob";
+
+export class Local {
+  @policy(bucket, { permissions: [permissions.Get, permissions.Put, permissions.List] })
+  static async getObjects({ param }: { param: string }) { /* ... */ }
+}
+router.url("GET", "/objects/{param}", Local.getObjects);
+```
+
+The policy is the guard: those are exactly the function's permissions on that
+store (even if unused), and `generate` fails if the function's code needs more
+(for example calls `put` without `permissions.Put`). `permissions` are
+`Get`, `Put`, `Delete` and `List` (`exists` needs `Get` and `List`); the store
+and the list MUST be literal. It is a no-op at runtime.
+
 Requirements the analyzer enforces:
 
 - Exactly one `FunctionRouter` per app; provider, method and path MUST be
@@ -513,6 +542,8 @@ Where each moving part lives, since several are called across packages:
 | `DNS`, `registerDnsDriver` | `packages/dns/index.ts` | apps; `src/analyze/app.ts` |
 | Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` (used by `DNS` and `src/cli.ts`) |
 | `Cert`, `CDN` | `packages/cdn/index.ts` | apps; `src/analyze/app.ts` |
+| Cert drivers (`acm`, `memory`) | `packages/cdn/cert-driver.ts`, `packages/cdn/drivers/` | `Cert.status()` |
+| `policy`, `permissions` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | certificate and CloudFront drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts` | `awsDrivers` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |

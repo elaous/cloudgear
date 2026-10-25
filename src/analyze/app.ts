@@ -217,7 +217,7 @@ export function analyzeApp(entryPath: string): AppModel {
     entry: relative(entry),
     resources: [...resources.values()],
     functions: [...functions.values()],
-    warnings,
+    warnings: [...new Set(warnings)],
   };
 
   function collectUsage(root: Node, tallies: Map<string, Tally>, visited: Set<Node>) {
@@ -331,6 +331,7 @@ function propName(prop: Node): string | undefined {
   const key = prop.getNameNode();
   if (Node.isIdentifier(key)) return key.getText();
   if (Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key)) return key.getLiteralValue();
+  if (Node.isNumericLiteral(key)) return key.getLiteralText();
   throw new Error(`${relative(prop.getSourceFile().getFilePath())}:${prop.getStartLineNumber()}: computed property keys cannot be analyzed`);
 }
 
@@ -463,7 +464,11 @@ function readStorePath(options: Node | undefined, at: string): string {
 // A routed function is bundled through a named export, or as a method of an exported object.
 function declaredNameOf(decl: Node): string {
   if (Node.isFunctionDeclaration(decl)) return decl.getName() ?? "";
-  if (Node.isVariableDeclaration(decl)) return decl.getName();
+  if (Node.isVariableDeclaration(decl)) {
+    const init = decl.getInitializer();
+    // `const d = function inner() {}` has the runtime name "inner".
+    return Node.isFunctionExpression(init) && init.getName() ? init.getName()! : decl.getName();
+  }
   if (Node.isMethodDeclaration(decl) || Node.isPropertyAssignment(decl)) return propName(decl) ?? "";
   return "";
 }

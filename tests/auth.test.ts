@@ -64,6 +64,22 @@ describe("jwtAuth", () => {
     expect(await jwtAuth({ issuer, audience: "app" })(request(token))).toBeNull();
   });
 
+  test("token-controlled oddities are 401s, not 503s: no kid against several keys, unsupported crit", async () => {
+    const second = { ...(await exportJWK((await generateKeyPair("RS256")).publicKey)), kid: "k2", alg: "RS256", use: "sig" };
+    const multi = Bun.serve({ port: 0, fetch: () => Response.json({ keys: [jwks.keys[0], second] }) });
+    try {
+      const authenticate = jwtAuth({ issuer, audience: "app", jwksUri: multi.url.href });
+      const noKid = await new SignJWT({}).setProtectedHeader({ alg: "RS256" }).setIssuer(issuer).setAudience("app").setSubject("u").setExpirationTime("5m").sign(privateKey);
+      expect(await authenticate(request(noKid))).toBeNull();
+
+      const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+      const crit = `${encode({ alg: "RS256", kid: "k1", crit: ["foo"], foo: 1 })}.${encode({ sub: "u", iss: issuer, aud: "app" })}.AAAA`;
+      expect(await jwtAuth({ issuer, audience: "app" })(request(crit))).toBeNull();
+    } finally {
+      multi.stop(true);
+    }
+  });
+
   test("a token without a subject is rejected", async () => {
     const token = await new SignJWT({}).setProtectedHeader({ alg: "RS256", kid: "k1" }).setIssuer(issuer).setAudience("app").setExpirationTime("5m").sign(privateKey);
     expect(await jwtAuth({ issuer, audience: "app" })(request(token))).toBeNull();

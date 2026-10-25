@@ -350,11 +350,24 @@ describe("function URL access", () => {
   test("retrying after a partial permission update tolerates statements that already exist", async () => {
     const aws = fakeAws({
       AddPermissionCommand: () => {
-        throw Object.assign(new Error("exists"), { name: "ResourceConflictException" });
+        throw Object.assign(new Error("The statement id (cloudgear-url-abc) provided already exists. Please provide a new statement id."), {
+          name: "ResourceConflictException",
+        });
       },
     });
     await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).resolves.toBeDefined();
     expect(aws.names().filter((n) => n === "AddPermissionCommand")).toHaveLength(2);
+  });
+
+  test("a conflict because the function is mid-update is not swallowed", async () => {
+    const aws = fakeAws({
+      AddPermissionCommand: () => {
+        throw Object.assign(new Error("The operation cannot be performed at this time. An update is in progress for resource."), {
+          name: "ResourceConflictException",
+        });
+      },
+    });
+    await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).rejects.toThrow(/update is in progress/);
   });
 
   test("other permission errors still fail", async () => {

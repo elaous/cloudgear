@@ -99,6 +99,20 @@ describe("analyzeApp", () => {
     expect(model.functions[0]!.routes[0]!.name).toBe("impl");
   });
 
+  test("a named function expression's own name is the default route name", () => {
+    const model = analyzeApp(fixture("named-function-expression.ts"));
+    expect(model.functions[0]!.routes[0]!.name).toBe("inner");
+  });
+
+  test("numeric option keys are ignored rather than rejected", () => {
+    expect(() => analyzeApp(fixture("numeric-key.ts"))).not.toThrow();
+  });
+
+  test("warnings are not repeated for the same line", () => {
+    const warnings = analyzeApp(fixture("object-property-store.ts")).warnings;
+    expect(new Set(warnings).size).toBe(warnings.length);
+  });
+
   test("two stores on one bucket keep separate paths", () => {
     const model = analyzeApp(fixture("two-paths.ts"));
     expect(model.resources.map((r) => r.name)).toEqual(["shared"]);

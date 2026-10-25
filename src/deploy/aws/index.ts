@@ -80,8 +80,16 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     `cloudgear-${kind}-${createHash("sha256").update(principal).digest("hex").slice(0, 12)}`;
 
   // A retry after a partial failure meets statements that already exist; that is fine.
-  const addPermission = (input: ConstructorParameters<typeof AddPermissionCommand>[0]) =>
-    ignore(lambda.send(new AddPermissionCommand(input)), "ResourceConflictException");
+  // The same error also means "update in progress", which must not be skipped.
+  const addPermission = async (input: ConstructorParameters<typeof AddPermissionCommand>[0]) => {
+    try {
+      await lambda.send(new AddPermissionCommand(input));
+    } catch (err) {
+      const e = err as { name?: string; message?: string };
+      if (e.name === "ResourceConflictException" && /statement id.*already exists/i.test(e.message ?? "")) return;
+      throw err;
+    }
+  };
 
   async function addInvokers(functionName: string, principals: string[]) {
     for (const principal of principals) {

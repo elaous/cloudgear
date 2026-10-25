@@ -23,7 +23,9 @@ const INVALID_TOKEN = [
   errors.JWSInvalid,
   errors.JWSSignatureVerificationFailed,
   errors.JOSEAlgNotAllowed,
+  errors.JOSENotSupported,
   errors.JWKSNoMatchingKey,
+  errors.JWKSMultipleMatchingKeys,
 ];
 
 // Verifies `Authorization: Bearer <jwt>` against the issuer's JWKS. Invalid tokens yield null (401);

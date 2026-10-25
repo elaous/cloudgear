@@ -405,7 +405,7 @@ new CDN("aws", dns, { cert, bucket, options: { price_class: "PriceClass_100" } }
 | `@aws.Certificate` | `key_algorithm` (`RSA_2048`, `EC_prime256v1`, `EC_secp384r1`) |
 
 A function's options are the router's `functionOptions` overridden by its
-routes' `options`; the routes of one function MUST NOT disagree. `env.<NAME>`
+routes' `options`; the routes of one function MUST give it identical options (or none). `tracing: "Active"` also lets the role write X-Ray segments. `env.<NAME>`
 MUST NOT start with `AWS_` or `CLOUDGEAR_` and cannot be `NODE_OPTIONS`.
 Declaring a store twice with different options fails. An existing certificate
 cannot change `key_algorithm`. Add a key by extending `options` in

@@ -155,7 +155,7 @@ export function analyzeApp(entryPath: string): AppModel {
     const existing = resources.get(resource.name);
     if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region || !sameOptions(existing.options, resource.options))) {
       throw new Error(
-        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region or directives`,
+        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region, options or directives`,
       );
     }
     resources.set(resource.name, existing ?? resource);
@@ -180,6 +180,7 @@ export function analyzeApp(entryPath: string): AppModel {
   }
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
+  const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
 
@@ -268,13 +269,12 @@ export function analyzeApp(entryPath: string): AppModel {
     routeNames.set(routeName, `${method} ${routePath}`);
     fn.routes.push({ method, path: routePath, name: routeName });
     const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
-    for (const [key, value] of Object.entries(routeFunctionOptions ?? {})) {
-      const current = fn.options?.[key];
-      if (current !== undefined && current !== value) {
-        throw new Error(`${where(call)}: option "${key}" of "${fn.name}" is "${value}" here but "${current}" on another route of the same function`);
-      }
-      fn.options = { ...fn.options, [key]: value };
+    const earlier = routeOptionsOf.get(fn);
+    if (earlier && !sameOptions(earlier.options, routeFunctionOptions)) {
+      throw new Error(`${where(call)}: the routes of "${fn.name}" give it different options (${earlier.at}); set them identically or use functionOptions`);
     }
+    routeOptionsOf.set(fn, earlier ?? { options: routeFunctionOptions, at: where(call) });
+    fn.options = routeFunctionOptions;
   }
 
   for (const fn of functions.values()) {
@@ -699,6 +699,7 @@ function readOptionsMap(options: Node | undefined, name: string, at: string): Re
     const key = propName(entry);
     const value = Node.isPropertyAssignment(entry) ? entry.getInitializer() : undefined;
     if (!key || !value) throw new Error(`${at}: ${name} entries must be key: literal`);
+    if (!/^[A-Za-z][A-Za-z0-9_.]*$/.test(key)) throw new Error(`${at}: ${name} key "${key}" must start with a letter and use letters, digits, "_" and "."`);
     if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) result[key] = value.getLiteralValue();
     else if (Node.isNumericLiteral(value)) result[key] = value.getLiteralText();
     else if (value.getKind() === SyntaxKind.TrueKeyword || value.getKind() === SyntaxKind.FalseKeyword) result[key] = value.getText();

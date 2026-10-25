@@ -95,7 +95,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   async function putPermissions(roleName: string, spec: FunctionComparable) {
-    if (!spec.permissions.length) {
+    if (!spec.permissions.length && !traced(spec)) {
       await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })), "NoSuchEntity");
       return;
     }
@@ -305,7 +305,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       async update(entry, current, changes) {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = current.outputs.role_name ?? roleNameFor(entry.physical_name);
-        if (changes.includes("permissions")) await putPermissions(roleName, spec);
+        const tracingChanged = traced(spec) !== ((current.spec.options as Record<string, string> | undefined)?.tracing === "Active");
+        if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec);
         if (changes.includes("code")) {
           const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }]);
           await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code }));
@@ -374,7 +375,14 @@ export function policyDocument(spec: FunctionComparable): string {
         : []),
     ];
   });
+  if (traced(spec)) {
+    statements.push({ Effect: "Allow", Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"], Resource: "*" } as never);
+  }
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
+}
+
+function traced(spec: FunctionComparable): boolean {
+  return spec.options?.tracing === "Active";
 }
 
 function urlAuthType(auth: "iam" | "none"): "AWS_IAM" | "NONE" {

@@ -315,7 +315,7 @@ describe("analyzeApp", () => {
     ["computed-key.ts", /computed property keys cannot be analyzed/],
     ["bad-region.ts", /"Europe" is not an AWS region such as "eu-west-1"/],
     ["region-variable.ts", /region must be a string literal/],
-    ["region-conflict.ts", /different provider, region or directives/],
+    ["region-conflict.ts", /different provider, region, options or directives/],
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
     ["default-export.ts", /export the router with a name/],
     ["no-routes.ts", /FunctionRouter has no \.url\(\.\.\.\) routes/],

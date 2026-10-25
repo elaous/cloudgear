@@ -89,8 +89,8 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     async update(entry, current) {
       // Only a previous run that stopped before the certificate was issued gets here with work to do.
       if (!current.outputs.arn) throw new Error("Certificate state has no ARN; destroy and apply again");
-      const before = (current.spec.options as Record<string, string> | undefined)?.key_algorithm;
-      if (before !== (entry.spec.options as Record<string, string> | undefined)?.key_algorithm) {
+      const algorithm = (spec: Record<string, unknown>) => (spec.options as Record<string, string> | undefined)?.key_algorithm ?? "RSA_2048";
+      if (algorithm(current.spec) !== algorithm(entry.spec)) {
         throw new Error(`Certificate ${entry.physical_name} cannot change key_algorithm; destroy it and apply again`);
       }
       try {

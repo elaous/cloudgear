@@ -1,20 +1,19 @@
-import type { BlobStore } from "@cloudgear/blob";
+import type { BlobStore, ProviderOptions } from "@cloudgear/blob";
 import type { DNS } from "@cloudgear/dns";
 import fs from "node:fs";
 import path from "node:path";
 import { createCdnDriver, type CdnDriver, type CdnInfo, type CdnProvider } from "./cdn-driver";
 import { createCertDriver, type CertDriver, type CertInfo, type CertProvider } from "./cert-driver";
 
+export type { ProviderOptions };
 export { createCertDriver, registerCertDriver } from "./cert-driver";
 export type { CertDriver, CertDriverFactory, CertDriverOptions, CertInfo, CertProvider, CertState } from "./cert-driver";
 
 export { createCdnDriver, registerCdnDriver } from "./cdn-driver";
 export type { CdnDriver, CdnDriverFactory, CdnInfo, CdnProvider, CdnState } from "./cdn-driver";
 
-export type ProviderOptions = Record<string, string | number | boolean>;
-
 export interface CertOptions {
-  // Provider settings with no dedicated option; MUST be literals.
+  // Provider settings with no dedicated option; literals only.
   options?: ProviderOptions;
   driver?: CertDriver;
 }

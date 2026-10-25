@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { analyzeApp } from "../src/analyze/app";
 import { decodeConfig } from "../src/config/schema";
+import { encodeConfig } from "../src/config/schema";
+import { policyDocument } from "../src/deploy/aws";
+import { validateOptions } from "../src/providers";
 import { buildDistributionConfig } from "../src/deploy/aws/cloudfront";
 import { plan, type CdnComparable } from "../src/deploy/plan";
 import { generate } from "../src/generate";
@@ -24,7 +27,7 @@ describe("provider options in source", () => {
     const model = analyzeApp(fixture("ok.ts"));
     expect(model.resources[0]!.options).toEqual({ versioning: "true" });
     expect(Object.fromEntries(model.functions.map((f) => [f.name, f.options]))).toEqual({
-      a: { tracing: "Active", "env.STAGE": "prod", ephemeral_storage_mb: "1024" },
+      a: { tracing: "PassThrough", "env.STAGE": "prod", ephemeral_storage_mb: "1024" },
       b: { tracing: "Active", "env.STAGE": "prod" },
     });
     const edge = analyzeApp(fixture("edge.ts"));
@@ -34,8 +37,10 @@ describe("provider options in source", () => {
 
   test.each([
     ["variable-value.ts", /options\.versioning must be a string, number or boolean literal/],
-    ["route-conflict.ts", /option "tracing" of "f" is "PassThrough" here but "Active" on another route/],
-    ["store-conflict.ts", /BlobStore "data" is also declared at .* with a different provider, region or directives/],
+    ["route-conflict.ts", /the routes of "f" give it different options/],
+    ["route-partial.ts", /the routes of "f" give it different options/],
+    ["proto-key.ts", /key "__proto__" must start with a letter/],
+    ["store-conflict.ts", /BlobStore "data" is also declared at .* with a different provider, region, options or directives/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });
@@ -72,6 +77,41 @@ describe("options in the config", () => {
   });
 });
 
+describe("option validation", () => {
+  const check = (type: string, options: Record<string, string>) => () => validateOptions("aws", type, options, "x");
+
+  test("names that exist on every object are unknown options", () => {
+    for (const key of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      expect(check("@aws.S3", { [key]: "1" })).toThrow(/unknown option/);
+    }
+  });
+
+  test("environment variable names", () => {
+    for (const name of ["AWS_REGION", "CLOUDGEAR_BLOB_X", "NODE_OPTIONS", "LAMBDA_TASK_ROOT", "_HANDLER", "", "1X", "a-b"]) {
+      expect(check("@aws.Lambda", { [`env.${name}`]: "v" })).toThrow(/not a usable environment variable name/);
+    }
+    expect(check("@aws.Lambda", { "env.STAGE": "", "env.Mixed_case1": "v" })).not.toThrow();
+  });
+
+  test("value rules and their bounds", () => {
+    for (const value of ["511", "10241", "abc", "1e3", "-1", ""]) {
+      expect(check("@aws.Lambda", { ephemeral_storage_mb: value })).toThrow(/integer from 512 to 10240/);
+    }
+    for (const value of ["512", "10240"]) expect(check("@aws.Lambda", { ephemeral_storage_mb: value })).not.toThrow();
+    expect(check("@aws.CloudFront", { price_class: "PriceClass_50" })).toThrow(/must be one of/);
+    for (const value of ["/index.html", "a/../b"]) expect(check("@aws.CloudFront", { default_root_object: value })).toThrow(/relative object key/);
+    expect(check("@aws.CloudFront", { default_root_object: "docs/home.html" })).not.toThrow();
+    expect(check("@aws.Certificate", { key_algorithm: "DSA" })).toThrow(/must be one of/);
+  });
+
+  test("the config round-trips awkward values", () => {
+    const base = baseConfig({ function: [fn({ options: { "env.A": 'say "hi"\n', "env.B": "line1\nline2", "env.C": "", "env.D": "back\\slash" } })] });
+    const decoded = decodeConfig(encodeConfig(base));
+    expect(decoded.function[0]!.options).toEqual(base.function[0]!.options);
+    expect(decoded.resource.every((r) => r.options === undefined)).toBe(true);
+  });
+});
+
 describe("planning options", () => {
   test("changing an option updates the entry, and state without options is untouched", async () => {
     const state = emptyState();
@@ -102,10 +142,35 @@ describe("applying options on AWS", () => {
 
     await applyAll(versioned("false"), state, aws);
     expect(aws.of("PutBucketVersioningCommand").at(-1)).toEqual({ Bucket: "data", VersioningConfiguration: { Status: "Suspended" } });
+    await applyAll(versioned("true"), state, aws);
+    await applyAll(versioned(), state, aws);
+    expect(aws.of("PutBucketVersioningCommand")).toHaveLength(4);
+    expect(aws.of("PutBucketVersioningCommand").at(-1)).toMatchObject({ VersioningConfiguration: { Status: "Suspended" } });
 
     const plain = fakeAws();
     await applyAll(versioned(), emptyState(), plain);
     expect(plain.names()).not.toContain("PutBucketVersioningCommand");
+  });
+
+  test("options override the function's own env, and the unset ones fall back to defaults", async () => {
+    const aws = fakeAws();
+    await applyAll(baseConfig({ resource: [], function: [fn({ permission: [], env: [{ key: "FOO", value: "a" }], options: { "env.FOO": "b" } })] }), emptyState(), aws);
+    expect(aws.of("CreateFunctionCommand")[0].Environment.Variables).toEqual({ NODE_OPTIONS: "--enable-source-maps", FOO: "b" });
+    expect(aws.of("CreateFunctionCommand")[0]).toMatchObject({ TracingConfig: { Mode: "PassThrough" }, EphemeralStorage: { Size: 512 } });
+  });
+
+  test("active tracing lets the role write X-Ray segments, and turning it on later adds that", async () => {
+    const withTracing = (tracing?: string) => baseConfig({ resource: [], function: [fn({ permission: [], env: [], ...(tracing ? { options: { tracing } } : {}) })] });
+    const state = emptyState();
+    const aws = fakeAws();
+    await applyAll(withTracing(), state, aws);
+    expect(aws.names()).not.toContain("PutRolePolicyCommand");
+    await applyAll(withTracing("Active"), state, aws);
+    const statements = JSON.parse(aws.of("PutRolePolicyCommand")[0].PolicyDocument).Statement;
+    expect(statements).toEqual([{ Effect: "Allow", Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"], Resource: "*" }]);
+    await applyAll(withTracing(), state, aws);
+    expect(aws.names()).toContain("DeleteRolePolicyCommand");
+    expect(JSON.parse(policyDocument({ permissions: [] } as never)).Statement).toEqual([]);
   });
 
   test("a function gets tracing, storage and env options on create and update", async () => {
@@ -126,7 +191,7 @@ describe("applying options on AWS", () => {
     });
   });
 
-  test("the certificate and the distribution take their options", () => {
+  test("the distribution takes its options", () => {
     const spec: CdnComparable = {
       domain: "cdn.example.com", dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", behaviors: [],
       options: { price_class: "PriceClass_100", default_root_object: "home.html" },
@@ -151,5 +216,9 @@ describe("applying options on AWS", () => {
     await applyAll(config("EC_prime256v1"), state, aws);
     expect(aws.of("RequestCertificateCommand")[0]).toMatchObject({ KeyAlgorithm: "EC_prime256v1" });
     await expect(applyAll(config("RSA_2048"), state, aws)).rejects.toThrow(/cannot change key_algorithm/);
+
+    const defaulted = emptyState();
+    await applyAll(config(), defaulted, fakeAws());
+    await expect(applyAll(config("RSA_2048"), defaulted, fakeAws())).resolves.toBeDefined();
   });
 });

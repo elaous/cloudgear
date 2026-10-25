@@ -41,7 +41,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
         prefixes: { [ENV_OPTION_PREFIX]: environmentVariable },
       },
       "@aws.CloudFront": {
-        keys: { price_class: oneOf("PriceClass_100", "PriceClass_200", "PriceClass_All"), default_root_object: (v) => (/^[\w.\-/]*$/.test(v) ? undefined : "must be a plain object key") },
+        keys: { price_class: oneOf("PriceClass_100", "PriceClass_200", "PriceClass_All"), default_root_object: (v) => (/^(?!\/)(?!.*\.\.)[\w.\-/]*$/.test(v) ? undefined : "must be a relative object key") },
       },
       "@aws.Certificate": { keys: { key_algorithm: oneOf("RSA_2048", "EC_prime256v1", "EC_secp384r1") } },
     },
@@ -68,13 +68,13 @@ export function providerProfile(provider: string): ProviderProfile {
   return profile;
 }
 
-const RESERVED_ENV = /^(AWS_|CLOUDGEAR_|NODE_OPTIONS$|_)/;
+const RESERVED_ENV = /^(AWS_|CLOUDGEAR_|LAMBDA_|NODE_OPTIONS$|_)/;
 
 export function validateOptions(provider: string, type: string, options: Record<string, string> | undefined, label: string): void {
   for (const [key, value] of Object.entries(options ?? {})) {
     const schema = providerProfile(provider).options[type];
     const prefix = Object.keys(schema?.prefixes ?? {}).find((p) => key.startsWith(p));
-    const rule = schema?.keys[key] ?? (prefix ? schema!.prefixes![prefix] : undefined);
+    const rule = (schema && Object.hasOwn(schema.keys, key) ? schema.keys[key] : undefined) ?? (prefix ? schema!.prefixes![prefix] : undefined);
     if (!rule) {
       const supported = [...Object.keys(schema?.keys ?? {}), ...Object.keys(schema?.prefixes ?? {}).map((p) => `${p}<NAME>`)];
       throw new Error(`${label}: unknown option "${key}" for ${type} (supported: ${supported.join(", ") || "none"})`);

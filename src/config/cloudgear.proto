@@ -64,7 +64,7 @@ message Resource {
   string source = 5;
   // Region the resource lives in; empty means the region the app is deployed to.
   string region = 6;
-  // Provider-specific settings; each driver validates its own keys.
+  // Provider-specific settings; validated per type by cloudgear.
   map<string, string> options = 7;
 }
 

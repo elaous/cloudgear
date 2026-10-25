@@ -28,7 +28,7 @@ export interface BlobStoreOptions {
   // AWS region of the bucket; defaults to the region the app is deployed to. `cloudgear generate`
   // creates the bucket there, so it MUST be a string literal.
   region?: string;
-  // Provider settings with no dedicated option; MUST be literals.
+  // Provider settings with no dedicated option; literals only.
   options?: ProviderOptions;
   driver?: BlobDriver;
 }

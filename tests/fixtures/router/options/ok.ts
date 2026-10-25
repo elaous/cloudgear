@@ -11,6 +11,6 @@ export async function b() {
 }
 
 new FunctionRouter("aws", { functionOptions: { tracing: "Active", "env.STAGE": "prod" } })
-  .url("GET", "/a", a, { options: { ephemeral_storage_mb: 1024 } })
-  .url("POST", "/a", a, { name: "postA", options: { ephemeral_storage_mb: 1024 } })
+  .url("GET", "/a", a, { options: { ephemeral_storage_mb: 1024, tracing: "PassThrough" } })
+  .url("POST", "/a", a, { name: "postA", options: { ephemeral_storage_mb: 1024, tracing: "PassThrough" } })
   .url("GET", "/b", b);

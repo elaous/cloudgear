@@ -199,20 +199,22 @@ describe("applying the edge", () => {
     await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
 
     const names = aws.names();
-    expect(names.slice(0, 5)).toEqual([
+    expect(names.slice(0, 6)).toEqual([
       "GetDistributionConfigCommand",
       "UpdateDistributionCommand",
       "GetDistributionCommand",
+      "GetDistributionConfigCommand",
       "DeleteDistributionCommand",
       "GetOriginAccessControlCommand",
     ]);
     expect(aws.of("UpdateDistributionCommand")[0]).toMatchObject({ IfMatch: "e1", DistributionConfig: { Enabled: false } });
-    expect(aws.of("DeleteDistributionCommand")).toEqual([{ Id: "E1", IfMatch: "e2" }]);
+    expect(aws.of("DeleteDistributionCommand")).toEqual([{ Id: "E1", IfMatch: "e1" }]);
     expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-s3", "oac-lambda"]);
     expect(names).toContain("DeleteBucketPolicyCommand");
     expect(aws.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
     expect(await created.dns!.get(DOMAIN, "CNAME")).toBeNull();
-    expect(await created.dns!.get("_v1.cdn.example.com", "CNAME")).toBeNull();
+    // the certificate's validation record stays: ACM shares it between certificates for a domain
+    expect(await created.dns!.get("_v1.cdn.example.com", "CNAME")).not.toBeNull();
     expect(aws.of("DeleteCertificateCommand")).toEqual([{ CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c1" }]);
     expect(names.indexOf("DeleteDistributionCommand")).toBeLessThan(names.indexOf("DeleteCertificateCommand"));
     expect(state.entries).toEqual({});
@@ -241,7 +243,7 @@ describe("applying the edge", () => {
       },
     });
     await expect(applyAll(cdnConfig(), state, broken)).rejects.toThrow("bucket policy denied");
-    expect(state.entries[CDN_KEY]!.spec).toEqual({ incomplete: true });
+    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, bucket: "data" });
     expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ id: "E1", oac_s3: "oac-s3", oac_lambda: "oac-lambda" });
 
     const next = plan(cdnConfig(), state).find((a) => a.key === CDN_KEY)!;
@@ -250,7 +252,7 @@ describe("applying the edge", () => {
     expect(resumed.names()).not.toContain("CreateDistributionCommand");
     expect(resumed.names()).not.toContain("CreateOriginAccessControlCommand");
     expect(resumed.of("UpdateDistributionCommand")).toHaveLength(1);
-    expect(state.entries[CDN_KEY]!.spec).not.toEqual({ incomplete: true });
+    expect(state.entries[CDN_KEY]!.spec).not.toHaveProperty("incomplete");
     expect(state.entries[CDN_KEY]!.outputs.status).toBe("Deployed");
   });
 
@@ -290,6 +292,131 @@ describe("applying the edge", () => {
   });
 });
 
+describe("records and cleanup the CDN does not own", () => {
+  const foreign = { name: DOMAIN, type: "CNAME" as const, values: ["old-site.example.net."], ttl: 300 };
+
+  test("an existing record for the domain stops the apply before anything is created", async () => {
+    const dns = new MemoryDnsDriver();
+    await dns.upsert(foreign);
+    const aws = fakeAws({}, dns);
+    await expect(applyAll(cdnConfig(), emptyState(), aws)).rejects.toThrow(/DNS record cdn\.example\.com already exists \(CNAME old-site\.example\.net\.\)/);
+    expect(aws.names()).not.toContain("CreateDistributionCommand");
+    expect(aws.names()).not.toContain("CreateOriginAccessControlCommand");
+    expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
+  });
+
+  test("destroy leaves a record that no longer points at the distribution", async () => {
+    const state = emptyState();
+    const created = await applyAll(cdnConfig(), state);
+    await created.dns!.upsert({ ...foreign });
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, fakeAws({}, created.dns));
+    expect(await created.dns!.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
+  });
+
+  test("a distribution that was never created owns no record, so destroy leaves it alone", async () => {
+    const state = emptyState();
+    const dns = new MemoryDnsDriver();
+    const failing = fakeAws(
+      {
+        CreateDistributionCommand: () => {
+          throw error("CNAMEAlreadyExists", "domain is used by another distribution");
+        },
+      },
+      dns,
+    );
+    await expect(applyAll(cdnConfig(), state, failing)).rejects.toThrow("another distribution");
+    await dns.upsert({ ...foreign });
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, fakeAws({}, dns));
+    expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
+  });
+
+  test("deleting a CDN whose create failed part-way still removes its bucket policy and permissions", async () => {
+    const state = emptyState();
+    let policy = "";
+    const failing = fakeAws({
+      PutBucketPolicyCommand: (input) => void (policy = input.Policy),
+      AddPermissionCommand: (input) => {
+        if (input.Principal === "cloudfront.amazonaws.com") throw error("AccessDeniedException", "cannot grant");
+      },
+    });
+    await expect(applyAll(cdnConfig(), state, failing)).rejects.toThrow("cannot grant");
+    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, bucket: "data", behaviors: [{ function: "app-foo" }] });
+
+    const cleanup = fakeAws({ GetBucketPolicyCommand: () => ({ Policy: policy }) });
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, cleanup);
+    expect(cleanup.names()).toContain("DeleteBucketPolicyCommand");
+    expect(cleanup.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
+  });
+
+  test("an update that fails keeps the outputs it produced and is marked incomplete", async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig({ function: [] , cdn: { ...cdnConfig().cdn!, behavior: [] } }), state);
+    expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBeUndefined();
+
+    // the function arrives later; creating its origin access control succeeds, then the update fails
+    const next = cdnConfig();
+    const failing = fakeAws({
+      UpdateDistributionCommand: () => {
+        throw error("InvalidArgument", "bad config");
+      },
+    });
+    await expect(applyAll(next, state, failing)).rejects.toThrow("bad config");
+    expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBe("oac-lambda");
+    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true });
+
+    const resumed = await applyAll(next, state);
+    expect(resumed.names()).not.toContain("CreateOriginAccessControlCommand");
+    expect(state.entries[CDN_KEY]!.spec).not.toHaveProperty("incomplete");
+  });
+
+  test("entries clean up through the DNS provider and zone recorded in their own spec", async () => {
+    const state = emptyState();
+    const created = await applyAll(cdnConfig(), state);
+    const opened: [string, string][] = [];
+    const aws = fakeAws({}, created.dns, (provider, zone) => void opened.push([provider, zone]));
+    // the declarations are gone from the config, but the state still knows where the records live
+    await applyAll({ ...baseConfig(), resource: [], function: [], dns: undefined, certificate: undefined, cdn: undefined }, state, aws);
+    expect(opened.length).toBeGreaterThan(0);
+    expect(new Set(opened.map((o) => o.join("/")))).toEqual(new Set(["gandi/example.com"]));
+    expect(state.entries).toEqual({});
+  });
+
+  test("origin access controls are found on later pages and get names within CloudFront's limit", async () => {
+    const long = "a-very-long-subdomain-name-for-a-site.deeply.nested.example.com";
+    const config = cdnConfig({
+      dns: { provider: "gandi", domain: long, zone: "example.com" },
+      certificate: { domain: long },
+      cdn: { ...cdnConfig().cdn!, domain: long },
+    });
+    const pages: string[] = [];
+    const aws = fakeAws({
+      CreateOriginAccessControlCommand: () => {
+        throw error("OriginAccessControlAlreadyExists");
+      },
+      ListOriginAccessControlsCommand: (input) => {
+        pages.push(input.Marker ?? "first");
+        return input.Marker
+          ? { OriginAccessControlList: { Items: [{ Name: "ignored", Id: "x" }] } }
+          : { OriginAccessControlList: { Items: [], IsTruncated: true, NextMarker: "m1" } };
+      },
+    });
+    await expect(applyAll(config, emptyState(), aws)).rejects.toThrow("OriginAccessControlAlreadyExists");
+    expect(pages).toEqual(["first", "m1"]);
+    const created = aws.of("CreateOriginAccessControlCommand").map((i) => i.OriginAccessControlConfig.Name as string);
+    expect(created.length).toBeGreaterThan(0);
+    expect(created.every((name) => name.length <= 64)).toBe(true);
+  });
+
+  test("the ETag used to delete is fetched after the distribution finished disabling", async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    let reads = 0;
+    const aws = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: `etag-${++reads}`, DistributionConfig: { CallerReference: "r", Enabled: reads === 1 } }) });
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
+    expect(aws.of("DeleteDistributionCommand")).toEqual([{ Id: "E1", IfMatch: "etag-2" }]);
+  });
+});
+
 describe("certificate", () => {
   const stateWithCertificate = async (overrides: Parameters<typeof fakeAws>[0] = {}) => {
     const state = emptyState();
@@ -326,7 +453,19 @@ describe("certificate", () => {
 
     const resumed = await applyAll(cdnConfig({ cdn: undefined }), state);
     expect(resumed.names()).not.toContain("RequestCertificateCommand");
-    expect(state.entries[CERT_KEY]!.spec).not.toEqual({ incomplete: true });
+    expect(state.entries[CERT_KEY]!.spec).not.toHaveProperty("incomplete");
+  });
+
+  test("an identical validation record is reused, a different one is a conflict", async () => {
+    const dns = new MemoryDnsDriver();
+    await dns.upsert({ name: "_v1.cdn.example.com", type: "CNAME", values: ["_v2.acm-validations.aws"], ttl: 300 });
+    const reuse = fakeAws({}, dns);
+    await applyAll(cdnConfig({ cdn: undefined }), emptyState(), reuse);
+    expect(await dns.get("_v1.cdn.example.com", "CNAME")).toMatchObject({ values: ["_v2.acm-validations.aws"] });
+
+    const other = new MemoryDnsDriver();
+    await other.upsert({ name: "_v1.cdn.example.com", type: "CNAME", values: ["somewhere.else."], ttl: 300 });
+    await expect(applyAll(cdnConfig({ cdn: undefined }), emptyState(), fakeAws({}, other))).rejects.toThrow(/already exists with a different value \(somewhere\.else\.\)/);
   });
 
   test("never being issued times out with the record to check", async () => {
@@ -342,6 +481,12 @@ describe("certificate", () => {
   test("ACM never offering a validation record is an error", async () => {
     const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { Status: "PENDING_VALIDATION", DomainValidationOptions: [{}] } }) });
     await expect(applyAll(cdnConfig({ cdn: undefined }), emptyState(), aws)).rejects.toThrow(/did not provide a DNS validation record/);
+  });
+
+  test("deleting leaves the validation record in place", async () => {
+    const { state, aws } = await stateWithCertificate();
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, fakeAws({}, aws.dns));
+    expect(await aws.dns!.get("_v1.cdn.example.com", "CNAME")).not.toBeNull();
   });
 
   test("deleting retries while CloudFront still holds the certificate", async () => {

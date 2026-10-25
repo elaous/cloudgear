@@ -9,8 +9,9 @@ export interface BundleRequest {
   member?: string;
   routes: { method: string; path: string }[];
   provider: string;
-  // Whether the function trusts the router-supplied caller identity.
-  authenticated: "iam" | "none";
+  // Whether the function trusts the caller identity in router calls. Off when anyone can reach the
+  // function (public URLs, or a CDN that forwards viewers' requests straight to it).
+  trustContext: boolean;
   outDir: string;
 }
 
@@ -45,7 +46,7 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
             `const fn = root[${JSON.stringify(req.member)}].bind(root);`,
           ]
         : [`import { ${req.exportName} as fn } from ${JSON.stringify(source)};`]),
-      `export const handler = createHandler(fn, ${JSON.stringify(req.routes)}, { trustContext: ${req.authenticated === "iam"} });`,
+      `export const handler = createHandler(fn, ${JSON.stringify(req.routes)}, { trustContext: ${req.trustContext} });`,
       "",
     ].join("\n"),
   );

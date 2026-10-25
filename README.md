@@ -233,8 +233,11 @@ DNS providers (`new DNS(provider, domain, { zone })`): `"gandi"` (LiveDNS; set
 `"aws"` (Route 53; needs a public hosted zone named like the zone, with
 credentials from the usual AWS chain). Credentials are read from the
 environment when a record is written and are never stored in the config or
-state. `zone` defaults to the last two labels of the domain; set it for names
-like `example.co.uk`. The domain MUST be a subdomain of its zone, because the
+state. `zone` defaults to the last two labels of the domain (three for common
+suffixes like `co.uk`); set it for anything else, and make it the zone that
+actually holds the records (a delegated subzone shadows its parent). Each
+state entry remembers its own DNS provider and zone, so removing the
+declarations still cleans up through the right zone. The domain MUST be a subdomain of its zone, because the
 apex cannot be a CNAME. Add a provider with `registerDnsDriver`, like blob
 drivers.
 
@@ -254,7 +257,27 @@ Rules the analyzer enforces:
   and warns about `rateLimit`.
 - A `dry` bucket is not created or deleted, but the CDN still adds one
   statement to its bucket policy (and removes it again), which `generate`
-  warns about.
+  warns about. The bucket (or its `path`) is public through the CDN, so
+  `generate` also warns when a function uses the same files.
+- Routes become CloudFront path patterns. Patterns are ordered so a longer one
+  is matched before one that would swallow it (`/users/*/posts/*` before
+  `/users/*`, because CloudFront's `*` also matches `/`). A route that would
+  capture the site's own pages (`/{slug}` becomes `/*`) is rejected: put API
+  routes under a fixed prefix. Patterns allow only letters, digits and
+  `_ - . * $ / ~ " ' @ : +`, and more than 25 behaviors exceeds CloudFront's
+  default quota (a warning). An exact pattern like `/items` does not match
+  `/items/`, which then goes to the site.
+- Anyone can reach functions through the CDN with their own requests, so
+  functions behind it never trust a caller identity (`context.auth` is not
+  populated), and the router's invoke protocol still ignores method and path
+  matching there. This is why `authenticate` needs every route to be public.
+- HEAD requests are served by the GET route, without a body.
+
+cloudgear never overwrites a DNS record it does not own: if the domain
+already has a record pointing elsewhere, `apply` stops before creating
+anything, and `destroy` only removes the record while it still points at the
+distribution cloudgear created. The certificate's validation record is left in
+place on destroy, because ACM shares it between certificates for a domain.
 
 `cloudgear invalidate [path...]` clears the CDN's cache (`/*` by default).
 Uploading the site's files is not part of cloudgear yet.

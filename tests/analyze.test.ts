@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { analyzeApp } from "../src/analyze/app";
+import { analyzeApp, orderBySpecificity } from "../src/analyze/app";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
 
@@ -145,6 +145,35 @@ describe("analyzeApp", () => {
       ["cdn/missing-bucket.ts", /the CDN's bucket must be a BlobStore variable/],
     ])("rejects %s", (file, error) => {
       expect(() => analyzeApp(fixture(file))).toThrow(error);
+    });
+
+    test("nested parameter routes are ordered so the longer one is matched first", () => {
+      const model = analyzeApp(fixture("cdn/nested-params.ts"));
+      expect(model.cdn!.behaviors.map((b) => b.pathPattern)).toEqual(["/users/*/posts/*", "/users/*"]);
+    });
+
+    test("orderBySpecificity puts every pattern after those it would swallow", () => {
+      expect(orderBySpecificity(["/a/*", "/a/*/b/*", "/a/b", "/*/z"])).toEqual(["/a/b", "/*/z", "/a/*/b/*", "/a/*"]);
+      expect(orderBySpecificity(["/x/*", "/x/y/*", "/x/y/z"])).toEqual(["/x/y/z", "/x/y/*", "/x/*"]);
+      expect(orderBySpecificity(["/b", "/a"])).toEqual(["/b", "/a"]);
+    });
+
+    test("a route that would take over the static site's own pages is rejected", () => {
+      expect(() => analyzeApp(fixture("cdn/catch-all.ts"))).toThrow(/GET \/\{slug\} becomes "\/\*", which would capture the static site's own pages/);
+    });
+
+    test("path characters CloudFront does not allow are rejected", () => {
+      expect(() => analyzeApp(fixture("cdn/bad-chars.ts"))).toThrow(/CloudFront path patterns allow only letters, digits/);
+    });
+
+    test("warns when more behaviors than the default quota are needed", () => {
+      const warnings = analyzeApp(fixture("cdn/many-routes.ts")).warnings;
+      expect(warnings).toEqual([expect.stringMatching(/26 CloudFront behaviors exceed the default quota of 25/)]);
+    });
+
+    test("warns when a function uses files the CDN makes public", () => {
+      const warnings = analyzeApp(fixture("cdn/shared-bucket.ts")).warnings;
+      expect(warnings).toEqual([expect.stringMatching(/"readPrivate" also uses the CDN's bucket "my-site" under "private\/"; files there are public through the CDN/)]);
     });
 
     test("public routes may skip the authenticate hook", () => {

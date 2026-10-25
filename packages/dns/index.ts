@@ -13,10 +13,20 @@ export { createDnsDriver, registerDnsDriver, normalizeHostname, normalizeRecordN
 export type { DnsDriver, DnsDriverFactory, DnsProvider, DnsRecord, DnsRecordType } from "./driver";
 
 export interface DnsOptions {
-  // The DNS zone holding the records; defaults to the last two labels of the domain.
-  // Set it for registrations like example.co.uk.
+  // The DNS zone holding the records; defaults to the last two labels of the domain (three for
+  // common second-level suffixes like co.uk). Set it for anything else.
   zone?: string;
   driver?: DnsDriver;
+}
+
+// Registrations under these second-level labels (example.co.uk) span three labels.
+const SECOND_LEVEL = new Set(["co", "com", "org", "net", "gov", "edu", "ac", "ne", "or", "go"]);
+
+function defaultZone(domain: string): string {
+  const labels = domain.split(".");
+  const second = labels.at(-2);
+  const threeLabels = labels.length >= 3 && labels.at(-1)!.length === 2 && second !== undefined && SECOND_LEVEL.has(second);
+  return labels.slice(threeLabels ? -3 : -2).join(".");
 }
 
 // The domain a site is served from, and the provider whose zone holds its records.
@@ -32,7 +42,7 @@ export class DNS {
     options: DnsOptions = {},
   ) {
     this.domain = normalizeHostname(domain);
-    this.zone = normalizeHostname(options.zone ?? this.domain.split(".").slice(-2).join("."));
+    this.zone = normalizeHostname(options.zone ?? defaultZone(this.domain));
     if (!isWithinZone(this.domain, this.zone)) throw new Error(`Domain "${this.domain}" is not inside zone "${this.zone}"`);
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }

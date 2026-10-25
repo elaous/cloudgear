@@ -179,10 +179,12 @@ async function drivers(config: CloudgearConfig, configPath: string, region: stri
   if (!resolvedRegion) throw new Error("Set --region or AWS_REGION to deploy");
   const configDir = path.dirname(configPath);
   // Credentials (for example GANDI_TOKEN) are read from the environment when the first record is written.
-  const dns = config.dns ? await createDnsDriver(config.dns.provider as DnsProvider, config.dns.zone) : undefined;
+  if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") {
+    console.warn("warning: CLOUDGEAR_DNS_DRIVER=memory is set; no real DNS records will be written");
+  }
   return awsDrivers({
     region: resolvedRegion,
-    dns,
+    dns: (provider, zone) => createDnsDriver(provider as DnsProvider, zone),
     log: (message) => console.log(`cloudgear: ${message}`),
     readBundle: (fn) => {
       const file = path.resolve(configDir, fn.bundle.path);

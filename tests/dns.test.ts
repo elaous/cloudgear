@@ -12,6 +12,13 @@ describe("DNS", () => {
     expect(new DNS("gandi", "example.com").zone).toBe("example.com");
   });
 
+  test("common second-level suffixes like co.uk default to three labels", () => {
+    expect(new DNS("gandi", "cdn.example.co.uk").zone).toBe("example.co.uk");
+    expect(new DNS("gandi", "www.example.com.au").zone).toBe("example.com.au");
+    expect(new DNS("gandi", "cdn.example.co").zone).toBe("example.co");
+    expect(new DNS("gandi", "a.b.example.org").zone).toBe("example.org");
+  });
+
   test("an explicit zone covers registrations like example.co.uk", () => {
     const dns = new DNS("gandi", "cdn.example.co.uk", { zone: "example.co.uk" });
     expect(dns.zone).toBe("example.co.uk");

@@ -388,6 +388,16 @@ export function analyzeApp(entryPath: string): AppModel {
           warnings.push(`${where(router)}: rateLimit does not apply to routes served through the CDN`);
         }
       }
+      for (const fn of functions.values()) {
+        for (const use of fn.uses.values()) {
+          const overlaps = use.path.startsWith(bucketStore.path) || bucketStore.path.startsWith(use.path);
+          if (use.resource === bucketStore.resource.name && overlaps) {
+            warnings.push(
+              `${at}: "${fn.name}" also uses the CDN's bucket "${use.resource}"${use.path ? ` under "${use.path}"` : ""}; files there are public through the CDN`,
+            );
+          }
+        }
+      }
       cdn = { provider: "aws", domain: domainName!, bucket: bucketStore.resource.name, path: bucketStore.path, behaviors };
     }
     return { dns, certificate, cdn };
@@ -395,10 +405,21 @@ export function analyzeApp(entryPath: string): AppModel {
 
   // CloudFront picks a behavior by path only, so each pattern needs exactly one function.
   function cdnBehaviors(at: string) {
+    const assertSupported = (route: { method: string; path: string }, pattern: string) => {
+      if (!/^[A-Za-z0-9_\-.*$/~"'@:+]+$/.test(pattern)) {
+        throw new Error(`${at}: CloudFront path patterns allow only letters, digits and _ - . * $ / ~ " ' @ : +; ${route.method} ${route.path} does not qualify`);
+      }
+      if (patternMatches(pattern, "/index.html") || patternMatches(pattern, "/")) {
+        throw new Error(
+          `${at}: ${route.method} ${route.path} becomes "${pattern}", which would capture the static site's own pages; put it under a fixed prefix such as /api`,
+        );
+      }
+    };
     const byPattern = new Map<string, { fn: AnalyzedFunction; methods: Set<string>; first: string }>();
     for (const fn of functions.values()) {
       for (const route of fn.routes) {
         const pattern = route.path.replace(/\{[^}]+\}/g, "*");
+        assertSupported(route, pattern);
         const existing = byPattern.get(pattern);
         if (existing && existing.fn !== fn) {
           throw new Error(
@@ -410,10 +431,13 @@ export function analyzeApp(entryPath: string): AppModel {
         byPattern.set(pattern, entry);
       }
     }
-    const wildcards = (pattern: string) => pattern.split("*").length - 1;
-    return [...byPattern]
-      .sort(([a], [b]) => wildcards(a) - wildcards(b) || b.length - a.length)
-      .map(([pathPattern, { fn, methods }]) => ({ pathPattern, function: fn.name, methods: [...methods].sort() }));
+    if (byPattern.size > 25) {
+      warnings.push(`${at}: ${byPattern.size} CloudFront behaviors exceed the default quota of 25 per distribution`);
+    }
+    return orderBySpecificity([...byPattern.keys()]).map((pathPattern) => {
+      const { fn, methods } = byPattern.get(pathPattern)!;
+      return { pathPattern, function: fn.name, methods: [...methods].sort() };
+    });
   }
 
   // Declarations an identifier refers to; `{ store }` and `obj.store` lead back to the variable.
@@ -655,6 +679,30 @@ function readStorePath(options: Node | undefined, at: string): string {
 }
 
 // A routed function is bundled through a named export, or as a method of an exported object.
+// CloudFront's `*` also matches "/", so "/users/*" would swallow "/users/*/posts/*". A pattern must
+// come after every pattern that matches only a subset of its paths; otherwise fewer wildcards, then longer, first.
+function patternMatches(pattern: string, path: string): boolean {
+  const source = pattern.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${source}$`).test(path);
+}
+
+export function orderBySpecificity(patterns: string[]): string[] {
+  const sample = (pattern: string) => pattern.replace(/\*/g, "x");
+  const narrower = (a: string, b: string) => a !== b && patternMatches(b, sample(a)) && !patternMatches(a, sample(b));
+  const wildcards = (pattern: string) => pattern.split("*").length - 1;
+  const remaining = [...patterns];
+  const ordered: string[] = [];
+  while (remaining.length) {
+    const ready = remaining
+      .filter((p) => !remaining.some((q) => narrower(q, p)))
+      .sort((a, b) => wildcards(a) - wildcards(b) || b.length - a.length);
+    const next = ready[0] ?? remaining[0]!;
+    ordered.push(next);
+    remaining.splice(remaining.indexOf(next), 1);
+  }
+  return ordered;
+}
+
 function declaredNameOf(decl: Node): string {
   if (Node.isFunctionDeclaration(decl)) return decl.getName() ?? "";
   if (Node.isVariableDeclaration(decl)) {

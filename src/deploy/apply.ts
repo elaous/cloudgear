@@ -28,7 +28,8 @@ export class PartialApplyError extends Error {
   }
 }
 
-export const INCOMPLETE_SPEC = { incomplete: true };
+// Kept alongside the attempted spec so the next plan sees a difference and drivers still know what was set up.
+export const incompleteSpec = (spec: Record<string, unknown>) => ({ ...spec, incomplete: true });
 
 export interface ApplyOptions {
   save: (state: State) => void;
@@ -68,7 +69,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
           type: desired.type,
           name: desired.name,
           physical_name: desired.physical_name,
-          spec: INCOMPLETE_SPEC,
+          spec: incompleteSpec(desired.spec),
           outputs: err.outputs,
           deps: desired.deps,
         };
@@ -88,7 +89,16 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
         break;
       case "update":
         log(`updating ${action.type} ${action.name} (${action.changes.join(", ")})`);
-        record(desired!, await driverFor(action.type).update(desired!, current!, action.changes, context), current);
+        try {
+          record(desired!, await driverFor(action.type).update(desired!, current!, action.changes, context), current);
+        } catch (err) {
+          if (err instanceof PartialApplyError) {
+            state.entries[action.key] = { ...current!, spec: incompleteSpec(desired!.spec), outputs: err.outputs, deps: desired!.deps };
+            options.save(state);
+            throw err.original;
+          }
+          throw err;
+        }
         break;
       case "replace":
         log(`replacing ${action.type} ${action.name}`);

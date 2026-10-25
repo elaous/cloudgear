@@ -85,6 +85,27 @@ describe("generate with a CDN", () => {
     }
   });
 
+  test("functions trust router-supplied identity unless a CDN lets viewers reach them directly", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear-trust-"));
+    try {
+      const entryOf = (build: string, name: string) => fs.readFileSync(path.join(dir, build, name, "entry.ts"), "utf8");
+      await generate({ entry: fixture("cdn/app.ts"), configPath: path.join(dir, "a.prototxt"), buildDir: path.join(dir, "cdn-build") });
+      expect(entryOf("cdn-build", "health")).toContain("trustContext: false");
+
+      await generate({ entry: fixture("cdn/bucket-only.ts"), configPath: path.join(dir, "b.prototxt"), buildDir: path.join(dir, "site-build") });
+      expect(entryOf("site-build", "f")).toContain("trustContext: true");
+
+      await generate({
+        entry: path.join(import.meta.dir, "..", "examples", "router-app", "main.ts"),
+        configPath: path.join(dir, "c.prototxt"),
+        buildDir: path.join(dir, "plain-build"),
+      });
+      expect(entryOf("plain-build", "health")).toContain("trustContext: true");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("an app without edge declarations has none in its config", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear-noedge-"));
     try {

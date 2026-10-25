@@ -37,7 +37,7 @@ export const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearC
 export const emptyState = (): State => ({ version: 1, project: "app", provider: "aws", entries: {} });
 
 // Records every SDK command and answers with canned responses.
-export function fakeAws(overrides: Record<string, (input: any, attempt: number) => any> = {}, dns: MemoryDnsDriver | null = new MemoryDnsDriver()) {
+export function fakeAws(overrides: Record<string, (input: any, attempt: number) => any> = {}, dns: MemoryDnsDriver | null = new MemoryDnsDriver(), onDns?: (provider: string, zone: string) => void) {
   const calls: { name: string; input: any }[] = [];
   const counts = new Map<string, number>();
   const sleeps: number[] = [];
@@ -81,7 +81,7 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
     region: "eu-west-1",
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
     clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client },
-    dns: dns ?? undefined,
+    dns: dns ? (provider, zone) => (onDns?.(provider, zone), dns) : undefined,
     sleep: async () => void sleeps.push(0),
   });
   return { calls, drivers, dns, sleeps, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };

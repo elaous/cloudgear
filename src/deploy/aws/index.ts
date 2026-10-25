@@ -43,8 +43,9 @@ export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
   clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient };
-  // Writes the certificate-validation and CDN records; required only when the app declares a CDN.
-  dns?: DnsDriver;
+  // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
+  // the declaration from the config still cleans up through the right zone). Needed only for certificates and CDNs.
+  dns?: (provider: string, zone: string) => DnsDriver | Promise<DnsDriver>;
   log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -64,9 +65,12 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   // CloudFront only accepts certificates from us-east-1, and its API is global.
   const acm = options.clients?.acm ?? new ACMClient({ region: "us-east-1" });
   const cloudfront = options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" });
-  const requireDns = (): DnsDriver => {
+  const zones = new Map<string, Promise<DnsDriver>>();
+  const requireDns = (provider: string, zone: string): Promise<DnsDriver> => {
     if (!options.dns) throw new Error("A DNS driver is required for the certificate and CDN, but none was configured");
-    return options.dns;
+    const key = `${provider}/${zone}`;
+    if (!zones.has(key)) zones.set(key, Promise.resolve(options.dns(provider, zone)));
+    return zones.get(key)!;
   };
   const log = options.log ?? (() => {});
 

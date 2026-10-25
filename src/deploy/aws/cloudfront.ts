@@ -15,6 +15,8 @@ import {
 import { AddPermissionCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyCommand } from "@aws-sdk/client-s3";
 import type { DnsDriver } from "@cloudgear/dns";
+import { fitName } from "../../names";
+import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
 import type { CdnComparable } from "../plan";
 import { stateKey, type StateEntry } from "../state";
@@ -24,7 +26,7 @@ export interface CloudFrontDeps {
   cloudfront: SendClient;
   s3: SendClient;
   lambda: SendClient;
-  dns: () => DnsDriver;
+  dns: (provider: string, zone: string) => Promise<DnsDriver>;
   region: string;
   sleep: (ms: number) => Promise<void>;
   log: (message: string) => void;
@@ -62,8 +64,9 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     return origins;
   }
 
-  async function ensureOac(name: string, type: "s3" | "lambda", known?: string): Promise<string> {
+  async function ensureOac(label: string, type: "s3" | "lambda", known?: string): Promise<string> {
     if (known) return known;
+    const name = fitName(label, 64);
     try {
       const created = await deps.cloudfront.send(
         new CreateOriginAccessControlCommand({
@@ -79,10 +82,14 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       return created.OriginAccessControl.Id;
     } catch (err) {
       if ((err as { name?: string }).name !== "OriginAccessControlAlreadyExists") throw err;
-      const list = await deps.cloudfront.send(new ListOriginAccessControlsCommand({}));
-      const found = (list.OriginAccessControlList?.Items ?? []).find((item: { Name: string }) => item.Name === name);
-      if (!found) throw err;
-      return found.Id;
+      let marker: string | undefined;
+      do {
+        const list = await deps.cloudfront.send(new ListOriginAccessControlsCommand({ Marker: marker }));
+        const found = (list.OriginAccessControlList?.Items ?? []).find((item: { Name: string }) => item.Name === name);
+        if (found) return found.Id;
+        marker = list.OriginAccessControlList?.IsTruncated ? list.OriginAccessControlList.NextMarker : undefined;
+      } while (marker);
+      throw err;
     }
   }
 
@@ -171,6 +178,13 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     if (!certificate?.outputs.arn) throw new Error(`Certificate for ${spec.domain} is not issued yet`);
     const origins = functionOrigins(entry, spec, context);
 
+    // Fail before creating anything if the name already points somewhere that is not ours.
+    const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+    const record = await dns.get(spec.domain, "CNAME");
+    if (record && !(outputs.domain_name && sameTarget(record.values[0], outputs.domain_name))) {
+      throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
+    }
+
     outputs.oac_s3 = await ensureOac(`cloudgear-${spec.domain}-s3`, "s3", outputs.oac_s3);
     if (origins.size) outputs.oac_lambda = await ensureOac(`cloudgear-${spec.domain}-lambda`, "lambda", outputs.oac_lambda);
 
@@ -191,7 +205,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
 
     await putBucketStatements(spec, outputs.arn!);
     for (const origin of origins.values()) await allowDistribution(origin.physical, spec.domain, outputs.arn!);
-    await deps.dns().upsert({ name: spec.domain, type: "CNAME", values: [outputs.domain_name!], ttl: 300 });
+    await dns.upsert({ name: spec.domain, type: "CNAME", values: [outputs.domain_name!], ttl: 300 });
     outputs.status = (await waitDeployed(outputs.id!)) ? "Deployed" : "InProgress";
     return outputs;
   }
@@ -225,7 +239,12 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     async delete(current) {
       const spec = current.spec as unknown as Partial<CdnComparable>;
       const domain = spec.domain ?? current.name;
-      await deps.dns().remove(domain, "CNAME");
+      // Only remove the record if it still points at the distribution this entry created.
+      if (current.outputs.domain_name && spec.dns_provider && spec.dns_zone) {
+        const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+        const record = await dns.get(domain, "CNAME");
+        if (record && sameTarget(record.values[0], current.outputs.domain_name)) await dns.remove(domain, "CNAME");
+      }
       if (current.outputs.id) await removeDistribution(current.outputs.id);
       for (const key of ["oac_s3", "oac_lambda"]) {
         const id = current.outputs[key];
@@ -252,8 +271,9 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       if ((err as { name?: string }).name === "NoSuchDistribution") return;
       throw err;
     }
-    // A distribution can only be deleted once disabling has propagated.
+    // A distribution can only be deleted once disabling has propagated, and the ETag may have changed meanwhile.
     if (!(await waitDeployed(id))) throw new Error(`Distribution ${id} is still being disabled; run apply again in a few minutes`);
+    etag = (await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }))).ETag;
     await ignoreMissing(deps.cloudfront, new DeleteDistributionCommand({ Id: id, IfMatch: etag }), "NoSuchDistribution");
   }
 

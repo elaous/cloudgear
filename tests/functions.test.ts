@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FunctionRouter, INVOKE_CONTENT_TYPE, response } from "@cloudgear/functions";
+import { FunctionRouter, INVOKE_CONTENT_TYPE, response, type RouteSpec } from "@cloudgear/functions";
 import { createHandler, type FunctionUrlEvent } from "@cloudgear/functions/drivers/aws";
 import { regionFromUrl } from "../packages/functions/sign";
 import { buildInput, compilePath, matchPath } from "../packages/functions/http";
@@ -265,12 +265,20 @@ describe("FunctionRouter rate limit", () => {
   });
 
   test("counts requests to unknown paths too, and starts a new window after windowMs", async () => {
-    const router = limited(40);
-    await router.fetch(new Request("http://app/nope", { headers: { "x-client": "a" } }));
-    await call(router, "a");
-    expect((await call(router, "a")).status).toBe(429);
-    await Bun.sleep(60);
-    expect((await call(router, "a")).status).toBe(200);
+    let now = 1_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const router = limited(1000);
+      await router.fetch(new Request("http://app/nope", { headers: { "x-client": "a" } }));
+      await call(router, "a");
+      expect((await call(router, "a")).status).toBe(429);
+      now += 999;
+      expect((await call(router, "a")).status).toBe(429);
+      now += 1;
+      expect((await call(router, "a")).status).toBe(200);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test("needs a key function or an explicit trustProxy", () => {
@@ -581,6 +589,28 @@ describe("aws createHandler", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ verbose: "1", id: "5" });
+  });
+
+  describe("HEAD", () => {
+    const routes: RouteSpec[] = [{ method: "GET", path: "/items/{id}" }, { method: "POST", path: "/only-post" }];
+    const head = (path: string, handler = createHandler(echo, routes)) =>
+      handler(event({ rawPath: path, requestContext: { http: { method: "HEAD" } } }));
+
+    test("is served by the GET route, without a body", async () => {
+      const res = await head("/items/7");
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe("");
+      expect(res.headers["content-type"]).toBe("application/json");
+    });
+
+    test("an explicit HEAD route wins and keeps its body", async () => {
+      const handler = createHandler(echo, [{ method: "HEAD", path: "/items/{id}" }, { method: "GET", path: "/items/{id}" }]);
+      expect(JSON.parse((await head("/items/7", handler)).body)).toEqual({ id: "7" });
+    });
+
+    test("is not served for paths that only have other methods", async () => {
+      expect((await head("/only-post")).statusCode).toBe(404);
+    });
   });
 
   test("rejects invoke payloads that are not { input }", async () => {

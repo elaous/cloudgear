@@ -11,6 +11,7 @@ cloudgear generate main.ts   # analyze the app -> cloudgear.prototxt + function 
 cloudgear plan               # diff the config against .cloudgear/state.json
 cloudgear apply              # create/update/delete cloud resources
 cloudgear import <name> [id] # adopt an existing resource instead of creating it
+cloudgear invalidate [path]  # clear the CDN's cache
 cloudgear destroy            # tear down everything cloudgear created
 ```
 
@@ -196,6 +197,101 @@ which takes the first `X-Forwarded-For` address; enable that only behind a
 proxy that sets or overwrites the header, because otherwise clients choose
 their own identity.
 
+### Domain, certificate and CDN
+
+Serve a site and the API from one domain of your own. Declare the pieces and
+hand the CDN to the router:
+
+```ts
+import { BlobStore } from "@cloudgear/blob";
+import { DNS } from "@cloudgear/dns";
+import { CDN, Cert } from "@cloudgear/cdn";
+import { FunctionRouter } from "@cloudgear/functions";
+
+const site = new BlobStore("aws", "://my-site", { path: "/web" }); // the static files
+const dns = new DNS("gandi", "cdn.example.com", { zone: "example.com" });
+const cert = new Cert("aws", dns);
+const cdn = new CDN("aws", dns, { cert, bucket: site });
+
+const router = new FunctionRouter("aws", { cdn })
+  .url("GET", "/objects/{param}", functions.getObjects);
+router.listen(); // { getObjects: "https://cdn.example.com/objects/{param}" }
+```
+
+`cloudgear apply` then: requests an ACM certificate (in `us-east-1`, where
+CloudFront needs it) and writes its validation record through `dns`; waits
+until it is issued; creates a CloudFront distribution for `cdn.example.com`
+with the bucket (under its `path`, if any) as the default origin and one
+behavior per route pointing at that route's function; allows only that
+distribution to read the bucket and call the functions; and points
+`cdn.example.com` at the distribution. Deletes run in the opposite order. A
+`create` that fails part-way keeps what it made in state, and the next `apply`
+resumes from there.
+
+DNS providers (`new DNS(provider, domain, { zone })`): `"gandi"` (LiveDNS; set
+`GANDI_TOKEN` to a personal access token, or the legacy `GANDI_API_KEY`) and
+`"aws"` (Route 53; needs a public hosted zone named like the zone, with
+credentials from the usual AWS chain). Credentials are read from the
+environment when a record is written and are never stored in the config or
+state. `zone` defaults to the last two labels of the domain (three for common
+suffixes like `co.uk`); set it for anything else, and make it the zone that
+actually holds the records (a delegated subzone shadows its parent). Each
+state entry remembers its own DNS provider and zone, so removing the
+declarations still cleans up through the right zone. The domain MUST be a subdomain of its zone, because the
+apex cannot be a CNAME. Add a provider with `registerDnsDriver`, like blob
+drivers.
+
+Rules the analyzer enforces:
+
+- One `DNS`, one `Cert` and one `CDN` per app, each assigned to a variable
+  with literal arguments, and the `Cert` and `CDN` MUST use that `DNS`.
+- The router's `cdn` MUST be that `CDN`, and CloudFront reaches functions
+  through an origin access control, so the router MUST be `authenticated:
+  "iam"` (the default).
+- CloudFront picks a behavior by path only. Two routes that share a path
+  (`GET /foo/{param}` and `POST /foo/{param}`) can use the same function but not
+  different ones; give them different paths. Path params become `*`.
+- Requests through the CDN reach functions directly, so the router's
+  `authenticate` hook and `rateLimit` do not run for them. `generate` refuses
+  a router that has `authenticate` unless every route is `{ public: true }`,
+  and warns about `rateLimit`.
+- A `dry` bucket is not created or deleted, but the CDN still adds one
+  statement to its bucket policy (and removes it again), which `generate`
+  warns about. The bucket (or its `path`) is public through the CDN, so
+  `generate` also warns when a function uses the same files.
+- Routes become CloudFront path patterns. Patterns are ordered so a longer one
+  is matched before one that would swallow it (`/users/*/posts/*` before
+  `/users/*`, because CloudFront's `*` also matches `/`). A route that would
+  capture the site's own paths (`/`, `/index.html`, `/favicon.ico`,
+  `/assets/*`, `/static/*`; so `/{slug}` and `/{a}/{b}` are rejected) is
+  rejected: put API routes under a fixed prefix. Patterns allow only letters, digits and
+  `_ - . * $ / ~ " ' @ : +`, and more than 25 behaviors exceeds CloudFront's
+  default quota (a warning). An exact pattern like `/items` does not match
+  `/items/`, which then goes to the site.
+- Anyone can reach functions through the CDN with their own requests, so
+  functions behind it never trust a caller identity (`context.auth` is not
+  populated), and the router's invoke protocol still ignores method and path
+  matching there. This is why `authenticate` needs every route to be public.
+- HEAD requests are served by the GET route, without a body.
+
+cloudgear never overwrites a DNS record it does not own: if the domain
+already has a record pointing elsewhere, `apply` stops before the certificate
+is requested, and `destroy` only removes the record while it still points at the
+distribution cloudgear created. The certificate's validation record is left in
+place on destroy, because ACM shares it between certificates for a domain.
+
+`cloudgear invalidate [path...]` clears the CDN's cache (`/*` by default).
+Uploading the site's files is not part of cloudgear yet.
+
+Things that have not been checked against real services: all of the
+CloudFront, ACM, Route 53 and Gandi calls are tested against fakes only. AWS
+documents that a POST or PUT through CloudFront to a Lambda function URL needs
+the client to send `x-amz-content-sha256` (the SHA-256 of the body), and an
+origin access control may replace the `Authorization` header with its own
+signature; check both before relying on this for write routes or per-user
+tokens. The S3 origin uses the regional bucket domain in the deploy region, so
+the bucket MUST live there.
+
 ### Runtime: `BlobStore`
 
 `BlobStore` is a provider-neutral wrapper. It parses the URI, resolves the
@@ -379,6 +475,10 @@ Where each moving part lives, since several are called across packages:
 | `grant`, `normalizeBlobPath` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
 | `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
+| `DNS`, `registerDnsDriver` | `packages/dns/index.ts` | apps; `src/analyze/app.ts` |
+| Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` (used by `DNS` and `src/cli.ts`) |
+| `Cert`, `CDN` | `packages/cdn/index.ts` | apps; `src/analyze/app.ts` |
+| certificate and CloudFront drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts` | `awsDrivers` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
@@ -386,7 +486,7 @@ Where each moving part lives, since several are called across packages:
 ## Status
 
 Early draft. Only the `aws` provider has inference rules and deploy drivers;
-`BlobStore` is the only resource client. Function URLs are IAM-protected, so
-the router needs AWS credentials (see Authentication); end-user
-authentication is not part of the router yet. Input objects are not
-validated against their TypeScript types at runtime.
+`BlobStore` is the only storage client. Function URLs are IAM-protected, so
+the router needs AWS credentials (see Authentication). Input objects are not
+validated against their TypeScript types at runtime. The CDN serves one
+domain per app and uploading the static site is not built yet.

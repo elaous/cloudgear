@@ -1,7 +1,10 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Analyzing an app and bundling functions take seconds when the machine is busy.
+setDefaultTimeout(30_000);
 
 const root = path.join(import.meta.dir, "..");
 const entry = path.join(root, "examples", "router-app", "main.ts");
@@ -87,5 +90,56 @@ describe("cloudgear CLI", () => {
     const res = run("frobnicate");
     expect(res.code).toBe(1);
     expect(res.err).toContain('Unknown command "frobnicate"');
+  });
+});
+
+describe("cloudgear CLI with a CDN", () => {
+  let dir: string;
+  const cdnEntry = path.join(root, "tests", "fixtures", "router", "cdn", "app.ts");
+  const config = () => path.join(dir, "cloudgear.prototxt");
+  const run = (...args: string[]) => {
+    const proc = Bun.spawnSync(["bun", path.join(root, "src", "cli.ts"), ...args, "--config", config()], {
+      cwd: dir,
+      env: { ...process.env, AWS_REGION: "eu-west-1" },
+    });
+    return { code: proc.exitCode, out: proc.stdout.toString(), err: proc.stderr.toString() };
+  };
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear-cli-cdn-"));
+  });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  test("plan lists the certificate and CDN after what they depend on", () => {
+    expect(run("generate", cdnEntry, "--project", "edge").err).toBe("");
+    const plan = run("plan").out;
+    const order = ["@aws.Lambda getObject", "@aws.Certificate cdn.example.com", "@aws.CloudFront cdn.example.com"].map((entry) => plan.indexOf(`+ ${entry}`));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect(order[2]).toBeGreaterThan(order[0]!);
+    expect(order[2]).toBeGreaterThan(order[1]!);
+    expect(plan).toContain("Plan: 6 to create");
+  });
+
+  test("invalidate before anything is deployed explains what to do", () => {
+    const res = run("invalidate");
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/No CDN has been deployed; run `cloudgear apply` first/);
+  });
+
+  test("invalidate rejects paths without a leading slash", () => {
+    const stateDir = path.join(dir, ".cloudgear");
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({
+        version: 1,
+        project: "edge",
+        provider: "aws",
+        entries: { "@aws.CloudFront.cdn.example.com": { kind: "resource", type: "@aws.CloudFront", name: "cdn.example.com", physical_name: "cdn.example.com", spec: {}, outputs: { id: "E1" } } },
+      }),
+    );
+    const res = run("invalidate", "index.html");
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/Invalidation path "index.html" must start with "\/"/);
   });
 });

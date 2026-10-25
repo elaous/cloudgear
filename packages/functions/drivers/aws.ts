@@ -53,13 +53,16 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
     if (!resolved) {
       return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
     }
-    return toLambda(await invoke(fn, resolved.input, resolved.context));
+    const result = await invoke(fn, resolved.input, resolved.context);
+    // A HEAD request served by a GET route gets the headers without the body.
+    return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
   };
 }
 
 interface Resolved {
   input: unknown;
   context: RequestContext;
+  headOnly?: boolean;
 }
 
 function resolveInput(
@@ -79,13 +82,22 @@ function resolveInput(
   }
 
   const method = event.requestContext.http.method.toUpperCase();
-  for (const route of routes) {
-    if (route.method !== method) continue;
-    const params = matchPath(route.matcher, event.rawPath);
-    if (!params) continue;
-    return { input: buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params), context: {} };
-  }
-  return undefined;
+  const find = (wanted: string) => {
+    for (const route of routes) {
+      if (route.method !== wanted) continue;
+      const params = matchPath(route.matcher, event.rawPath);
+      if (params) return params;
+    }
+    return undefined;
+  };
+  const params = find(method) ?? (method === "HEAD" ? find("GET") : undefined);
+  if (!params) return undefined;
+  const headOnly = method === "HEAD" && !routes.some((route) => route.method === "HEAD" && matchPath(route.matcher, event.rawPath));
+  return {
+    input: buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params),
+    context: {},
+    headOnly,
+  };
 }
 
 function toLambda(result: HttpResult): FunctionUrlResult {

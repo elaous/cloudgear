@@ -69,7 +69,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       member: fn.member,
       routes: fn.routes,
       provider: model.provider,
-      authenticated: model.authenticated,
+      // Viewers of a CDN reach functions with their own requests, so no identity can be vouched for.
+      trustContext: model.authenticated === "iam" && !model.cdn?.behaviors.length,
       outDir: options.buildDir,
     });
     const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);
@@ -107,7 +108,17 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     function: functions,
     invoker: invokers,
     authenticated: model.authenticated,
+    dns: model.dns,
+    certificate: model.certificate,
+    cdn: model.cdn && {
+      provider: model.cdn.provider,
+      domain: model.cdn.domain,
+      bucket: model.cdn.bucket,
+      path: model.cdn.path,
+      behavior: model.cdn.behaviors.map((b) => ({ path_pattern: b.pathPattern, function: b.function, method: b.methods })),
+    },
   };
+  if (config.cdn) providerProfile(config.cdn.provider);
 
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));

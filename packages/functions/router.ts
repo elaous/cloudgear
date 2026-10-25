@@ -58,6 +58,9 @@ export interface FunctionRouterOptions {
   // Establishes who is calling. Return null for 401; every route requires it unless `public`.
   // The result reaches functions as `context.auth`, and only when `authenticated` is "iam".
   authenticate?: Authenticator;
+  // A CDN (from @cloudgear/cdn) serving this router's routes from its own domain. `cloudgear generate`
+  // reads it: the CDN then sends each route to its function. Routes through it skip `authenticate`.
+  cdn?: { readonly domain: string };
   // Per-process counters: instances of a serverless app do not share them.
   rateLimit?: RateLimit;
 }
@@ -186,6 +189,8 @@ export class FunctionRouter {
     const endpoints = remote ? this.loadEndpoints() : null;
     if (remote && !endpoints) throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
     const local = this.server?.url.origin;
+    const cdn = remote && this.options.cdn ? `https://${this.options.cdn.domain}` : undefined;
+    if (cdn) return Object.fromEntries(this.routes.map((route) => [route.name, `${cdn}${route.path}`]));
     if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
     const urls: Record<string, string> = {};
     for (const route of this.routes) {

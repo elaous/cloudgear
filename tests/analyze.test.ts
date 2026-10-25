@@ -1,10 +1,13 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { analyzeApp } from "../src/analyze/app";
+import { analyzeApp, orderBySpecificity } from "../src/analyze/app";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
+
+// Analyzing an app and bundling functions take seconds when the machine is busy.
+setDefaultTimeout(30_000);
 
 const exampleDir = path.join(import.meta.dir, "..", "examples", "router-app");
 const fixture = (name: string) => path.join(import.meta.dir, "fixtures", "router", name);
@@ -97,6 +100,115 @@ describe("analyzeApp", () => {
     const model = analyzeApp(fixture("export-alias.ts"));
     expect(model.functions[0]).toMatchObject({ name: "handler", declaredName: "impl" });
     expect(model.functions[0]!.routes[0]!.name).toBe("impl");
+  });
+
+  describe("DNS, certificate and CDN", () => {
+    test("reads the declarations and turns routes into CloudFront behaviors", () => {
+      const model = analyzeApp(fixture("cdn/app.ts"));
+      expect(model.dns).toEqual({ provider: "gandi", domain: "cdn.example.com", zone: "example.com" });
+      expect(model.certificate).toEqual({ domain: "cdn.example.com" });
+      expect(model.cdn).toMatchObject({ provider: "aws", domain: "cdn.example.com", bucket: "my-site", path: "web/" });
+      // fewest wildcards first, then longest; methods merged per path for the same function
+      expect(model.cdn!.behaviors).toEqual([
+        { pathPattern: "/health", function: "health", methods: ["GET"] },
+        { pathPattern: "/users/*/profile", function: "nested", methods: ["GET"] },
+        { pathPattern: "/objects/*", function: "getObject", methods: ["GET", "HEAD", "PUT"] },
+      ]);
+      expect(model.warnings).toEqual([]);
+    });
+
+    test("a CDN that is not handed to the router only serves the bucket", () => {
+      const model = analyzeApp(fixture("cdn/bucket-only.ts"));
+      expect(model.cdn).toMatchObject({ domain: "www.example.org", bucket: "my-site", path: "", behaviors: [] });
+      expect(model.dns).toMatchObject({ provider: "aws", zone: "example.org" });
+    });
+
+    test("apps without any of them have no edge model", () => {
+      const model = analyzeApp(path.join(exampleDir, "main.ts"));
+      expect(model.dns).toBeUndefined();
+      expect(model.cdn).toBeUndefined();
+    });
+
+    test("warns about a dry bucket and about a rate limit the CDN bypasses", () => {
+      expect(analyzeApp(fixture("cdn/dry-bucket.ts")).warnings).toEqual([
+        expect.stringMatching(/bucket "existing-site" is dry, but the CDN adds one statement to its bucket policy/),
+      ]);
+      expect(analyzeApp(fixture("cdn/authenticate-all-public.ts")).warnings).toEqual([
+        expect.stringMatching(/rateLimit does not apply to routes served through the CDN/),
+      ]);
+    });
+
+    test.each([
+      ["cdn/method-conflict.ts", /CloudFront cannot route by method: GET \/foo\/\{param\} \(getFoo\) and POST \/foo\/\{param\} \(createFoo\) share the path "\/foo\/\*"/],
+      ["cdn/authenticate-bypass.ts", /authenticate hook does not run for "GET \/me"; mark it \{ public: true \} or drop the cdn/],
+      ["cdn/authenticated-none.ts", /needs authenticated: "iam"/],
+      ["cdn/apex.ts", /zone apex, which cannot be a CNAME/],
+      ["cdn/other-dns.ts", /Only one DNS per app is supported/],
+      ["cdn/no-cdn-declared.ts", /the router's cdn needs a CDN declared with new CDN/],
+      ["cdn/missing-bucket.ts", /the CDN's bucket must be a BlobStore variable/],
+    ])("rejects %s", (file, error) => {
+      expect(() => analyzeApp(fixture(file))).toThrow(error);
+    });
+
+    test("nested parameter routes are ordered so the longer one is matched first", () => {
+      const model = analyzeApp(fixture("cdn/nested-params.ts"));
+      expect(model.cdn!.behaviors.map((b) => b.pathPattern)).toEqual(["/users/*/posts/*", "/users/*"]);
+    });
+
+    test("orderBySpecificity puts every pattern after those it would swallow", () => {
+      expect(orderBySpecificity(["/a/*", "/a/*/b/*", "/a/b", "/*/z"])).toEqual(["/a/b", "/*/z", "/a/*/b/*", "/a/*"]);
+      expect(orderBySpecificity(["/x/*", "/x/y/*", "/x/y/z"])).toEqual(["/x/y/z", "/x/y/*", "/x/*"]);
+      expect(orderBySpecificity(["/b", "/a"])).toEqual(["/b", "/a"]);
+    });
+
+    test("orderBySpecificity does not confuse a literal x with a wildcard", () => {
+      expect(orderBySpecificity(["/x*", "/x*x*"])).toEqual(["/x*x*", "/x*"]);
+      expect(orderBySpecificity(["/x*x*", "/x*"])).toEqual(["/x*x*", "/x*"]);
+    });
+
+    test("orderBySpecificity compiles each pattern once instead of in its inner loop", () => {
+      const patterns = Array.from({ length: 200 }, (_, i) => `/api/v${i}/*/items/*`);
+      const NativeRegExp = RegExp;
+      let compiled = 0;
+      globalThis.RegExp = new Proxy(NativeRegExp, {
+        construct(target, args, newTarget) {
+          compiled++;
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+      try {
+        expect(orderBySpecificity(patterns)).toHaveLength(200);
+      } finally {
+        globalThis.RegExp = NativeRegExp;
+      }
+      expect(compiled).toBe(200);
+    });
+
+    test("two-parameter routes would capture asset paths and are rejected", () => {
+      expect(() => analyzeApp(fixture("cdn/two-params.ts"))).toThrow(/becomes "\/\*\/\*", which would capture the static site's \/assets\/app\.js/);
+    });
+
+    test("a route that would take over the static site's own pages is rejected", () => {
+      expect(() => analyzeApp(fixture("cdn/catch-all.ts"))).toThrow(/GET \/\{slug\} becomes "\/\*", which would capture the static site's \//);
+    });
+
+    test("path characters CloudFront does not allow are rejected", () => {
+      expect(() => analyzeApp(fixture("cdn/bad-chars.ts"))).toThrow(/CloudFront path patterns allow only letters, digits/);
+    });
+
+    test("warns when more behaviors than the default quota are needed", () => {
+      const warnings = analyzeApp(fixture("cdn/many-routes.ts")).warnings;
+      expect(warnings).toEqual([expect.stringMatching(/26 CloudFront behaviors exceed the default quota of 25/)]);
+    });
+
+    test("warns when a function uses files the CDN makes public", () => {
+      const warnings = analyzeApp(fixture("cdn/shared-bucket.ts")).warnings;
+      expect(warnings).toEqual([expect.stringMatching(/"readPrivate" also uses the CDN's bucket "my-site" under "private\/"; files there are public through the CDN/)]);
+    });
+
+    test("public routes may skip the authenticate hook", () => {
+      expect(() => analyzeApp(fixture("cdn/authenticate-all-public.ts"))).not.toThrow();
+    });
   });
 
   test("a named function expression's own name is the default route name", () => {

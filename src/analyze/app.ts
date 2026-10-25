@@ -10,6 +10,7 @@ import {
   type VariableDeclaration,
 } from "ts-morph";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
+import { DNS } from "@cloudgear/dns";
 import { METHODS } from "@cloudgear/functions";
 
 export interface AnalyzedResource {
@@ -56,7 +57,20 @@ interface Tally {
 
 export type Authentication = "iam" | "none";
 
-export interface AppModel {
+export interface EdgeModel {
+  dns?: { provider: string; domain: string; zone: string };
+  certificate?: { domain: string };
+  cdn?: {
+    provider: string;
+    domain: string;
+    // Name of the bucket resource and the key prefix of the static site within it.
+    bucket: string;
+    path: string;
+    behaviors: { pathPattern: string; function: string; methods: string[] }[];
+  };
+}
+
+export interface AppModel extends EdgeModel {
   provider: string;
   authenticated: Authentication;
   entry: string;
@@ -138,6 +152,7 @@ export function analyzeApp(entryPath: string): AppModel {
     );
   }
   const routeNames = new Map<string, string>();
+  const publicRoutes = new Map<string, boolean>();
 
   const functions = new Map<Node, AnalyzedFunction>();
   const addCalls = collectAddCalls(router, where);
@@ -195,7 +210,9 @@ export function analyzeApp(entryPath: string): AppModel {
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
-    const routeName = readRouteName(call.getArguments()[3], where(call)) ?? (fn.declaredName || `${method} ${routePath}`);
+    const routeOptions = readRouteOptions(call.getArguments()[3], where(call));
+    publicRoutes.set(`${method} ${routePath}`, routeOptions.public);
+    const routeName = routeOptions.name ?? (fn.declaredName || `${method} ${routePath}`);
     const clashing = routeNames.get(routeName);
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
@@ -210,8 +227,10 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 
   warnModuleLevelUse();
+  const edge = analyzeEdge();
 
   return {
+    ...edge,
     provider,
     authenticated,
     entry: relative(entry),
@@ -259,6 +278,167 @@ export function analyzeApp(entryPath: string): AppModel {
     };
     visit(root);
     root.forEachDescendant((node) => void visit(node));
+  }
+
+  function analyzeEdge(): EdgeModel {
+    const ofClass = (pkg: string, name: string) => newExpressions.filter((e) => isClass(e, pkg, name));
+    const dnsExprs = ofClass("@cloudgear/dns", "DNS");
+    const certExprs = ofClass("@cloudgear/cdn", "Cert");
+    const cdnExprs = ofClass("@cloudgear/cdn", "CDN");
+    const routerCdn = readCdnReference(router.getArguments()[1], where(router));
+
+    if (!dnsExprs.length && !certExprs.length && !cdnExprs.length) {
+      if (routerCdn) throw new Error(`${where(router)}: the router's cdn option needs a CDN declared with new CDN(...)`);
+      return {};
+    }
+    for (const [name, exprs] of [["DNS", dnsExprs], ["Cert", certExprs], ["CDN", cdnExprs]] as const) {
+      if (exprs.length > 1) throw new Error(`Only one ${name} per app is supported, found: ${exprs.map(where).join(", ")}`);
+    }
+    if (routerCdn !== undefined && !cdnExprs.length) {
+      throw new Error(`${where(router)}: the router's cdn needs a CDN declared with new CDN(...)`);
+    }
+    const [dnsExpr] = dnsExprs;
+    const [certExpr] = certExprs;
+    const [cdnExpr] = cdnExprs;
+
+    const initializerOf = (node: Node | undefined, what: string, at: string): NewExpression => {
+      const decl = node && Node.isIdentifier(node) ? resolveSymbol(node.getSymbol())?.getDeclarations()[0] : undefined;
+      const init = decl && Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
+      if (!init || !Node.isNewExpression(init)) throw new Error(`${at}: ${what} must be a variable initialized with new ...(...)`);
+      return init;
+    };
+
+    let dns: EdgeModel["dns"];
+    let domainName: string | undefined;
+    if (dnsExpr) {
+      const at = where(dnsExpr);
+      const [providerArg, domainArg, optionsArg] = dnsExpr.getArguments();
+      const dnsProvider = stringLiteral(providerArg, `${at}: DNS provider`);
+      if (dnsProvider !== "gandi" && dnsProvider !== "aws") throw new Error(`${at}: DNS provider must be "gandi" or "aws"`);
+      const zone = readStringOption(optionsArg, "zone", `${at}: DNS options`);
+      try {
+        const parsed = new DNS(dnsProvider, stringLiteral(domainArg, `${at}: DNS domain`), zone ? { zone } : {});
+        dns = { provider: dnsProvider, domain: parsed.domain, zone: parsed.zone };
+      } catch (err) {
+        throw new Error(`${at}: ${(err as Error).message}`);
+      }
+      domainName = dns.domain;
+      if (dns.domain === dns.zone) {
+        throw new Error(`${at}: "${dns.domain}" is the zone apex, which cannot be a CNAME; serve the site from a subdomain`);
+      }
+    }
+
+    let certificate: EdgeModel["certificate"];
+    if (certExpr) {
+      const at = where(certExpr);
+      const [providerArg, dnsArg] = certExpr.getArguments();
+      if (stringLiteral(providerArg, `${at}: Cert provider`) !== "aws") throw new Error(`${at}: Cert provider must be "aws"`);
+      if (!dnsExpr || initializerOf(dnsArg, "the Cert's DNS", at) !== dnsExpr) throw new Error(`${at}: the Cert must use the app's DNS`);
+      certificate = { domain: domainName! };
+    }
+
+    let cdn: EdgeModel["cdn"];
+    if (cdnExpr) {
+      const at = where(cdnExpr);
+      const [providerArg, dnsArg, optionsArg] = cdnExpr.getArguments();
+      if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
+      if (!dnsExpr || initializerOf(dnsArg, "the CDN's DNS", at) !== dnsExpr) throw new Error(`${at}: the CDN must use the app's DNS`);
+      if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with cert and bucket`);
+
+      let bucketStore: Store | undefined;
+      let certOk = false;
+      for (const prop of optionsArg.getProperties()) {
+        if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in CDN options cannot be analyzed`);
+        const key = propName(prop);
+        const decl = valueDeclaration(prop);
+        if (key === "cert") {
+          const init = decl && Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
+          certOk = !!certExpr && init === certExpr;
+        } else if (key === "bucket") {
+          bucketStore = decl && resourceByDecl.get(decl);
+        }
+      }
+      if (!certOk) throw new Error(`${at}: the CDN's cert must be the app's Cert, passed as a variable`);
+      if (!bucketStore) throw new Error(`${at}: the CDN's bucket must be a BlobStore variable declared in your project`);
+      if (bucketStore.resource.provider !== "aws") throw new Error(`${at}: the CDN's bucket must use provider "aws"`);
+      if (bucketStore.resource.dry) {
+        warnings.push(`${at}: bucket "${bucketStore.resource.name}" is dry, but the CDN adds one statement to its bucket policy`);
+      }
+
+      const behaviors = routerCdn === undefined ? [] : cdnBehaviors(at);
+      if (routerCdn !== undefined && initializerOf(routerCdn, "the router's cdn", where(router)) !== cdnExpr) {
+        throw new Error(`${where(router)}: the router's cdn must be the app's CDN`);
+      }
+      if (routerCdn === undefined) {
+        // The CDN only serves the bucket.
+      } else {
+        if (authenticated !== "iam") {
+          throw new Error(`${where(router)}: a CDN reaches functions through CloudFront, which needs authenticated: "iam"`);
+        }
+        const options = router.getArguments()[1];
+        if (hasOption(options, "authenticate")) {
+          const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
+          if (open) {
+            throw new Error(
+              `${where(router)}: with a cdn, CloudFront calls functions directly and the router's authenticate hook does not run for "${open[0]}"; mark it { public: true } or drop the cdn`,
+            );
+          }
+        }
+        if (hasOption(options, "rateLimit")) {
+          warnings.push(`${where(router)}: rateLimit does not apply to routes served through the CDN`);
+        }
+      }
+      for (const fn of functions.values()) {
+        for (const use of fn.uses.values()) {
+          const overlaps = use.path.startsWith(bucketStore.path) || bucketStore.path.startsWith(use.path);
+          if (use.resource === bucketStore.resource.name && overlaps) {
+            warnings.push(
+              `${at}: "${fn.name}" also uses the CDN's bucket "${use.resource}"${use.path ? ` under "${use.path}"` : ""}; files there are public through the CDN`,
+            );
+          }
+        }
+      }
+      cdn = { provider: "aws", domain: domainName!, bucket: bucketStore.resource.name, path: bucketStore.path, behaviors };
+    }
+    return { dns, certificate, cdn };
+  }
+
+  // CloudFront picks a behavior by path only, so each pattern needs exactly one function.
+  function cdnBehaviors(at: string) {
+    const assertSupported = (route: { method: string; path: string }, pattern: string) => {
+      if (!/^[A-Za-z0-9_\-.*$/~"'@:+]+$/.test(pattern)) {
+        throw new Error(`${at}: CloudFront path patterns allow only letters, digits and _ - . * $ / ~ " ' @ : +; ${route.method} ${route.path} does not qualify`);
+      }
+      const shadowed = SITE_PATHS.find((sitePath) => patternMatches(pattern, sitePath));
+      if (shadowed) {
+        throw new Error(
+          `${at}: ${route.method} ${route.path} becomes "${pattern}", which would capture the static site's ${shadowed}; put it under a fixed prefix such as /api`,
+        );
+      }
+    };
+    const byPattern = new Map<string, { fn: AnalyzedFunction; methods: Set<string>; first: string }>();
+    for (const fn of functions.values()) {
+      for (const route of fn.routes) {
+        const pattern = route.path.replace(/\{[^}]+\}/g, "*");
+        assertSupported(route, pattern);
+        const existing = byPattern.get(pattern);
+        if (existing && existing.fn !== fn) {
+          throw new Error(
+            `${at}: CloudFront cannot route by method: ${existing.first} (${existing.fn.name}) and ${route.method} ${route.path} (${fn.name}) share the path "${pattern}"; give them different paths`,
+          );
+        }
+        const entry = existing ?? { fn, methods: new Set<string>(), first: `${route.method} ${route.path}` };
+        entry.methods.add(route.method);
+        byPattern.set(pattern, entry);
+      }
+    }
+    if (byPattern.size > 25) {
+      warnings.push(`${at}: ${byPattern.size} CloudFront behaviors exceed the default quota of 25 per distribution`);
+    }
+    return orderBySpecificity([...byPattern.keys()]).map((pathPattern) => {
+      const { fn, methods } = byPattern.get(pathPattern)!;
+      return { pathPattern, function: fn.name, methods: [...methods].sort() };
+    });
   }
 
   // Declarations an identifier refers to; `{ store }` and `obj.store` lead back to the variable.
@@ -360,19 +540,57 @@ function hasOption(options: Node | undefined, name: string): boolean {
   );
 }
 
-function readRouteName(options: Node | undefined, at: string): string | undefined {
-  if (!options) return undefined;
+function readRouteOptions(options: Node | undefined, at: string): { name?: string; public: boolean } {
+  const result: { name?: string; public: boolean } = { public: false };
+  if (!options) return result;
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: route options must be an object literal`);
   for (const prop of options.getProperties()) {
     if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in route options cannot be analyzed`);
-    if (Node.isPropertyAssignment(prop) && propName(prop) === "name") {
+    const key = propName(prop);
+    if (key === "name") {
+      if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: route name must be a string literal`);
       const name = stringLiteral(prop.getInitializer(), `${at}: route name`);
       if (!name) throw new Error(`${at}: route name must not be empty`);
-      return name;
+      result.name = name;
+    } else if (key === "public") {
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer()?.getText() : undefined;
+      if (value !== "true" && value !== "false") throw new Error(`${at}: route public must be the literal true or false`);
+      result.public = value === "true";
     }
-    if (Node.isShorthandPropertyAssignment(prop) && propName(prop) === "name") {
-      throw new Error(`${at}: route name must be a string literal`);
+  }
+  return result;
+}
+
+function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {
+  if (!options) return undefined;
+  if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at} must be an object literal`);
+  for (const prop of options.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread cannot be analyzed`);
+    if (propName(prop) === name) {
+      if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: ${name} must be a string literal`);
+      return stringLiteral(prop.getInitializer(), `${at}: ${name}`);
     }
+  }
+  return undefined;
+}
+
+// The declaration a property's value refers to: `{ cert }` and `{ cert: cert }` alike.
+function valueDeclaration(prop: Node): Node | undefined {
+  if (Node.isShorthandPropertyAssignment(prop)) return resolveSymbol(prop.getValueSymbol())?.getDeclarations()[0];
+  if (Node.isPropertyAssignment(prop)) {
+    const init = prop.getInitializer();
+    return init && Node.isIdentifier(init) ? resolveSymbol(init.getSymbol())?.getDeclarations()[0] : undefined;
+  }
+  return undefined;
+}
+
+function readCdnReference(options: Node | undefined, at: string): Node | undefined {
+  if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
+  for (const prop of options.getProperties()) {
+    if (propName(prop) !== "cdn") continue;
+    const decl = valueDeclaration(prop);
+    if (!decl) throw new Error(`${at}: the router's cdn must be a variable`);
+    return Node.isVariableDeclaration(decl) ? decl.getNameNode() : decl;
   }
   return undefined;
 }
@@ -462,6 +680,38 @@ function readStorePath(options: Node | undefined, at: string): string {
 }
 
 // A routed function is bundled through a named export, or as a method of an exported object.
+// CloudFront's `*` also matches "/", so "/users/*" would swallow "/users/*/posts/*". A pattern must
+// come after every pattern that matches only a subset of its paths; otherwise fewer wildcards, then longer, first.
+// Paths a static site normally serves; an API route must not capture them.
+const SITE_PATHS = ["/", "/index.html", "/favicon.ico", "/assets/app.js", "/static/app.js"];
+
+function patternMatches(pattern: string, path: string): boolean {
+  const source = pattern.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${source}$`).test(path);
+}
+
+export function orderBySpecificity(patterns: string[]): string[] {
+  // Stand in for `*` with a character no pattern contains, so a literal never looks like a wildcard's match.
+  const filler = ["#", "%", "!", "^", "\u0001"].find((c) => !patterns.some((p) => p.includes(c))) ?? "\u0002";
+  const regexes = patterns.map((p) => new RegExp(`^${p.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*")}$`));
+  const samples = patterns.map((p) => p.replace(/\*/g, filler));
+  const narrower = (a: number, b: number) => a !== b && regexes[b]!.test(samples[a]!) && !regexes[a]!.test(samples[b]!);
+  const narrow = patterns.map((_, a) => patterns.map((_, b) => narrower(a, b)));
+  const wildcards = (pattern: string) => pattern.split("*").length - 1;
+
+  const remaining = new Set(patterns.keys());
+  const ordered: string[] = [];
+  while (remaining.size) {
+    const ready = [...remaining]
+      .filter((p) => ![...remaining].some((q) => narrow[q]![p]))
+      .sort((a, b) => wildcards(patterns[a]!) - wildcards(patterns[b]!) || patterns[b]!.length - patterns[a]!.length);
+    const next = ready[0] ?? [...remaining][0]!;
+    ordered.push(patterns[next]!);
+    remaining.delete(next);
+  }
+  return ordered;
+}
+
 function declaredNameOf(decl: Node): string {
   if (Node.isFunctionDeclaration(decl)) return decl.getName() ?? "";
   if (Node.isVariableDeclaration(decl)) {

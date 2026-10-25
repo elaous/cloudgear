@@ -11,6 +11,8 @@ export interface StateEntry {
   // Comparable spec as last applied; see desiredEntries() in plan.ts.
   spec: Record<string, unknown>;
   outputs: Record<string, string>;
+  // State keys this entry needs; deletes run in reverse dependency order.
+  deps?: string[];
 }
 
 export interface State {

@@ -25,13 +25,13 @@ describe("analyzeApp", () => {
     ).toEqual([
       {
         name: "foo",
-        routes: [{ method: "POST", path: "/foo/{param}" }],
+        routes: [{ method: "POST", path: "/foo/{param}", name: "createFoo" }],
         inputType: "types.FooInput",
         // archive is only reached through the archiveEvent helper
         uses: { myblob: ["write"], "cloudgear-example-archive": ["write"] },
       },
-      { name: "getFoo", routes: [{ method: "GET", path: "/foo/{param}" }], inputType: "types.GetFooInput", uses: { myblob: ["read"] } },
-      { name: "health", routes: [{ method: "GET", path: "/health" }], inputType: undefined, uses: {} },
+      { name: "getFoo", routes: [{ method: "GET", path: "/foo/{param}", name: "getFoo" }], inputType: "types.GetFooInput", uses: { myblob: ["read"] } },
+      { name: "health", routes: [{ method: "GET", path: "/health", name: "health" }], inputType: undefined, uses: {} },
     ]);
     expect(model.warnings).toEqual([]);
   });
@@ -44,10 +44,19 @@ describe("analyzeApp", () => {
     expect(accesses(byName.listAll!.uses)).toEqual({ shared: ["delete", "list", "read", "write"] });
     expect(accesses(byName.check!.uses)).toEqual({ shared: ["list", "read"] });
     expect(byName.check!.routes).toEqual([
-      { method: "GET", path: "/check/{key}" },
-      { method: "HEAD", path: "/check/{key}" },
+      { method: "GET", path: "/check/{key}", name: "check" },
+      { method: "HEAD", path: "/check/{key}", name: "checkHead" },
     ]);
     expect(model.warnings).toEqual([expect.stringMatching(/"shared" is passed around as a value/)]);
+  });
+
+  test("reads authentication and route names from the router calls", () => {
+    expect(analyzeApp(path.join(exampleDir, "main.ts"))).toMatchObject({ authenticated: "iam", warnings: [] });
+
+    const open = analyzeApp(fixture("authenticated-none.ts"));
+    expect(open.authenticated).toBe("none");
+    expect(open.warnings).toEqual([expect.stringMatching(/authenticated is "none"; deployed functions can be invoked by anyone/)]);
+    expect(open.functions[0]!.routes).toEqual([{ method: "GET", path: "/open", name: "open" }]);
   });
 
   test("follows .add chains through intermediate variables", () => {
@@ -57,7 +66,7 @@ describe("analyzeApp", () => {
 
   test("follows a router defined in one module and populated in another", () => {
     const model = analyzeApp(fixture("split/main.ts"));
-    expect(model.functions.map((f) => [f.name, f.routes])).toEqual([["hello", [{ method: "GET", path: "/hello" }]]]);
+    expect(model.functions.map((f) => [f.name, f.routes])).toEqual([["hello", [{ method: "GET", path: "/hello", name: "hello" }]]]);
   });
 
   test("traces class methods, object methods and variable aliases", () => {
@@ -80,6 +89,12 @@ describe("analyzeApp", () => {
   });
 
   test.each([
+    ["authenticated-variable.ts", /authenticated must be a string literal/],
+    ["authenticated-invalid.ts", /authenticated must be the literal "iam" or "none"/],
+    ["options-spread.ts", /spread in FunctionRouter options cannot be analyzed/],
+    ["options-variable.ts", /FunctionRouter options must be an object literal/],
+    ["duplicate-route-names.ts", /route name "same" is already used by GET \/a/],
+    ["route-name-variable.ts", /route name must be a string literal/],
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
     ["default-export.ts", /export the router with a name/],
     ["no-routes.ts", /FunctionRouter has no \.add\(\.\.\.\) routes/],
@@ -111,6 +126,7 @@ describe("generate", () => {
     const config = decodeConfig(fs.readFileSync(configPath, "utf8"));
 
     expect(config.project).toBe("demo");
+    expect(config.authenticated).toBe("iam");
     expect(config.resource).toMatchObject([
       { name: "myblob", type: "@aws.S3", dry: true },
       { name: "cloudgear-example-archive", type: "@aws.S3", dry: false },

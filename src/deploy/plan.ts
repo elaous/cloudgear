@@ -32,6 +32,7 @@ export interface FunctionComparable {
   code: string;
   env: Record<string, string>;
   reserved_concurrency: number;
+  auth: "iam" | "none";
   invokers: string[];
   permissions: { type: string; physical_name: string; actions: string[] }[];
 }
@@ -40,6 +41,7 @@ const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   code: ["code"],
   config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency"],
   permissions: ["permissions"],
+  auth: ["auth"],
   invokers: ["invokers"],
 };
 
@@ -71,7 +73,8 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       timeout_s: fn.timeout_s,
       code: fn.bundle.sha256,
       reserved_concurrency: fn.reserved_concurrency,
-      invokers: [...config.invoker].sort(),
+      auth: config.authenticated,
+      invokers: config.authenticated === "iam" ? [...config.invoker].sort() : [],
       env: Object.fromEntries(
         fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
       ),

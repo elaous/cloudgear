@@ -7,6 +7,7 @@ export interface CloudgearConfig {
   resource: ResourceSpec[];
   function: FunctionSpec[];
   invoker: string[];
+  authenticated: "iam" | "none";
 }
 
 export interface ResourceSpec {
@@ -25,7 +26,7 @@ export interface FunctionSpec {
   memory_mb: number;
   timeout_s: number;
   source: { file: string; export: string; input_type?: string };
-  route: { method: string; path: string }[];
+  route: { method: string; path: string; name: string }[];
   bundle: { path: string; sha256: string };
   permission: { resource: string; action: string[] }[];
   // value_from names a resource whose physical name becomes the value.
@@ -57,6 +58,7 @@ export function decodeConfig(text: string): CloudgearConfig {
     project: str(raw, "project"),
     provider: str(raw, "provider"),
     invoker: (raw.invoker ?? []).map(String),
+    authenticated: raw.authenticated === "none" ? "none" : "iam",
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
       type: str(r, "type"),
@@ -72,7 +74,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       memory_mb: Number(f.memory_mb ?? 128),
       timeout_s: Number(f.timeout_s ?? 10),
       source: { file: str(f.source ?? {}, "file"), export: str(f.source ?? {}, "export"), input_type: f.source?.input_type },
-      route: (f.route ?? []).map((r: Record<string, any>) => ({ method: str(r, "method"), path: str(r, "path") })),
+      route: (f.route ?? []).map((r: Record<string, any>) => ({ method: str(r, "method"), path: str(r, "path"), name: String(r.name ?? "") })),
       bundle: { path: str(f.bundle ?? {}, "path"), sha256: str(f.bundle ?? {}, "sha256") },
       permission: (f.permission ?? []).map((p: Record<string, any>) => ({
         resource: str(p, "resource"),

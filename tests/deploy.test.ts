@@ -18,7 +18,7 @@ const fn = (overrides: Partial<FunctionSpec> = {}): FunctionSpec => ({
   memory_mb: 256,
   timeout_s: 10,
   source: { file: "server/api.ts", export: "foo" },
-  route: [{ method: "POST", path: "/foo/{param}" }],
+  route: [{ method: "POST", path: "/foo/{param}", name: "foo" }],
   bundle: { path: "build/foo/index.mjs", sha256: "v1" },
   permission: [{ resource: "data", action: ["s3:PutObject", "s3:ListBucket"] }],
   env: [{ key: "CLOUDGEAR_BLOB_DATA", value_from: "data" }],
@@ -35,6 +35,7 @@ const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig =
   ],
   function: [fn()],
   invoker: [],
+  authenticated: "iam",
   ...overrides,
 });
 
@@ -174,7 +175,7 @@ describe("aws drivers", () => {
     });
     expect(endpointsFrom(baseConfig(), state)).toEqual({
       provider: "aws",
-      auth: "aws_iam",
+      auth: "iam",
       routes: { "POST /foo/{param}": "https://app-foo.lambda-url.test/" },
     });
   });
@@ -291,10 +292,50 @@ describe("function URL access", () => {
     expect(cleared.names()).toContain("DeleteFunctionConcurrencyCommand");
   });
 
+  test("authenticated: none creates a public URL and ignores invokers", async () => {
+    const aws = await applyAll(baseConfig({ authenticated: "none", invoker: [ROLE] }), emptyState());
+    expect(aws.calls.find((c) => c.name === "CreateFunctionUrlConfigCommand")!.input.AuthType).toBe("NONE");
+    expect(aws.calls.filter((c) => c.name === "AddPermissionCommand").map((c) => c.input)).toMatchObject([
+      { Action: "lambda:InvokeFunctionUrl", Principal: "*", FunctionUrlAuthType: "NONE" },
+      { Action: "lambda:InvokeFunction", Principal: "*", InvokedViaFunctionUrl: true },
+    ]);
+  });
+
+  test("switching between iam and none swaps the URL auth type and its permissions", async () => {
+    const state = emptyState();
+    await applyAll(baseConfig({ invoker: [ROLE] }), state);
+
+    const toPublic = baseConfig({ authenticated: "none", invoker: [ROLE] });
+    expect(plan(toPublic, state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["auth", "invokers"] });
+    const opened = await applyAll(toPublic, state);
+    expect(opened.names()).toEqual([
+      "UpdateFunctionUrlConfigCommand",
+      "RemovePermissionCommand",
+      "RemovePermissionCommand",
+      "AddPermissionCommand",
+      "AddPermissionCommand",
+    ]);
+    expect(opened.calls[0]!.input.AuthType).toBe("NONE");
+
+    const closed = await applyAll(baseConfig({ invoker: [ROLE] }), state);
+    expect(closed.calls[0]!.input.AuthType).toBe("AWS_IAM");
+    expect(closed.calls.filter((c) => c.name === "RemovePermissionCommand").map((c) => c.input.StatementId)).toEqual([
+      "cloudgear-public-url",
+      "cloudgear-public-invoke",
+    ]);
+    expect(closed.calls.filter((c) => c.name === "AddPermissionCommand").every((c) => c.input.Principal === ROLE)).toBe(true);
+  });
+
+  test("endpoints record the authentication mode", async () => {
+    const state = emptyState();
+    await applyAll(baseConfig({ authenticated: "none" }), state);
+    expect(endpointsFrom(baseConfig({ authenticated: "none" }), state).auth).toBe("none");
+  });
+
   test("endpoints are marked as IAM-authenticated", async () => {
     const state = emptyState();
     await applyAll(baseConfig(), state);
-    expect(endpointsFrom(baseConfig(), state).auth).toBe("aws_iam");
+    expect(endpointsFrom(baseConfig(), state).auth).toBe("iam");
   });
 });
 

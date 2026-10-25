@@ -102,6 +102,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     })),
     function: functions,
     invoker: invokers,
+    authenticated: model.authenticated,
   };
 
   fs.mkdirSync(configDir, { recursive: true });

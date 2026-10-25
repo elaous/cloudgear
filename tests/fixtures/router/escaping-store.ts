@@ -16,4 +16,4 @@ export async function check(input: { key: string }) {
 
 const router = new FunctionRouter("aws");
 router.add("GET", "/all", listAll);
-router.add("get", "/check/{key}", check).add("HEAD", "/check/{key}", check);
+router.add("get", "/check/{key}", check).add("HEAD", "/check/{key}", check, { name: "checkHead" });

@@ -24,10 +24,10 @@ complete app.
 import { FunctionRouter } from "@cloudgear/functions";
 import * as functions from "server/api";
 
-const router = new FunctionRouter("aws")
-  .add("POST", "/foo/{param}", functions.foo)
+const router = new FunctionRouter("aws", { authenticated: "iam" })
+  .add("POST", "/foo/{param}", functions.foo, { name: "createFoo" })
   .add("GET", "/foo/{param}", functions.getFoo);
-router.listen();
+const urls = router.listen(); // { createFoo: "...", getFoo: "..." }
 ```
 
 ```ts
@@ -60,8 +60,22 @@ the status or headers. Thrown errors are logged and answered with a generic
 
 ### Runtime: `FunctionRouter`
 
+`new FunctionRouter(provider, options)` takes `authenticated: "iam" | "none"`
+(default `"iam"`; see Authentication), plus `credentials`, `region`,
+`rateLimit` and `mode`. `cloudgear generate` reads `authenticated`, so it MUST
+be a string literal inside an object literal.
+
+`.add(method, path, fn, options?)` takes an optional `{ name }`, the route's
+nickname. Without one the name is the function's name (`fn.name`), or
+`"METHOD /path"` for anonymous functions. Names MUST be unique per router, so
+a function mounted on two routes needs `{ name }` on at least one of them.
+
 `router.listen(port)` serves the routes with `Bun.serve` (`router.fetch` is
-exposed to mount elsewhere). For each request it either:
+exposed to mount elsewhere) and returns each route's URL by name. `urls()`
+returns the same map later, and `stop()` shuts the server down. In remote mode
+the URLs are the deployed function URLs plus the route path; in local mode
+they are this server's. Path params stay as `{placeholders}`. For each
+request the router either:
 
 - **remote**: POSTs the input object to the route's deployed function URL
   (content type `application/vnd.cloudgear.invoke+json`) and relays the
@@ -76,7 +90,10 @@ exposed to mount elsewhere). For each request it either:
 
 #### Authentication
 
-Deployed function URLs use `AuthType: AWS_IAM`: AWS rejects any request that
+`authenticated: "iam"` (the default) deploys function URLs with
+`AuthType: AWS_IAM`. `authenticated: "none"` deploys public URLs that anyone
+can invoke, and `cloudgear generate` warns about it; `--invoker` is ignored
+then. With `"iam"`, AWS rejects any request that
 is not SigV4-signed by an allowed IAM principal before the function runs, so
 unauthenticated traffic is never billed. In remote mode the router signs
 each call with AWS credentials (service `lambda`, region taken from the

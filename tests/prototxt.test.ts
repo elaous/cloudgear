@@ -15,7 +15,7 @@ const config: CloudgearConfig = {
       memory_mb: 256,
       timeout_s: 10,
       source: { file: "server/api.ts", export: "foo", input_type: "types.FooInput" },
-      route: [{ method: "POST", path: "/foo/{param}" }],
+      route: [{ method: "POST", path: "/foo/{param}", name: "createFoo" }],
       bundle: { path: ".cloudgear/build/foo/index.mjs", sha256: "abc" },
       permission: [{ resource: "myblob", action: ["s3:GetObject", "s3:PutObject"] }],
       env: [{ key: "CLOUDGEAR_BLOB_MYBLOB", value_from: "myblob" }, { key: "LITERAL", value: 'say "hi"' }],
@@ -23,6 +23,7 @@ const config: CloudgearConfig = {
     },
   ],
   invoker: ["arn:aws:iam::123456789012:role/vercel", "123456789012"],
+  authenticated: "none",
 };
 
 describe("prototxt", () => {

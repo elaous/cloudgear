@@ -105,6 +105,58 @@ describe("FunctionRouter (local mode)", () => {
   });
 });
 
+describe("FunctionRouter route names and urls", () => {
+  const local = {
+    getObjects: (input: { param: string }) => input,
+  };
+
+  test("names default to the function's name and options.name overrides it", () => {
+    const router = new FunctionRouter("aws", { mode: "local" })
+      .add("GET", "/objects/{param}", local.getObjects)
+      .add("POST", "/objects/{param}", local.getObjects, { name: "putObject" })
+      .add("GET", "/health", () => ({}));
+    const server = router.listen(0);
+    try {
+      const urls = router.urls();
+      expect(Object.keys(urls)).toEqual(["getObjects", "putObject", "GET /health"]);
+      expect(urls.getObjects).toBe(`${new URL(Object.values(urls)[0]!).origin}/objects/{param}`);
+    } finally {
+      router.stop();
+    }
+    expect(server.getObjects).toBe(server.putObject);
+  });
+
+  test("listen() returns URLs by name and the server answers on them", async () => {
+    const router = new FunctionRouter("aws", { mode: "local" }).add("GET", "/ping/{id}", (input: { id: string }) => ({ pong: input.id }), { name: "ping" });
+    const urls = router.listen(0);
+    try {
+      const res = await fetch(urls.ping!.replace("{id}", "7"));
+      expect(await res.json()).toEqual({ pong: "7" });
+    } finally {
+      router.stop();
+    }
+  });
+
+  test("in remote mode urls() are the deployed function URLs plus the route path", () => {
+    const router = new FunctionRouter("aws", {
+      endpoints: { "GET /objects/{param}": "https://abc.lambda-url.us-east-1.on.aws/" },
+    }).add("GET", "/objects/{param}", local.getObjects);
+    expect(router.urls()).toEqual({ getObjects: "https://abc.lambda-url.us-east-1.on.aws/objects/{param}" });
+  });
+
+  test("urls() before listen() with nothing deployed explains what to do", () => {
+    const router = new FunctionRouter("aws", { mode: "local" }).add("GET", "/x", echo);
+    expect(() => router.urls()).toThrow(/call listen\(\) first/);
+  });
+
+  test("rejects duplicate and empty names", () => {
+    const router = new FunctionRouter("aws").add("GET", "/a", echo, { name: "one" });
+    expect(() => router.add("GET", "/b", echo, { name: "one" })).toThrow(/Route name "one" is already used/);
+    expect(() => router.add("GET", "/c", echo, { name: "" })).toThrow();
+    expect(() => router.add("GET", "/d", () => ({})).add("GET", "/e", () => ({}))).not.toThrow();
+  });
+});
+
 describe("FunctionRouter rate limit", () => {
   const limited = (windowMs = 1000) =>
     new FunctionRouter("aws", { mode: "local", rateLimit: { limit: 2, windowMs, key: (req) => req.headers.get("x-client") ?? "anon" } }).add(
@@ -172,7 +224,7 @@ describe("FunctionRouter (remote mode)", () => {
 
   test("posts the assembled input to the function URL", async () => {
     const url = fakeFunctionUrl(createHandler(echo, [{ method: "POST", path: "/foo/{param}" }]));
-    const router = new FunctionRouter("aws", { endpoints: { "POST /foo/{param}": url }, auth: "none" }).add(
+    const router = new FunctionRouter("aws", { endpoints: { "POST /foo/{param}": url }, authenticated: "none" }).add(
       "POST",
       "/foo/{param}",
       (input: { param: string }) => input,
@@ -194,7 +246,7 @@ describe("FunctionRouter (remote mode)", () => {
   test("502 when the function URL is unreachable", async () => {
     const log = spyOn(console, "error").mockImplementation(() => {});
     try {
-      const router = new FunctionRouter("aws", { endpoints: { "GET /x": "http://127.0.0.1:1/" }, auth: "none" }).add("GET", "/x", echo);
+      const router = new FunctionRouter("aws", { endpoints: { "GET /x": "http://127.0.0.1:1/" }, authenticated: "none" }).add("GET", "/x", echo);
       const res = await router.fetch(new Request("http://app/x"));
       expect(res.status).toBe(502);
       expect(await res.json()).toEqual({ error: "Function unreachable" });
@@ -269,7 +321,7 @@ describe("FunctionRouter (remote mode)", () => {
 
     test("auth: none sends no credentials", async () => {
       const seen = captureFetch();
-      await new FunctionRouter("aws", { endpoints: { "GET /x": "https://a.lambda-url.us-east-2.on.aws/" }, auth: "none" })
+      await new FunctionRouter("aws", { endpoints: { "GET /x": "https://a.lambda-url.us-east-2.on.aws/" }, authenticated: "none" })
         .add("GET", "/x", echo)
         .fetch(new Request("http://app/x"));
       expect(seen[0]!.headers.get("authorization")).toBeNull();
@@ -320,7 +372,7 @@ describe("FunctionRouter (remote mode)", () => {
     };
 
     test("is found from a nested working directory", () => {
-      const dir = projectWith({ provider: "aws", routes: { "GET /x": "https://fn" }, auth: "aws_iam" });
+      const dir = projectWith({ provider: "aws", routes: { "GET /x": "https://fn" }, auth: "iam" });
       process.chdir(path.join(dir, "src", "deep"));
       const router = new FunctionRouter("aws").add("GET", "/x", echo);
       expect(router.mode).toBe("remote");

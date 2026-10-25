@@ -11,6 +11,8 @@ message Config {
   repeated Function function = 4;
   // IAM principals (role/user ARNs or account ids) allowed to invoke the functions.
   repeated string invoker = 5;
+  // "iam" (callers must sign requests) or "none" (public function URLs).
+  string authenticated = 6;
 }
 
 message Resource {
@@ -51,6 +53,8 @@ message Source {
 message Route {
   string method = 1;
   string path = 2;
+  // Nickname used as the key in FunctionRouter.listen() results.
+  string name = 3;
 }
 
 message Bundle {

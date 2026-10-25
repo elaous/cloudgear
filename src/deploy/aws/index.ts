@@ -12,6 +12,7 @@ import {
   DeleteFunctionConcurrencyCommand,
   PutFunctionConcurrencyCommand,
   RemovePermissionCommand,
+  UpdateFunctionUrlConfigCommand,
   CreateFunctionCommand,
   CreateFunctionUrlConfigCommand,
   DeleteFunctionCommand,
@@ -112,6 +113,38 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     }
   }
 
+  const PUBLIC_STATEMENTS = ["cloudgear-public-url", "cloudgear-public-invoke"];
+
+  async function addPublic(functionName: string) {
+    await lambda.send(
+      new AddPermissionCommand({
+        FunctionName: functionName,
+        StatementId: PUBLIC_STATEMENTS[0],
+        Action: "lambda:InvokeFunctionUrl",
+        Principal: "*",
+        FunctionUrlAuthType: "NONE",
+      }),
+    );
+    await lambda.send(
+      new AddPermissionCommand({
+        FunctionName: functionName,
+        StatementId: PUBLIC_STATEMENTS[1],
+        Action: "lambda:InvokeFunction",
+        Principal: "*",
+        InvokedViaFunctionUrl: true,
+      }),
+    );
+  }
+
+  async function removePublic(functionName: string) {
+    for (const id of PUBLIC_STATEMENTS) {
+      await ignore(
+        lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: id })),
+        "ResourceNotFoundException",
+      );
+    }
+  }
+
   async function setConcurrency(functionName: string, reserved: number) {
     if (reserved > 0) {
       await lambda.send(new PutFunctionConcurrencyCommand({ FunctionName: functionName, ReservedConcurrentExecutions: reserved }));
@@ -195,8 +228,11 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           undo.push(() => lambda.send(new DeleteFunctionCommand({ FunctionName: entry.physical_name })));
           await waitForFunction(entry.physical_name);
 
-          const url = await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: "AWS_IAM" }));
-          await addInvokers(entry.physical_name, spec.invokers);
+          const url = await lambda.send(
+            new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),
+          );
+          if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
+          else await addPublic(entry.physical_name);
           if (spec.reserved_concurrency > 0) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
           return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, url: url.FunctionUrl };
         } catch (err) {
@@ -228,8 +264,16 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           const previous = Number(current.spec.reserved_concurrency ?? 0);
           if (spec.reserved_concurrency !== previous) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
         }
-        if (changes.includes("invokers")) {
-          const before = (current.spec.invokers as string[] | undefined) ?? [];
+        const before = (current.spec.invokers as string[] | undefined) ?? [];
+        if (changes.includes("auth")) {
+          await lambda.send(
+            new UpdateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),
+          );
+          if ((current.spec.auth ?? "iam") === "iam") await removeInvokers(entry.physical_name, before);
+          else await removePublic(entry.physical_name);
+          if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
+          else await addPublic(entry.physical_name);
+        } else if (changes.includes("invokers")) {
           await removeInvokers(entry.physical_name, before.filter((p) => !spec.invokers.includes(p)));
           await addInvokers(entry.physical_name, spec.invokers.filter((p) => !before.includes(p)));
         }
@@ -259,6 +303,10 @@ export function policyDocument(spec: FunctionComparable): string {
     ];
   });
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
+}
+
+function urlAuthType(auth: "iam" | "none"): "AWS_IAM" | "NONE" {
+  return auth === "iam" ? "AWS_IAM" : "NONE";
 }
 
 function roleNameFor(functionName: string): string {

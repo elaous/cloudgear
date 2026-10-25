@@ -26,13 +26,16 @@ export interface AnalyzedFunction {
   file: string;
   exportName: string;
   inputType?: string;
-  routes: { method: string; path: string }[];
+  routes: { method: string; path: string; name: string }[];
   // resource name -> accesses performed on it
   uses: Map<string, Set<BlobAccess>>;
 }
 
+export type Authentication = "iam" | "none";
+
 export interface AppModel {
   provider: string;
+  authenticated: Authentication;
   entry: string;
   resources: AnalyzedResource[];
   functions: AnalyzedFunction[];
@@ -101,6 +104,11 @@ export function analyzeApp(entryPath: string): AppModel {
   if (routers.length > 1) throw new Error(`Only one FunctionRouter per app is supported, found: ${routers.map(where).join(", ")}`);
   const router = routers[0]!;
   const provider = stringLiteral(router.getArguments()[0], `${where(router)}: FunctionRouter provider`);
+  const authenticated = readAuthenticated(router.getArguments()[1], where(router));
+  if (authenticated === "none") {
+    warnings.push(`${where(router)}: authenticated is "none"; deployed functions can be invoked by anyone with their URL`);
+  }
+  const routeNames = new Map<string, string>();
 
   const functions = new Map<Node, AnalyzedFunction>();
   const addCalls = collectAddCalls(router, where);
@@ -137,7 +145,11 @@ export function analyzeApp(entryPath: string): AppModel {
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
-    fn.routes.push({ method, path: routePath });
+    const routeName = readRouteName(call.getArguments()[3], where(call)) ?? fn.name;
+    const clashing = routeNames.get(routeName);
+    if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
+    routeNames.set(routeName, `${method} ${routePath}`);
+    fn.routes.push({ method, path: routePath, name: routeName });
   }
 
   const byName = new Map<string, AnalyzedFunction>();
@@ -151,6 +163,7 @@ export function analyzeApp(entryPath: string): AppModel {
 
   return {
     provider,
+    authenticated,
     entry: relative(entry),
     resources: [...resources.values()],
     functions: [...functions.values()],
@@ -222,6 +235,40 @@ export function analyzeApp(entryPath: string): AppModel {
     );
     return ALL_ACCESS;
   }
+}
+
+function readAuthenticated(options: Node | undefined, at: string): Authentication {
+  if (!options) return "iam";
+  if (!Node.isObjectLiteralExpression(options)) {
+    throw new Error(`${at}: FunctionRouter options must be an object literal so cloudgear can read them`);
+  }
+  let authenticated: Authentication = "iam";
+  for (const prop of options.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in FunctionRouter options cannot be analyzed`);
+    const name = Node.isShorthandPropertyAssignment(prop) || Node.isPropertyAssignment(prop) ? prop.getName() : undefined;
+    if (name !== "authenticated") continue;
+    const value = Node.isPropertyAssignment(prop) ? stringLiteral(prop.getInitializer(), `${at}: authenticated`) : undefined;
+    if (value !== "iam" && value !== "none") throw new Error(`${at}: authenticated must be the literal "iam" or "none"`);
+    authenticated = value;
+  }
+  return authenticated;
+}
+
+function readRouteName(options: Node | undefined, at: string): string | undefined {
+  if (!options) return undefined;
+  if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: route options must be an object literal`);
+  for (const prop of options.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in route options cannot be analyzed`);
+    if (Node.isPropertyAssignment(prop) && prop.getName() === "name") {
+      const name = stringLiteral(prop.getInitializer(), `${at}: route name`);
+      if (!name) throw new Error(`${at}: route name must not be empty`);
+      return name;
+    }
+    if (Node.isShorthandPropertyAssignment(prop) && prop.getName() === "name") {
+      throw new Error(`${at}: route name must be a string literal`);
+    }
+  }
+  return undefined;
 }
 
 const ROUTER_MEMBERS = new Set(["listen", "fetch", "provider", "mode"]);

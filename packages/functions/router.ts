@@ -17,7 +17,13 @@ import {
 } from "./http";
 import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
 
-export type EndpointAuth = "aws_iam" | "none";
+export type Authentication = "iam" | "none";
+export type EndpointAuth = Authentication;
+
+export interface RouteOptions {
+  // Nickname for this route in listen()/urls() results; defaults to the function's name.
+  name?: string;
+}
 
 export interface EndpointsFile {
   provider: string;
@@ -37,8 +43,9 @@ export interface FunctionRouterOptions {
   mode?: "local" | "remote";
   endpoints?: Record<string, string>;
   endpointsFile?: string;
-  // How remote calls authenticate; defaults to the endpoints file's value, else "aws_iam" for aws.
-  auth?: EndpointAuth;
+  // "iam": deployed functions require signed calls (the router signs them). "none": public URLs.
+  // Read by `cloudgear generate` (so MUST be a string literal); defaults to "iam".
+  authenticated?: Authentication;
   credentials?: AwsCredentialsProvider;
   region?: string;
   // Per-process counters: instances of a serverless app do not share them.
@@ -49,6 +56,7 @@ interface CompiledRoute {
   method: Method;
   path: string;
   key: string;
+  name: string;
   matcher: ReturnType<typeof compilePath>;
   fn: Handler;
 }
@@ -65,6 +73,7 @@ export class FunctionRouter {
   private readonly routes: CompiledRoute[] = [];
   private readonly windows = new Map<string, { start: number; count: number }>();
   private endpoints: Endpoints | null | undefined;
+  private server: ReturnType<typeof Bun.serve> | undefined;
 
   constructor(
     readonly provider: Provider,
@@ -75,11 +84,17 @@ export class FunctionRouter {
     method: Method | Lowercase<Method>,
     path: P,
     fn: Handler<I, O>,
+    options: RouteOptions = {},
   ): this {
     const route = { method: assertMethod(method), path };
     const key = routeKey(route);
     if (this.routes.some((r) => r.key === key)) throw new Error(`Route "${key}" is already registered`);
-    this.routes.push({ ...route, key, matcher: compilePath(path), fn: fn as Handler });
+    const name = options.name ?? (fn.name || key);
+    if (!name) throw new Error(`Route "${key}": name must not be empty`);
+    if (this.routes.some((r) => r.name === name)) {
+      throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
+    }
+    this.routes.push({ ...route, key, name, matcher: compilePath(path), fn: fn as Handler });
     return this;
   }
 
@@ -115,10 +130,30 @@ export class FunctionRouter {
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
 
-  listen(port: number = Number(process.env.PORT ?? 3000)) {
-    const server = Bun.serve({ port, fetch: this.fetch });
-    console.log(`cloudgear: ${this.routes.length} route(s) on ${server.url} (${this.mode})`);
-    return server;
+  // Starts serving and returns each route's URL by name; see urls().
+  listen(port: number = Number(process.env.PORT ?? 3000)): Record<string, string> {
+    this.server = Bun.serve({ port, fetch: this.fetch });
+    console.log(`cloudgear: ${this.routes.length} route(s) on ${this.server.url} (${this.mode})`);
+    return this.urls();
+  }
+
+  stop(): void {
+    this.server?.stop(true);
+    this.server = undefined;
+  }
+
+  // Route name to URL: the deployed function URL in remote mode, else this server's.
+  // Path params stay as {placeholders}.
+  urls(): Record<string, string> {
+    const endpoints = this.mode === "remote" ? this.loadEndpoints() : null;
+    const local = this.server?.url.origin;
+    if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
+    const urls: Record<string, string> = {};
+    for (const route of this.routes) {
+      const base = endpoints ? endpoints.routes[route.key] : local;
+      if (base) urls[route.name] = `${base.replace(/\/$/, "")}${route.path}`;
+    }
+    return urls;
   }
 
   private checkRateLimit(req: Request): Response | null {
@@ -153,7 +188,7 @@ export class FunctionRouter {
     try {
       upstream = await request(url, input, {
         route: route.key,
-        sign: this.authMode(endpoints) === "aws_iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
+        sign: this.authMode(endpoints) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
       });
     } catch (err) {
       console.error(err);
@@ -165,8 +200,8 @@ export class FunctionRouter {
     return new Response(upstream.body, { status: upstream.status, headers });
   }
 
-  private authMode(endpoints: Endpoints | null): EndpointAuth {
-    return this.options.auth ?? endpoints?.auth ?? (this.provider === "aws" ? "aws_iam" : "none");
+  private authMode(endpoints: Endpoints | null): Authentication {
+    return this.options.authenticated ?? endpoints?.auth ?? (this.provider === "aws" ? "iam" : "none");
   }
 
   private loadEndpoints(): Endpoints | null {

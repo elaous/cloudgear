@@ -9,6 +9,9 @@ import {
 } from "@aws-sdk/client-iam";
 import {
   AddPermissionCommand,
+  DeleteFunctionConcurrencyCommand,
+  PutFunctionConcurrencyCommand,
+  RemovePermissionCommand,
   CreateFunctionCommand,
   CreateFunctionUrlConfigCommand,
   DeleteFunctionCommand,
@@ -17,6 +20,7 @@ import {
   UpdateFunctionCodeCommand,
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda";
+import { createHash } from "node:crypto";
 import { CreateBucketCommand, DeleteBucketCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
@@ -69,6 +73,51 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     await iam.send(
       new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec) }),
     );
+  }
+
+  const statementId = (kind: string, principal: string) =>
+    `cloudgear-${kind}-${createHash("sha256").update(principal).digest("hex").slice(0, 12)}`;
+
+  async function addInvokers(functionName: string, principals: string[]) {
+    for (const principal of principals) {
+      await lambda.send(
+        new AddPermissionCommand({
+          FunctionName: functionName,
+          StatementId: statementId("url", principal),
+          Action: "lambda:InvokeFunctionUrl",
+          Principal: principal,
+          FunctionUrlAuthType: "AWS_IAM",
+        }),
+      );
+      await lambda.send(
+        new AddPermissionCommand({
+          FunctionName: functionName,
+          StatementId: statementId("invoke", principal),
+          Action: "lambda:InvokeFunction",
+          Principal: principal,
+          InvokedViaFunctionUrl: true,
+        }),
+      );
+    }
+  }
+
+  async function removeInvokers(functionName: string, principals: string[]) {
+    for (const principal of principals) {
+      for (const kind of ["url", "invoke"]) {
+        await ignore(
+          lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: statementId(kind, principal) })),
+          "ResourceNotFoundException",
+        );
+      }
+    }
+  }
+
+  async function setConcurrency(functionName: string, reserved: number) {
+    if (reserved > 0) {
+      await lambda.send(new PutFunctionConcurrencyCommand({ FunctionName: functionName, ReservedConcurrentExecutions: reserved }));
+    } else {
+      await ignore(lambda.send(new DeleteFunctionConcurrencyCommand({ FunctionName: functionName })), "ResourceNotFoundException");
+    }
   }
 
   function environment(spec: FunctionComparable) {
@@ -146,25 +195,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           undo.push(() => lambda.send(new DeleteFunctionCommand({ FunctionName: entry.physical_name })));
           await waitForFunction(entry.physical_name);
 
-          const url = await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: "NONE" }));
-          await lambda.send(
-            new AddPermissionCommand({
-              FunctionName: entry.physical_name,
-              StatementId: "cloudgear-url",
-              Action: "lambda:InvokeFunctionUrl",
-              Principal: "*",
-              FunctionUrlAuthType: "NONE",
-            }),
-          );
-          await lambda.send(
-            new AddPermissionCommand({
-              FunctionName: entry.physical_name,
-              StatementId: "cloudgear-url-invoke",
-              Action: "lambda:InvokeFunction",
-              Principal: "*",
-              InvokedViaFunctionUrl: true,
-            }),
-          );
+          const url = await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: "AWS_IAM" }));
+          await addInvokers(entry.physical_name, spec.invokers);
+          if (spec.reserved_concurrency > 0) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
           return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, url: url.FunctionUrl };
         } catch (err) {
           for (const step of undo.reverse()) await step().catch(() => {});
@@ -192,6 +225,13 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
             }),
           );
           await waitForFunction(entry.physical_name);
+          const previous = Number(current.spec.reserved_concurrency ?? 0);
+          if (spec.reserved_concurrency !== previous) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
+        }
+        if (changes.includes("invokers")) {
+          const before = (current.spec.invokers as string[] | undefined) ?? [];
+          await removeInvokers(entry.physical_name, before.filter((p) => !spec.invokers.includes(p)));
+          await addInvokers(entry.physical_name, spec.invokers.filter((p) => !before.includes(p)));
         }
         return {};
       },

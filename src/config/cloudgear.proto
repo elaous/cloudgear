@@ -9,6 +9,8 @@ message Config {
   string provider = 2;
   repeated Resource resource = 3;
   repeated Function function = 4;
+  // IAM principals (role/user ARNs or account ids) allowed to invoke the functions.
+  repeated string invoker = 5;
 }
 
 message Resource {
@@ -36,6 +38,8 @@ message Function {
   Bundle bundle = 9;
   repeated Permission permission = 10;
   repeated Env env = 11;
+  // 0 leaves concurrency unreserved.
+  int32 reserved_concurrency = 12;
 }
 
 message Source {

@@ -80,5 +80,5 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
     if (!url) continue;
     for (const route of fn.route) routes[`${route.method} ${route.path}`] = url;
   }
-  return { provider: config.provider, routes, token: state.invoke_token };
+  return { provider: config.provider, routes, auth: config.provider === "aws" ? "aws_iam" : "none" };
 }

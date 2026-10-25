@@ -1,8 +1,5 @@
-import { timingSafeEqual } from "node:crypto";
 import {
   INVOKE_CONTENT_TYPE,
-  TOKEN_ENV,
-  TOKEN_HEADER,
   buildInput,
   compilePath,
   invoke,
@@ -11,7 +8,7 @@ import {
   type Handler,
   type HttpResult,
   type RouteSpec,
-} from "./http";
+} from "../http";
 
 // Lambda function URL payload, format version 2.0.
 export interface FunctionUrlEvent {
@@ -40,14 +37,6 @@ export function createHandler(fn: Handler, routes: RouteSpec[]) {
         : event.body
       : "";
     const contentType = headers["content-type"] ?? null;
-
-    const token = process.env[TOKEN_ENV];
-    if (token) {
-      const isInvoke = contentType?.startsWith(INVOKE_CONTENT_TYPE) ?? false;
-      if (!isInvoke || !tokenMatches(headers[TOKEN_HEADER], token)) {
-        return toLambda({ status: 403, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Forbidden" }) });
-      }
-    }
 
     let input: unknown;
     try {
@@ -78,13 +67,6 @@ function resolveInput(
     return buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params);
   }
   return undefined;
-}
-
-function tokenMatches(given: string | undefined, expected: string): boolean {
-  if (given === undefined) return false;
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function toLambda(result: HttpResult): FunctionUrlResult {

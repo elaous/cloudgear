@@ -66,20 +66,75 @@ exposed to mount elsewhere). For each request it either:
 - **remote**: POSTs the input object to the route's deployed function URL
   (content type `application/vnd.cloudgear.invoke+json`) and relays the
   response. Function URLs come from `.cloudgear/endpoints.json` (found by
-  searching up from the working directory to the nearest `package.json`), written by `cloudgear apply`,
-  or from `$CLOUDGEAR_ENDPOINTS` (JSON) or `$CLOUDGEAR_ENDPOINTS_FILE`. A
-  file with no routes, as left by `destroy`, means local mode.
+  searching up from the working directory to the nearest `package.json`),
+  written by `cloudgear apply`, or from `$CLOUDGEAR_ENDPOINTS` (JSON) or
+  `$CLOUDGEAR_ENDPOINTS_FILE`. A file with no routes, as left by `destroy`,
+  means local mode.
 - **local**: runs the function in-process. This is the default when no
   endpoints file exists, so `bun main.ts` works before anything is deployed.
   Force a mode with `new FunctionRouter("aws", { mode: "local" | "remote" })`.
 
-Function URLs are public, so every deployed function carries a shared
-secret: `cloudgear apply` generates `invoke_token` in the state file, sets it
-as `CLOUDGEAR_INVOKE_TOKEN` on each function and writes it to
-`endpoints.json`. A function answers `403` unless the request is a router
-call presenting the token in `x-cloudgear-token`. Without the env var (local
-runs) the adapter also serves direct HTTP calls that match its routes.
-Treat `.cloudgear/` as secret; it is git-ignored.
+#### Authentication
+
+Deployed function URLs use `AuthType: AWS_IAM`: AWS rejects any request that
+is not SigV4-signed by an allowed IAM principal before the function runs, so
+unauthenticated traffic is never billed. In remote mode the router signs
+each call with AWS credentials (service `lambda`, region taken from the
+function URL's host). Credentials come from the standard AWS provider chain,
+or from the `credentials` option:
+
+```ts
+new FunctionRouter("aws", {
+  // a function returning { accessKeyId, secretAccessKey, sessionToken? }
+  credentials: myCredentialsProvider,
+  region: "eu-west-1", // only needed for URLs that are not *.lambda-url.<region>.on.aws
+});
+```
+
+Whoever runs the router needs credentials, and its IAM principal MUST be
+allowed to call the functions, either by naming it at generate time or by an
+identity policy on it:
+
+```sh
+cloudgear generate main.ts --invoker arn:aws:iam::123456789012:role/my-app
+# or attach lambda:InvokeFunctionUrl on the function ARNs to the caller's own policy
+```
+
+`--invoker` takes an IAM role or user ARN, or a 12-digit account id, and is
+repeatable. It adds a resource policy on each function; without it nobody but
+principals with their own identity policy can call them.
+
+Where the router runs:
+
+- **Vercel (or any host outside AWS).** Browsers cannot sign requests, so
+  frontend code calls your app (the router), never Lambda directly. Give the
+  app AWS credentials with the least standing access: Vercel's OIDC
+  federation into an IAM role is preferable to long-lived access keys (see
+  Vercel's AWS OIDC documentation), and pass its credentials provider as
+  `credentials`. Name that role with `--invoker`.
+- **AWS (ECS, Lambda, EC2).** The default provider chain works; name the
+  task or instance role with `--invoker`.
+- **Static frontend on S3 behind CloudFront.** The page calls your app's
+  URL, which runs the router. Calling the function URLs straight from
+  CloudFront is possible later with an origin access control for Lambda URLs;
+  that comes with the CDN support, not with this release.
+
+Limits: `--reserved-concurrency <n>` caps each function's concurrent
+executions (applied to every function; `0`/omitted leaves it unreserved).
+Use it with care on new AWS accounts, whose total concurrency limit can be
+very low. The router can also rate limit callers:
+
+```ts
+new FunctionRouter("aws", {
+  rateLimit: { limit: 100, windowMs: 60_000, key: (req) => userIdFrom(req) },
+});
+```
+
+Requests over the limit get `429` with `Retry-After`. Counters live in each
+process's memory, so a serverless app with many instances enforces the limit
+per instance; use it as a coarse guard, not as a quota. The default key is
+the first `X-Forwarded-For` address, which only means something behind a
+proxy that sets it.
 
 ### Runtime: `BlobStore`
 
@@ -116,7 +171,7 @@ from the entry file and following imports:
 
 | In code | Inferred (aws) |
 | --- | --- |
-| `new FunctionRouter("aws").add(method, path, fn)` | one `@aws.Lambda` per distinct `fn`, behind a public function URL |
+| `new FunctionRouter("aws").add(method, path, fn)` | one `@aws.Lambda` per distinct `fn`, behind an IAM-protected function URL |
 | `new BlobStore("aws", "://myblob")` | `@aws.S3` bucket `myblob` |
 | `store.get/getText/getJson(...)` inside `fn` | `s3:GetObject`, `s3:ListBucket` (S3 answers 403 instead of "not found" without it) |
 | `store.exists(...)` | `s3:GetObject`, `s3:ListBucket` |
@@ -207,7 +262,7 @@ message instead of emptying it.
 
 On AWS each function gets an IAM role (`AWSLambdaBasicExecutionRole` plus an
 inline policy with the inferred S3 permissions), a Lambda function and a
-function URL with `AuthType: NONE`. Region comes from `--region`,
+function URL with `AuthType: AWS_IAM`. Region comes from `--region`,
 `$AWS_REGION` or `$AWS_DEFAULT_REGION`; credentials from the standard AWS SDK
 chain.
 
@@ -229,7 +284,8 @@ Where each moving part lives, since several are called across packages:
 | `registerBlobDriver`, `parseBlobUri` | `packages/blob/driver.ts` | `BlobStore`; custom drivers |
 | `FunctionRouter`, `request` | `packages/functions/router.ts` | apps |
 | `response`, input assembly (`buildInput`, `compilePath`) | `packages/functions/http.ts` | router and Lambda adapter |
-| `createHandler` | `packages/functions/aws.ts` | bundle entry generated in `src/build/bundle.ts` |
+| `createHandler` | `packages/functions/drivers/aws.ts` | bundle entry generated in `src/build/bundle.ts` |
+| `signFunctionUrlRequest` | `packages/functions/sign.ts` | `FunctionRouter` remote calls |
 | `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
 | `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
@@ -239,10 +295,10 @@ Where each moving part lives, since several are called across packages:
 ## Status
 
 Early draft. Only the `aws` provider has inference rules and deploy drivers;
-`BlobStore` is the only resource client. Function URLs are public
-(`AuthType: NONE`), protected only by the invoke token; there is no
-throttling or reserved concurrency. Input objects are not validated against
-their TypeScript types at runtime.
+`BlobStore` is the only resource client. Function URLs are IAM-protected, so
+the router needs AWS credentials (see Authentication); end-user
+authentication is not part of the router yet. Input objects are not
+validated against their TypeScript types at runtime.
 
 ## Legacy: CDK shorthand
 

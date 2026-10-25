@@ -12,6 +12,9 @@
     "cloudgear": "bun src/cli.ts"
   },
   "devDependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@smithy/protocol-http": "^5.6.2",
+    "@smithy/signature-v4": "^5.7.4",
     "@types/bun": "latest",
     "typescript": "^5.7.0"
   },

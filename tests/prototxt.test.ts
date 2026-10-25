@@ -19,8 +19,10 @@ const config: CloudgearConfig = {
       bundle: { path: ".cloudgear/build/foo/index.mjs", sha256: "abc" },
       permission: [{ resource: "myblob", action: ["s3:GetObject", "s3:PutObject"] }],
       env: [{ key: "CLOUDGEAR_BLOB_MYBLOB", value_from: "myblob" }, { key: "LITERAL", value: 'say "hi"' }],
+      reserved_concurrency: 5,
     },
   ],
+  invoker: ["arn:aws:iam::123456789012:role/vercel", "123456789012"],
 };
 
 describe("prototxt", () => {

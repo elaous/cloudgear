@@ -6,9 +6,6 @@ export type Provider = "aws" | "gcp" | "azure";
 // Body of a router -> function call: the already-assembled input object.
 export const INVOKE_CONTENT_TYPE = "application/vnd.cloudgear.invoke+json";
 export const ROUTE_HEADER = "x-cloudgear-route";
-export const TOKEN_HEADER = "x-cloudgear-token";
-// Set on deployed functions; the router must present it to invoke them.
-export const TOKEN_ENV = "CLOUDGEAR_INVOKE_TOKEN";
 
 export type PathParams<P extends string> = P extends `${string}{${infer Name}}${infer Rest}`
   ? Name | PathParams<Rest>

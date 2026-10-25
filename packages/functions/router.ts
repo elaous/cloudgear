@@ -3,8 +3,6 @@ import path from "node:path";
 import {
   INVOKE_CONTENT_TYPE,
   ROUTE_HEADER,
-  TOKEN_ENV,
-  TOKEN_HEADER,
   assertMethod,
   buildInput,
   compilePath,
@@ -17,11 +15,21 @@ import {
   type PathParams,
   type Provider,
 } from "./http";
+import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
+
+export type EndpointAuth = "aws_iam" | "none";
 
 export interface EndpointsFile {
   provider: string;
   routes: Record<string, string>;
-  token?: string;
+  auth?: EndpointAuth;
+}
+
+export interface RateLimit {
+  limit: number;
+  windowMs: number;
+  // Client identity; defaults to the first X-Forwarded-For address.
+  key?: (req: Request) => string;
 }
 
 export interface FunctionRouterOptions {
@@ -29,7 +37,12 @@ export interface FunctionRouterOptions {
   mode?: "local" | "remote";
   endpoints?: Record<string, string>;
   endpointsFile?: string;
-  token?: string;
+  // How remote calls authenticate; defaults to the endpoints file's value, else "aws_iam" for aws.
+  auth?: EndpointAuth;
+  credentials?: AwsCredentialsProvider;
+  region?: string;
+  // Per-process counters: instances of a serverless app do not share them.
+  rateLimit?: RateLimit;
 }
 
 interface CompiledRoute {
@@ -42,13 +55,15 @@ interface CompiledRoute {
 
 interface Endpoints {
   routes: Record<string, string>;
-  token?: string;
+  auth?: EndpointAuth;
 }
 
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
+const MAX_TRACKED_CLIENTS = 10_000;
 
 export class FunctionRouter {
   private readonly routes: CompiledRoute[] = [];
+  private readonly windows = new Map<string, { start: number; count: number }>();
   private endpoints: Endpoints | null | undefined;
 
   constructor(
@@ -74,6 +89,9 @@ export class FunctionRouter {
   }
 
   fetch = async (req: Request): Promise<Response> => {
+    const limited = this.checkRateLimit(req);
+    if (limited) return limited;
+
     const url = new URL(req.url);
     let pathMatched = false;
     for (const route of this.routes) {
@@ -103,6 +121,24 @@ export class FunctionRouter {
     return server;
   }
 
+  private checkRateLimit(req: Request): Response | null {
+    const limit = this.options.rateLimit;
+    if (!limit) return null;
+    const key = limit.key?.(req) ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "global";
+    const now = Date.now();
+    if (this.windows.size >= MAX_TRACKED_CLIENTS) {
+      for (const [client, window] of this.windows) if (now - window.start >= limit.windowMs) this.windows.delete(client);
+    }
+    let window = this.windows.get(key);
+    if (!window || now - window.start >= limit.windowMs) {
+      window = { start: now, count: 0 };
+      this.windows.set(key, window);
+    }
+    if (++window.count <= limit.limit) return null;
+    const retryAfter = Math.max(1, Math.ceil((window.start + limit.windowMs - now) / 1000));
+    return Response.json({ error: "Too many requests" }, { status: 429, headers: { "retry-after": String(retryAfter) } });
+  }
+
   private async dispatch(route: CompiledRoute, input: Record<string, unknown>): Promise<Response> {
     if (this.mode === "local") {
       const result = await invoke(route.fn, input);
@@ -115,7 +151,10 @@ export class FunctionRouter {
     }
     let upstream: Response;
     try {
-      upstream = await request(url, input, { route: route.key, token: endpoints?.token });
+      upstream = await request(url, input, {
+        route: route.key,
+        sign: this.authMode(endpoints) === "aws_iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
+      });
     } catch (err) {
       console.error(err);
       return Response.json({ error: "Function unreachable" }, { status: 502 });
@@ -126,37 +165,42 @@ export class FunctionRouter {
     return new Response(upstream.body, { status: upstream.status, headers });
   }
 
+  private authMode(endpoints: Endpoints | null): EndpointAuth {
+    return this.options.auth ?? endpoints?.auth ?? (this.provider === "aws" ? "aws_iam" : "none");
+  }
+
   private loadEndpoints(): Endpoints | null {
     if (this.endpoints !== undefined) return this.endpoints;
     this.endpoints = this.options.endpoints
-      ? { routes: this.options.endpoints, token: this.options.token ?? process.env[TOKEN_ENV] }
+      ? { routes: this.options.endpoints }
       : readEndpoints(this.provider, this.options.endpointsFile);
-    if (this.endpoints && this.options.token) this.endpoints.token = this.options.token;
     return this.endpoints;
   }
 }
 
-export function request(
+export async function request(
   url: string,
   input: unknown,
-  init: { route?: string; token?: string; headers?: Record<string, string> } = {},
+  init: {
+    route?: string;
+    headers?: Record<string, string>;
+    sign?: { credentials?: AwsCredentialsProvider; region?: string };
+  } = {},
 ): Promise<Response> {
-  return fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": INVOKE_CONTENT_TYPE,
-      ...(init.route ? { [ROUTE_HEADER]: init.route } : {}),
-      ...(init.token ? { [TOKEN_HEADER]: init.token } : {}),
-      ...init.headers,
-    },
-    body: JSON.stringify(input),
-  });
+  const body = JSON.stringify(input);
+  const headers: Record<string, string> = {
+    "content-type": INVOKE_CONTENT_TYPE,
+    ...(init.route ? { [ROUTE_HEADER]: init.route } : {}),
+    ...init.headers,
+  };
+  const finalHeaders = init.sign ? await signFunctionUrlRequest(url, body, headers, init.sign) : headers;
+  return fetch(url, { method: "POST", headers: finalHeaders, body });
 }
 
 function readEndpoints(provider: string, file?: string): Endpoints | null {
   if (process.env.CLOUDGEAR_ENDPOINTS) {
     const routes = JSON.parse(process.env.CLOUDGEAR_ENDPOINTS);
-    return Object.keys(routes).length ? { routes, token: process.env[TOKEN_ENV] } : null;
+    return Object.keys(routes).length ? { routes } : null;
   }
   const resolved = file ?? process.env.CLOUDGEAR_ENDPOINTS_FILE ?? findUp(process.cwd(), DEFAULT_ENDPOINTS_FILE);
   if (!resolved || !fs.existsSync(resolved)) return null;
@@ -166,7 +210,7 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   }
   // Nothing deployed (for example after destroy): stay in local mode.
   if (Object.keys(parsed.routes).length === 0) return null;
-  return { routes: parsed.routes, token: parsed.token ?? process.env[TOKEN_ENV] };
+  return { routes: parsed.routes, auth: parsed.auth };
 }
 
 // Stops at the nearest package.json so a parent project's endpoints are never picked up.

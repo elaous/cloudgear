@@ -6,6 +6,7 @@ export interface CloudgearConfig {
   provider: string;
   resource: ResourceSpec[];
   function: FunctionSpec[];
+  invoker: string[];
 }
 
 export interface ResourceSpec {
@@ -29,6 +30,7 @@ export interface FunctionSpec {
   permission: { resource: string; action: string[] }[];
   // value_from names a resource whose physical name becomes the value.
   env: { key: string; value?: string; value_from?: string }[];
+  reserved_concurrency: number;
 }
 
 const REPEATED = new Set([
@@ -38,6 +40,7 @@ const REPEATED = new Set([
   "function.permission",
   "function.permission.action",
   "function.env",
+  "invoker",
 ]);
 
 export function encodeConfig(config: CloudgearConfig): string {
@@ -53,6 +56,7 @@ export function decodeConfig(text: string): CloudgearConfig {
   const config: CloudgearConfig = {
     project: str(raw, "project"),
     provider: str(raw, "provider"),
+    invoker: (raw.invoker ?? []).map(String),
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
       type: str(r, "type"),
@@ -77,6 +81,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       env: (f.env ?? []).map((e: Record<string, any>) =>
         e.value_from !== undefined ? { key: str(e, "key"), value_from: str(e, "value_from") } : { key: str(e, "key"), value: String(e.value ?? "") },
       ),
+      reserved_concurrency: Number(f.reserved_concurrency ?? 0),
     })),
   };
   return config;

@@ -1,4 +1,3 @@
-import { TOKEN_ENV } from "@cloudgear/functions";
 import type { CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
 import { stateKey, type State, type StateEntry } from "./state";
 
@@ -32,13 +31,16 @@ export interface FunctionComparable {
   timeout_s: number;
   code: string;
   env: Record<string, string>;
+  reserved_concurrency: number;
+  invokers: string[];
   permissions: { type: string; physical_name: string; actions: string[] }[];
 }
 
 const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   code: ["code"],
-  config: ["runtime", "memory_mb", "timeout_s", "env"],
+  config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency"],
   permissions: ["permissions"],
+  invokers: ["invokers"],
 };
 
 export function desiredEntries(config: CloudgearConfig, state: State): DesiredEntry[] {
@@ -68,12 +70,11 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       memory_mb: fn.memory_mb,
       timeout_s: fn.timeout_s,
       code: fn.bundle.sha256,
-      env: {
-        ...Object.fromEntries(
-          fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
-        ),
-        ...(state.invoke_token ? { [TOKEN_ENV]: state.invoke_token } : {}),
-      },
+      reserved_concurrency: fn.reserved_concurrency,
+      invokers: [...config.invoker].sort(),
+      env: Object.fromEntries(
+        fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
+      ),
       permissions: fn.permission.map((p) => ({
         type: resources.get(p.resource)?.type ?? "",
         physical_name: physicalOf(p.resource),

@@ -12,7 +12,11 @@ export interface GenerateOptions {
   configPath: string;
   buildDir: string;
   project?: string;
+  invokers?: string[];
+  reservedConcurrency?: number;
 }
+
+const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
   const model = analyzeApp(options.entry);
@@ -45,6 +49,17 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     physicalNames.set(physical, fn.name);
   }
 
+  const invokers = [...new Set(options.invokers ?? [])].sort();
+  for (const invoker of invokers) {
+    if (!INVOKER.test(invoker)) {
+      throw new Error(`Invalid invoker "${invoker}"; expected an IAM role/user ARN or a 12-digit account id`);
+    }
+  }
+  const reservedConcurrency = options.reservedConcurrency ?? 0;
+  if (!Number.isInteger(reservedConcurrency) || reservedConcurrency < 0) {
+    throw new Error(`Invalid reserved concurrency "${reservedConcurrency}"; expected a non-negative integer`);
+  }
+
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
     const bundle = await bundleFunction({
@@ -71,6 +86,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         action: [...new Set([...accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
       })),
       env: used.map(([resource]) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
+      reserved_concurrency: reservedConcurrency,
     });
   }
 
@@ -85,6 +101,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       source: `${fromConfig(r.file)}:${r.line}`,
     })),
     function: functions,
+    invoker: invokers,
   };
 
   fs.mkdirSync(configDir, { recursive: true });

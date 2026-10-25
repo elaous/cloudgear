@@ -22,6 +22,7 @@ const fn = (overrides: Partial<FunctionSpec> = {}): FunctionSpec => ({
   bundle: { path: "build/foo/index.mjs", sha256: "v1" },
   permission: [{ resource: "data", action: ["s3:PutObject", "s3:ListBucket"] }],
   env: [{ key: "CLOUDGEAR_BLOB_DATA", value_from: "data" }],
+  reserved_concurrency: 0,
   ...overrides,
 });
 
@@ -33,6 +34,7 @@ const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig =
     { name: "legacy", type: "@aws.S3", physical_name: "legacy", dry: true, source: "a.ts:2" },
   ],
   function: [fn()],
+  invoker: [],
   ...overrides,
 });
 
@@ -138,7 +140,7 @@ describe("plan", () => {
 });
 
 describe("aws drivers", () => {
-  test("apply creates the bucket, then role, policy, function and public URL", async () => {
+  test("apply creates the bucket, then role, policy, function and IAM-protected URL", async () => {
     const state = emptyState();
     const aws = await applyAll(baseConfig(), state);
 
@@ -150,8 +152,6 @@ describe("aws drivers", () => {
       "CreateFunctionCommand",
       "GetFunctionConfigurationCommand",
       "CreateFunctionUrlConfigCommand",
-      "AddPermissionCommand",
-      "AddPermissionCommand",
     ]);
     expect(aws.calls[0]!.input).toEqual({ Bucket: "data", CreateBucketConfiguration: { LocationConstraint: "eu-west-1" } });
     expect(JSON.parse(aws.calls[3]!.input.PolicyDocument)).toEqual({
@@ -174,6 +174,7 @@ describe("aws drivers", () => {
     });
     expect(endpointsFrom(baseConfig(), state)).toEqual({
       provider: "aws",
+      auth: "aws_iam",
       routes: { "POST /foo/{param}": "https://app-foo.lambda-url.test/" },
     });
   });
@@ -238,25 +239,62 @@ describe("aws drivers", () => {
   });
 });
 
-describe("invoke token", () => {
-  test("is part of every function's env and of the endpoints file", async () => {
-    const state = emptyState();
-    state.invoke_token = "tok";
-    const spec = plan(baseConfig(), state).find((a) => a.kind === "function")!.desired!.spec as unknown as FunctionComparable;
-    expect(spec.env).toMatchObject({ CLOUDGEAR_INVOKE_TOKEN: "tok", CLOUDGEAR_BLOB_DATA: "data" });
+describe("function URL access", () => {
+  const ROLE = "arn:aws:iam::123456789012:role/vercel";
 
-    const aws = await applyAll(baseConfig(), state);
-    const create = aws.calls.find((c) => c.name === "CreateFunctionCommand")!;
-    expect(create.input.Environment.Variables.CLOUDGEAR_INVOKE_TOKEN).toBe("tok");
-    expect(endpointsFrom(baseConfig(), state).token).toBe("tok");
+  test("URLs require AWS_IAM and nobody is granted access unless named as an invoker", async () => {
+    const aws = await applyAll(baseConfig(), emptyState());
+    const url = aws.calls.find((c) => c.name === "CreateFunctionUrlConfigCommand")!;
+    expect(url.input.AuthType).toBe("AWS_IAM");
+    expect(aws.names()).not.toContain("AddPermissionCommand");
   });
 
-  test("rotating it is a config update", async () => {
+  test("each invoker gets InvokeFunctionUrl and InvokeFunction, scoped to the URL", async () => {
+    const aws = await applyAll(baseConfig({ invoker: [ROLE] }), emptyState());
+    const grants = aws.calls.filter((c) => c.name === "AddPermissionCommand").map((c) => c.input);
+    expect(grants).toMatchObject([
+      { Action: "lambda:InvokeFunctionUrl", Principal: ROLE, FunctionUrlAuthType: "AWS_IAM" },
+      { Action: "lambda:InvokeFunction", Principal: ROLE, InvokedViaFunctionUrl: true },
+    ]);
+    expect(new Set(grants.map((g) => g.StatementId)).size).toBe(2);
+  });
+
+  test("changing invokers adds and removes only the difference", async () => {
+    const other = "123456789012";
     const state = emptyState();
-    state.invoke_token = "one";
+    await applyAll(baseConfig({ invoker: [ROLE] }), state);
+    const next = baseConfig({ invoker: [other] });
+    expect(plan(next, state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["invokers"] });
+
+    const aws = await applyAll(next, state);
+    expect(aws.names()).toEqual([
+      "RemovePermissionCommand",
+      "RemovePermissionCommand",
+      "AddPermissionCommand",
+      "AddPermissionCommand",
+    ]);
+    expect(aws.calls.filter((c) => c.name === "AddPermissionCommand").every((c) => c.input.Principal === other)).toBe(true);
+  });
+
+  test("reserved concurrency is set on create and updated or cleared on change", async () => {
+    const state = emptyState();
+    const created = await applyAll(baseConfig({ function: [fn({ reserved_concurrency: 5 })] }), state);
+    expect(created.calls.find((c) => c.name === "PutFunctionConcurrencyCommand")!.input).toEqual({
+      FunctionName: "app-foo",
+      ReservedConcurrentExecutions: 5,
+    });
+
+    const raised = await applyAll(baseConfig({ function: [fn({ reserved_concurrency: 8 })] }), state);
+    expect(raised.names()).toEqual(["UpdateFunctionConfigurationCommand", "GetFunctionConfigurationCommand", "PutFunctionConcurrencyCommand"]);
+
+    const cleared = await applyAll(baseConfig(), state);
+    expect(cleared.names()).toContain("DeleteFunctionConcurrencyCommand");
+  });
+
+  test("endpoints are marked as IAM-authenticated", async () => {
+    const state = emptyState();
     await applyAll(baseConfig(), state);
-    state.invoke_token = "two";
-    expect(plan(baseConfig(), state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["config"] });
+    expect(endpointsFrom(baseConfig(), state).auth).toBe("aws_iam");
   });
 });
 

@@ -151,6 +151,13 @@ describe("generate", () => {
     });
   });
 
+  test("rejects invalid invokers and reserved concurrency", async () => {
+    const base = { entry: path.join(exampleDir, "main.ts"), configPath: path.join(dir, "i.prototxt"), buildDir: path.join(dir, "b") };
+    await expect(generate({ ...base, invokers: ["nope"] })).rejects.toThrow(/Invalid invoker "nope"/);
+    await expect(generate({ ...base, reservedConcurrency: -1 })).rejects.toThrow(/Invalid reserved concurrency/);
+    await expect(generate({ ...base, reservedConcurrency: 1.5 })).rejects.toThrow(/Invalid reserved concurrency/);
+  });
+
   test("rejects functions whose sanitized names collide", async () => {
     await expect(
       generate({ entry: fixture("name-collision.ts"), configPath: path.join(dir, "z.prototxt"), buildDir: path.join(dir, "b") }),

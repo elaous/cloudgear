@@ -6,7 +6,7 @@ import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { formatPlan, hasChanges, plan } from "./deploy/plan";
-import { ensureInvokeToken, loadState, saveState, stateKey, type State } from "./deploy/state";
+import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { generate } from "./generate";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -21,6 +21,8 @@ Commands:
 Options:
   --config <file>    Config file (default: cloudgear.prototxt)
   --project <name>   Project name used to prefix function names (generate only)
+  --invoker <arn>    IAM role/user ARN or account id allowed to call the functions (generate only, repeatable)
+  --reserved-concurrency <n>  Cap each function's concurrent executions (generate only)
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
 `;
 
@@ -30,6 +32,8 @@ async function main() {
     options: {
       config: { type: "string", default: "cloudgear.prototxt" },
       project: { type: "string" },
+      invoker: { type: "string", multiple: true },
+      "reserved-concurrency": { type: "string" },
       region: { type: "string" },
       "auto-approve": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
@@ -54,6 +58,8 @@ async function main() {
         configPath,
         buildDir: path.join(workDir, "build"),
         project: values.project,
+        invokers: values.invoker,
+        reservedConcurrency: values["reserved-concurrency"] === undefined ? undefined : Number(values["reserved-concurrency"]),
       });
       for (const warning of warnings) console.warn(`warning: ${warning}`);
       console.log(
@@ -64,7 +70,6 @@ async function main() {
     case "plan": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
-      ensureInvokeToken(state);
       console.log(formatPlan(plan(config, state)));
       return;
     }
@@ -72,7 +77,6 @@ async function main() {
     case "destroy": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
-      ensureInvokeToken(state);
       const target = command === "destroy" ? { ...config, resource: [], function: [] } : config;
       const actions = plan(target, state);
       console.log(formatPlan(actions));

@@ -334,6 +334,14 @@ describe("applying the edge", () => {
     await applyAll(cdnConfig(), state);
     expect(endpointsFrom(cdnConfig(), state).routes).toEqual({ "POST /foo/{param}": "https://app-foo.lambda-url.eu-west-1.on.aws/" });
   });
+
+  test("the endpoints file also records the deployed distribution, once it exists", async () => {
+    expect(endpointsFrom(cdnConfig(), emptyState()).cdn).toBeUndefined();
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    expect(endpointsFrom(cdnConfig(), state).cdn).toEqual({ domain: DOMAIN, url: "https://d111.cloudfront.net", id: "E1" });
+    expect(endpointsFrom(cdnConfig({ cdn: undefined }), state).cdn).toBeUndefined();
+  });
 });
 
 describe("records and cleanup the CDN does not own", () => {

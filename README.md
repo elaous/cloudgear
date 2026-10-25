@@ -253,6 +253,14 @@ Rules the analyzer enforces:
   and returns `{ state: "none" | "pending" | "issued" | "failed", id? }`.
   Register another with `registerCertDriver()`, or set
   `CLOUDGEAR_CERT_DRIVER=memory` for tests.
+- `DNS`, `Cert` and `CDN` do nothing at runtime except report what `apply`
+  deployed. `cert.status()` and `cdn.status()` ask the provider (live) and
+  return `{ state, id?, ... }` (`CDN` states: `none`, `deploying`, `deployed`).
+  `await cdn.url()` returns the distribution's own URL (`https://d111.cloudfront.net`;
+  the custom domain is `cdn.domain`): it reads the `cdn` entry that `apply`
+  writes into `.cloudgear/endpoints.json` and otherwise asks the provider
+  (`CloudFront` by alias), and throws until the CDN is deployed. Register
+  drivers with `registerCdnDriver()`, or use `CLOUDGEAR_CDN_DRIVER=memory`.
 - `examples/cdn-app` is a complete app: DNS, certificate, CDN and a routed
   function with a `@policy`.
 - The router's `cdn` MUST be that `CDN`, and CloudFront reaches functions
@@ -546,6 +554,7 @@ Where each moving part lives, since several are called across packages:
 | Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` (used by `DNS` and `src/cli.ts`) |
 | `Cert`, `CDN` | `packages/cdn/index.ts` | apps; `src/analyze/app.ts` |
 | Cert drivers (`acm`, `memory`) | `packages/cdn/cert-driver.ts`, `packages/cdn/drivers/` | `Cert.status()` |
+| CDN drivers (`cloudfront`, `memory-cdn`) | `packages/cdn/cdn-driver.ts`, `packages/cdn/drivers/` | `CDN.status()`, `CDN.url()` |
 | `policy`, `permissions` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | certificate and CloudFront drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts` | `awsDrivers` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |

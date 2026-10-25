@@ -5,7 +5,7 @@ import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
 import { fitName, sanitizeName } from "./names";
-import { providerProfile } from "./providers";
+import { providerProfile, validateConfigOptions } from "./providers";
 
 export interface GenerateOptions {
   entry: string;
@@ -93,6 +93,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       })),
       env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
       reserved_concurrency: reservedConcurrency,
+      options: fn.options,
     });
   }
 
@@ -106,6 +107,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       dry: r.dry,
       source: `${fromConfig(r.file)}:${r.line}`,
       region: r.region,
+      options: r.options,
     })),
     function: functions,
     invoker: invokers,
@@ -118,10 +120,12 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       domain: model.cdn.domain,
       bucket: model.cdn.bucket,
       path: model.cdn.path,
+      options: model.cdn.options,
       behavior: model.cdn.behaviors.map((b) => ({ path_pattern: b.pathPattern, function: b.function, method: b.methods })),
     },
   };
   if (config.cdn) providerProfile(config.cdn.provider);
+  validateConfigOptions(config);
 
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));

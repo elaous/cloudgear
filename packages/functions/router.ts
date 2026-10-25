@@ -19,6 +19,8 @@ import {
 import type { Authenticator } from "./auth";
 import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
 
+export type ProviderOptions = Record<string, string | number | boolean>;
+
 export type Authentication = "iam" | "none";
 export type EndpointAuth = Authentication;
 
@@ -27,6 +29,8 @@ export interface RouteOptions {
   name?: string;
   // Skip the router's `authenticate` hook for this route (for example a health check).
   public?: boolean;
+  // Provider settings of the route's function; literals only.
+  options?: ProviderOptions;
 }
 
 export interface EndpointsFile {
@@ -65,6 +69,8 @@ export interface FunctionRouterOptions {
   // A CDN (from @cloudgear/cdn) serving this router's routes from its own domain. `cloudgear generate`
   // reads it: the CDN then sends each route to its function. Routes through it skip `authenticate`.
   cdn?: { readonly domain: string };
+  // Provider settings for every function; literals only.
+  functionOptions?: ProviderOptions;
   // Per-process counters: instances of a serverless app do not share them.
   rateLimit?: RateLimit;
 }

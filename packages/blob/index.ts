@@ -28,8 +28,12 @@ export interface BlobStoreOptions {
   // AWS region of the bucket; defaults to the region the app is deployed to. `cloudgear generate`
   // creates the bucket there, so it MUST be a string literal.
   region?: string;
+  // Provider settings with no dedicated option; literals only.
+  options?: ProviderOptions;
   driver?: BlobDriver;
 }
+
+export type ProviderOptions = Record<string, string | number | boolean>;
 
 // "/img-cache" and "img-cache/" both become "img-cache/"; the bucket root is "".
 export function normalizeBlobPath(path: string): string {

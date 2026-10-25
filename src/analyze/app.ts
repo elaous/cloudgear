@@ -20,6 +20,7 @@ export interface AnalyzedResource {
   // Declared region; undefined means the region the app is deployed to.
   region?: string;
   dry: boolean;
+  options?: Record<string, string>;
   file: string;
   line: number;
 }
@@ -45,6 +46,7 @@ export interface AnalyzedFunction {
   uses: Map<string, StoreUse>;
   // Every route is `public`, so the function skips token verification.
   anonymous?: boolean;
+  options?: Record<string, string>;
 }
 
 // Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
@@ -72,10 +74,11 @@ export type Authentication = "iam" | "none";
 
 export interface EdgeModel {
   dns?: { provider: string; domain: string; zone: string };
-  certificate?: { domain: string };
+  certificate?: { domain: string; options?: Record<string, string> };
   cdn?: {
     provider: string;
     domain: string;
+    options?: Record<string, string>;
     // Name of the bucket resource and the key prefix of the static site within it.
     bucket: string;
     path: string;
@@ -134,6 +137,7 @@ export function analyzeApp(entryPath: string): AppModel {
     const uri = stringLiteral(uriArg, `${where(expr)}: BlobStore URI`);
     const storePath = readStorePath(optionsArg, where(expr));
     const storeRegion = readRegion(optionsArg, `${where(expr)}: BlobStore`);
+    const storeOptions = readOptionsMap(optionsArg, "options", `${where(expr)}: BlobStore`);
     const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
     if (!decl || decl.getInitializer() !== expr) {
       throw new Error(`${where(expr)}: assign new BlobStore(...) to a variable so its usage can be traced`);
@@ -143,14 +147,15 @@ export function analyzeApp(entryPath: string): AppModel {
       name: parseBlobUri(provider as BlobProvider, uri),
       provider,
       region: storeRegion,
+      options: storeOptions,
       dry: readDirectives(decl, where(expr)).has("dry"),
       file: relative(expr.getSourceFile().getFilePath()),
       line: expr.getStartLineNumber(),
     };
     const existing = resources.get(resource.name);
-    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region)) {
+    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region || !sameOptions(existing.options, resource.options))) {
       throw new Error(
-        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region or directives`,
+        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region, options or directives`,
       );
     }
     resources.set(resource.name, existing ?? resource);
@@ -174,6 +179,8 @@ export function analyzeApp(entryPath: string): AppModel {
     );
   }
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
+  const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
+  const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
 
@@ -261,6 +268,18 @@ export function analyzeApp(entryPath: string): AppModel {
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
     fn.routes.push({ method, path: routePath, name: routeName });
+    const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
+    const earlier = routeOptionsOf.get(fn);
+    if (earlier && !sameOptions(earlier.options, routeFunctionOptions)) {
+      throw new Error(`${where(call)}: the routes of "${fn.name}" give it different options (${earlier.at}); set them identically or use functionOptions`);
+    }
+    routeOptionsOf.set(fn, earlier ?? { options: routeFunctionOptions, at: where(call) });
+    fn.options = routeFunctionOptions;
+  }
+
+  for (const fn of functions.values()) {
+    const merged = { ...routerFunctionOptions, ...fn.options };
+    fn.options = Object.keys(merged).length ? merged : undefined;
   }
 
   const byName = new Map<string, AnalyzedFunction>();
@@ -428,7 +447,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const [providerArg, dnsArg] = certExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: Cert provider`) !== "aws") throw new Error(`${at}: Cert provider must be "aws"`);
       if (!dnsExpr || initializerOf(dnsArg, "the Cert's DNS", at) !== dnsExpr) throw new Error(`${at}: the Cert must use the app's DNS`);
-      certificate = { domain: domainName! };
+      certificate = { domain: domainName!, options: readOptionsMap(certExpr.getArguments()[2], "options", `${at}: Cert`) };
     }
 
     let cdn: EdgeModel["cdn"];
@@ -501,7 +520,7 @@ export function analyzeApp(entryPath: string): AppModel {
           }
         }
       }
-      cdn = { provider: "aws", domain: domainName!, bucket: bucketStore.resource.name, path: bucketStore.path, behaviors };
+      cdn = { provider: "aws", domain: domainName!, options: readOptionsMap(optionsArg, "options", `${at}: CDN`), bucket: bucketStore.resource.name, path: bucketStore.path, behaviors };
     }
     return { dns, certificate, cdn };
   }
@@ -662,6 +681,31 @@ function propName(prop: Node): string | undefined {
   if (Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key)) return key.getLiteralValue();
   if (Node.isNumericLiteral(key)) return key.getLiteralText();
   throw new Error(`${relative(prop.getSourceFile().getFilePath())}:${prop.getStartLineNumber()}: computed property keys cannot be analyzed`);
+}
+
+function sameOptions(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
+  return JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
+}
+
+function readOptionsMap(options: Node | undefined, name: string, at: string): Record<string, string> | undefined {
+  if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
+  const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === name);
+  if (!prop) return undefined;
+  const map = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+  if (!map || !Node.isObjectLiteralExpression(map)) throw new Error(`${at}: ${name} must be an object literal`);
+  const result: Record<string, string> = {};
+  for (const entry of map.getProperties()) {
+    if (Node.isSpreadAssignment(entry)) throw new Error(`${at}: spread in ${name} cannot be analyzed`);
+    const key = propName(entry);
+    const value = Node.isPropertyAssignment(entry) ? entry.getInitializer() : undefined;
+    if (!key || !value) throw new Error(`${at}: ${name} entries must be key: literal`);
+    if (!/^[A-Za-z][A-Za-z0-9_.]*$/.test(key)) throw new Error(`${at}: ${name} key "${key}" must start with a letter and use letters, digits, "_" and "."`);
+    if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) result[key] = value.getLiteralValue();
+    else if (Node.isNumericLiteral(value)) result[key] = value.getLiteralText();
+    else if (value.getKind() === SyntaxKind.TrueKeyword || value.getKind() === SyntaxKind.FalseKeyword) result[key] = value.getText();
+    else throw new Error(`${at}: ${name}.${key} must be a string, number or boolean literal, got: ${value.getText()}`);
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 function readAuthenticated(options: Node | undefined, at: string): Authentication {

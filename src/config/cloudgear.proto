@@ -30,6 +30,7 @@ message Dns {
 
 message Certificate {
   string domain = 1;
+  map<string, string> options = 2;
 }
 
 message Cdn {
@@ -40,6 +41,7 @@ message Cdn {
   // Key prefix of the site within the bucket ("" for the root).
   string path = 4;
   repeated Behavior behavior = 5;
+  map<string, string> options = 6;
 }
 
 // Routes the CDN sends to a function instead of the bucket.
@@ -62,6 +64,8 @@ message Resource {
   string source = 5;
   // Region the resource lives in; empty means the region the app is deployed to.
   string region = 6;
+  // Provider-specific settings; validated per type by cloudgear.
+  map<string, string> options = 7;
 }
 
 message Function {
@@ -79,6 +83,7 @@ message Function {
   repeated Env env = 11;
   // 0 leaves concurrency unreserved.
   int32 reserved_concurrency = 12;
+  map<string, string> options = 13;
 }
 
 message Source {

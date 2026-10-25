@@ -380,6 +380,37 @@ Deployed functions find the physical store through the env var
 `BlobStore.envVarFor(name)` (`CLOUDGEAR_BLOB_<NAME>`), which `cloudgear
 generate` writes into the config and `BlobStore.location` reads.
 
+### Provider options
+
+Settings that have no dedicated option go in `options`, a map of string,
+number or boolean literals (written as strings) that `generate` reads and stores
+in the config as a proto `map<string, string>` on `Resource`, `Function`,
+`Certificate` and `Cdn`. They are part of each entry's compared `spec`, so
+changing one updates the entry. Unknown keys and invalid values fail
+`generate` and `plan`, listing the supported keys.
+
+```ts
+new BlobStore("aws", "://data", { options: { versioning: true } });
+new FunctionRouter("aws", { functionOptions: { tracing: "Active", "env.STAGE": "prod" } })
+  .url("GET", "/report", report, { options: { ephemeral_storage_mb: 2048 } });
+new Cert("aws", dns, { options: { key_algorithm: "EC_prime256v1" } });
+new CDN("aws", dns, { cert, bucket, options: { price_class: "PriceClass_100" } });
+```
+
+| Type | Keys |
+| --- | --- |
+| `@aws.S3` | `versioning` (`true`, `false`) |
+| `@aws.Lambda` | `tracing` (`Active`, `PassThrough`), `ephemeral_storage_mb` (512 to 10240), `env.<NAME>` |
+| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`), `default_root_object` |
+| `@aws.Certificate` | `key_algorithm` (`RSA_2048`, `EC_prime256v1`, `EC_secp384r1`) |
+
+A function's options are the router's `functionOptions` overridden by its
+routes' `options`; the routes of one function MUST give it identical options (or none). `tracing: "Active"` also lets the role write X-Ray segments. `env.<NAME>`
+MUST NOT start with `AWS_` or `CLOUDGEAR_` and cannot be `NODE_OPTIONS`.
+Declaring a store twice with different options fails. An existing certificate
+cannot change `key_algorithm`. Add a key by extending `options` in
+`src/providers.ts` and handling it in the driver.
+
 ## `cloudgear generate`
 
 Parses the app with the TypeScript compiler (it never executes it) starting

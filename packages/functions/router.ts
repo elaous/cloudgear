@@ -3,6 +3,8 @@ import path from "node:path";
 import {
   INVOKE_CONTENT_TYPE,
   ROUTE_HEADER,
+  TOKEN_ENV,
+  TOKEN_HEADER,
   assertMethod,
   buildInput,
   compilePath,
@@ -19,6 +21,7 @@ import {
 export interface EndpointsFile {
   provider: string;
   routes: Record<string, string>;
+  token?: string;
 }
 
 export interface FunctionRouterOptions {
@@ -26,6 +29,7 @@ export interface FunctionRouterOptions {
   mode?: "local" | "remote";
   endpoints?: Record<string, string>;
   endpointsFile?: string;
+  token?: string;
 }
 
 interface CompiledRoute {
@@ -36,11 +40,16 @@ interface CompiledRoute {
   fn: Handler;
 }
 
+interface Endpoints {
+  routes: Record<string, string>;
+  token?: string;
+}
+
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
 
 export class FunctionRouter {
   private readonly routes: CompiledRoute[] = [];
-  private endpoints: Record<string, string> | null | undefined;
+  private endpoints: Endpoints | null | undefined;
 
   constructor(
     readonly provider: Provider,
@@ -68,12 +77,22 @@ export class FunctionRouter {
     const url = new URL(req.url);
     let pathMatched = false;
     for (const route of this.routes) {
-      const params = matchPath(route.matcher, url.pathname);
+      let params: Record<string, string> | null;
+      try {
+        params = matchPath(route.matcher, url.pathname);
+      } catch {
+        return Response.json({ error: "Malformed path" }, { status: 400 });
+      }
       if (!params) continue;
       pathMatched = true;
       if (route.method !== req.method) continue;
-      const body = parseBody(await req.text(), req.headers.get("content-type"));
-      return this.dispatch(route, buildInput(body, url.searchParams, params));
+      let input: Record<string, unknown>;
+      try {
+        input = buildInput(parseBody(await req.text(), req.headers.get("content-type")), url.searchParams, params);
+      } catch {
+        return Response.json({ error: "Malformed request body" }, { status: 400 });
+      }
+      return this.dispatch(route, input);
     }
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
@@ -89,20 +108,30 @@ export class FunctionRouter {
       const result = await invoke(route.fn, input);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
     }
-    const url = this.loadEndpoints()?.[route.key];
+    const endpoints = this.loadEndpoints();
+    const url = endpoints?.routes[route.key];
     if (!url) {
       return Response.json({ error: `No deployed endpoint for "${route.key}"` }, { status: 502 });
     }
-    const upstream = await request(url, input, { route: route.key });
+    let upstream: Response;
+    try {
+      upstream = await request(url, input, { route: route.key, token: endpoints?.token });
+    } catch (err) {
+      console.error(err);
+      return Response.json({ error: "Function unreachable" }, { status: 502 });
+    }
     const headers = new Headers(upstream.headers);
     // fetch() already decoded the body, so these no longer describe it.
     for (const name of ["content-encoding", "content-length", "transfer-encoding"]) headers.delete(name);
     return new Response(upstream.body, { status: upstream.status, headers });
   }
 
-  private loadEndpoints(): Record<string, string> | null {
+  private loadEndpoints(): Endpoints | null {
     if (this.endpoints !== undefined) return this.endpoints;
-    this.endpoints = this.options.endpoints ?? readEndpoints(this.provider, this.options.endpointsFile);
+    this.endpoints = this.options.endpoints
+      ? { routes: this.options.endpoints, token: this.options.token ?? process.env[TOKEN_ENV] }
+      : readEndpoints(this.provider, this.options.endpointsFile);
+    if (this.endpoints && this.options.token) this.endpoints.token = this.options.token;
     return this.endpoints;
   }
 }
@@ -110,26 +139,39 @@ export class FunctionRouter {
 export function request(
   url: string,
   input: unknown,
-  init: { route?: string; headers?: Record<string, string> } = {},
+  init: { route?: string; token?: string; headers?: Record<string, string> } = {},
 ): Promise<Response> {
   return fetch(url, {
     method: "POST",
     headers: {
       "content-type": INVOKE_CONTENT_TYPE,
       ...(init.route ? { [ROUTE_HEADER]: init.route } : {}),
+      ...(init.token ? { [TOKEN_HEADER]: init.token } : {}),
       ...init.headers,
     },
     body: JSON.stringify(input),
   });
 }
 
-function readEndpoints(provider: string, file?: string): Record<string, string> | null {
-  if (process.env.CLOUDGEAR_ENDPOINTS) return JSON.parse(process.env.CLOUDGEAR_ENDPOINTS);
-  const resolved = path.resolve(file ?? process.env.CLOUDGEAR_ENDPOINTS_FILE ?? DEFAULT_ENDPOINTS_FILE);
-  if (!fs.existsSync(resolved)) return null;
+function readEndpoints(provider: string, file?: string): Endpoints | null {
+  if (process.env.CLOUDGEAR_ENDPOINTS) {
+    return { routes: JSON.parse(process.env.CLOUDGEAR_ENDPOINTS), token: process.env[TOKEN_ENV] };
+  }
+  const resolved = file ?? process.env.CLOUDGEAR_ENDPOINTS_FILE ?? findUp(process.cwd(), DEFAULT_ENDPOINTS_FILE);
+  if (!resolved || !fs.existsSync(resolved)) return null;
   const parsed = JSON.parse(fs.readFileSync(resolved, "utf8")) as EndpointsFile;
   if (parsed.provider !== provider) {
     throw new Error(`${resolved} was deployed for provider "${parsed.provider}", router uses "${provider}"`);
   }
-  return parsed.routes;
+  // Nothing deployed (for example after destroy): stay in local mode.
+  if (Object.keys(parsed.routes).length === 0) return null;
+  return { routes: parsed.routes, token: parsed.token };
+}
+
+function findUp(dir: string, relativeFile: string): string | undefined {
+  for (let current = path.resolve(dir); ; current = path.dirname(current)) {
+    const candidate = path.join(current, relativeFile);
+    if (fs.existsSync(candidate)) return candidate;
+    if (path.dirname(current) === current) return undefined;
+  }
 }

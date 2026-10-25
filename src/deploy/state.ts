@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 export interface StateEntry {
@@ -17,7 +18,13 @@ export interface State {
   version: 1;
   project: string;
   provider: string;
+  // Shared secret between the router and deployed functions.
+  invoke_token?: string;
   entries: Record<string, StateEntry>;
+}
+
+export function ensureInvokeToken(state: State): void {
+  state.invoke_token ??= randomBytes(32).toString("hex");
 }
 
 export function stateKey(entry: { type: string; name: string }): string {

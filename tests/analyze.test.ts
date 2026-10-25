@@ -50,7 +50,33 @@ describe("analyzeApp", () => {
     expect(model.warnings).toEqual([expect.stringMatching(/"shared" is passed around as a value/)]);
   });
 
+  test("follows .add chains through intermediate variables", () => {
+    const model = analyzeApp(fixture("chained-variables.ts"));
+    expect(model.functions.map((f) => f.routes[0]!.path)).toEqual(["/a", "/b", "/c"]);
+  });
+
+  test("traces class methods, object methods and variable aliases", () => {
+    const model = analyzeApp(fixture("indirect-usage.ts"));
+    const uses = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
+    expect(uses).toEqual({
+      viaClass: { indirect: ["write"] },
+      viaObject: { logs: ["delete"] },
+      // an alias hands the store around as a value, so every access is granted
+      viaAlias: { indirect: ["delete", "list", "read", "write"] },
+      // Object.prototype members are not store operations
+      inherited: { indirect: [] },
+    });
+    expect(model.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/"indirect" is used outside any function/),
+        expect.stringMatching(/"indirect" is passed around as a value/),
+      ]),
+    );
+  });
+
   test.each([
+    ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
+    ["no-routes.ts", /FunctionRouter has no \.add\(\.\.\.\) routes/],
     ["unexported.ts", /must be exported/],
     ["inline.ts", /must reference a named function/],
     ["missing-param.ts", /path param\(s\) "other" missing from input type/],
@@ -117,6 +143,12 @@ describe("generate", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ error: "not found" }),
     });
+  });
+
+  test("rejects stores that map to the same env var", async () => {
+    await expect(
+      generate({ entry: fixture("env-collision.ts"), configPath: path.join(dir, "y.prototxt"), buildDir: path.join(dir, "b") }),
+    ).rejects.toThrow(/same env var CLOUDGEAR_BLOB_A_B/);
   });
 
   test("rejects resources whose provider differs from the router's", async () => {

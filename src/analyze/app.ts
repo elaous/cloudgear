@@ -103,7 +103,9 @@ export function analyzeApp(entryPath: string): AppModel {
   const provider = stringLiteral(router.getArguments()[0], `${where(router)}: FunctionRouter provider`);
 
   const functions = new Map<Node, AnalyzedFunction>();
-  for (const call of collectAddCalls(router)) {
+  const addCalls = collectAddCalls(router, where);
+  if (addCalls.length === 0) throw new Error(`${where(router)}: FunctionRouter has no .add(...) routes`);
+  for (const call of addCalls) {
     const [methodArg, pathArg, fnArg] = call.getArguments();
     const method = stringLiteral(methodArg, `${where(call)}: route method`).toUpperCase();
     if (!(METHODS as readonly string[]).includes(method)) throw new Error(`${where(call)}: unsupported HTTP method "${method}"`);
@@ -145,6 +147,8 @@ export function analyzeApp(entryPath: string): AppModel {
     byName.set(fn.name, fn);
   }
 
+  warnModuleLevelUse();
+
   return {
     provider,
     entry: relative(entry),
@@ -153,9 +157,12 @@ export function analyzeApp(entryPath: string): AppModel {
     warnings,
   };
 
-  function collectUsage(fnNode: Node, uses: Map<string, Set<BlobAccess>>, visited: Set<Node>) {
-    visited.add(fnNode);
-    fnNode.forEachDescendant((node) => {
+  function collectUsage(root: Node, uses: Map<string, Set<BlobAccess>>, visited: Set<Node>) {
+    visited.add(root);
+    const trace = (target: Node) => {
+      if (!visited.has(target)) collectUsage(target, uses, visited);
+    };
+    const visit = (node: Node) => {
       if (!Node.isIdentifier(node)) return;
       for (const decl of resolveSymbol(node.getSymbol())?.getDeclarations() ?? []) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
@@ -166,17 +173,48 @@ export function analyzeApp(entryPath: string): AppModel {
           uses.set(resource.name, accesses);
           continue;
         }
+        if (!isLocal(decl)) continue;
         const callee = functionNode(decl);
-        if (callee && isLocal(callee) && !visited.has(callee)) collectUsage(callee, uses, visited);
+        if (callee) {
+          trace(callee);
+        } else if (Node.isClassDeclaration(decl)) {
+          for (const member of decl.getMembers()) {
+            if (Node.isConstructorDeclaration(member)) trace(member);
+            else if (Node.isPropertyDeclaration(member) && member.getInitializer()) trace(member.getInitializerOrThrow());
+          }
+        } else if (Node.isVariableDeclaration(decl) && decl.getInitializer()) {
+          trace(decl.getInitializerOrThrow());
+        }
       }
-    });
+    };
+    visit(root);
+    root.forEachDescendant((node) => void visit(node));
+  }
+
+  function warnModuleLevelUse() {
+    for (const decl of resourceByDecl.keys()) {
+      const name = (decl as VariableDeclaration).getNameNode();
+      if (!Node.isIdentifier(name)) continue;
+      for (const ref of name.findReferencesAsNodes()) {
+        const parent = ref.getParent();
+        const isOperation =
+          Node.isPropertyAccessExpression(parent) &&
+          parent.getExpression() === ref &&
+          Object.hasOwn(BLOB_OPERATIONS, parent.getName());
+        if (isOperation && !ref.getFirstAncestor((a) => Node.isFunctionLikeDeclaration(a) || Node.isClassDeclaration(a))) {
+          warnings.push(
+            `${where(ref)}: BlobStore "${resourceByDecl.get(decl)!.name}" is used outside any function; no permission is inferred for it`,
+          );
+        }
+      }
+    }
   }
 
   function accessesAt(node: Node, resource: AnalyzedResource): BlobAccess[] {
     const parent = node.getParent();
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === node) {
       const member = parent.getName();
-      if (member in BLOB_OPERATIONS) return [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]];
+      if (Object.hasOwn(BLOB_OPERATIONS, member)) return [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]];
       return [];
     }
     warnings.push(
@@ -186,15 +224,32 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 }
 
-function collectAddCalls(router: NewExpression): CallExpression[] {
+const ROUTER_MEMBERS = new Set(["listen", "fetch", "provider", "mode"]);
+
+// Follows .add chains through variables; throws if the router flows anywhere untraceable.
+function collectAddCalls(router: NewExpression, where: (node: Node) => string): CallExpression[] {
   const calls: CallExpression[] = [];
-  const top = walkChain(router, calls);
-  const decl = top.getParentIfKind(SyntaxKind.VariableDeclaration);
-  if (decl && decl.getInitializer() === top && Node.isIdentifier(decl.getNameNode())) {
-    for (const ref of decl.getNameNode().asKindOrThrow(SyntaxKind.Identifier).findReferencesAsNodes()) {
-      if (ref !== decl.getNameNode()) walkChain(ref, calls);
+  const followed = new Set<Node>();
+
+  const follow = (start: Node) => {
+    const top = walkChain(start, calls);
+    const parent = top.getParent();
+    if (Node.isVariableDeclaration(parent) && parent.getInitializer() === top) {
+      const name = parent.getNameNode();
+      if (!Node.isIdentifier(name)) throw new Error(`${where(parent)}: assign the router to a plain variable so its routes can be traced`);
+      if (followed.has(parent)) return;
+      followed.add(parent);
+      for (const ref of name.findReferencesAsNodes()) if (ref !== name) follow(ref);
+      return;
     }
-  }
+    if (Node.isExpressionStatement(parent)) return;
+    if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === top && ROUTER_MEMBERS.has(parent.getName())) return;
+    throw new Error(
+      `${where(top)}: the router is used in a way cloudgear cannot trace ("${parent?.getText().slice(0, 60)}"); keep .add(...) calls on the router variable`,
+    );
+  };
+
+  follow(router);
   return calls;
 }
 
@@ -223,8 +278,8 @@ function walkChain(start: Node, calls: CallExpression[]): Node {
 }
 
 function functionNode(decl: Node) {
-  if (Node.isFunctionDeclaration(decl)) return decl;
-  if (Node.isVariableDeclaration(decl)) {
+  if (Node.isFunctionDeclaration(decl) || Node.isMethodDeclaration(decl)) return decl;
+  if (Node.isVariableDeclaration(decl) || Node.isPropertyAssignment(decl)) {
     const init = decl.getInitializer();
     if (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) return init;
   }

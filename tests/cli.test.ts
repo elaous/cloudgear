@@ -47,6 +47,17 @@ describe("cloudgear CLI", () => {
     expect(second.out).not.toContain("+ @aws.S3");
   });
 
+  test("import refuses to replace a resource cloudgear manages", () => {
+    const statePath = path.join(dir, ".cloudgear/state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    state.entries["@aws.S3.cloudgear-example-archive"].imported = false;
+    fs.writeFileSync(statePath, JSON.stringify(state));
+
+    const res = run("import", "cloudgear-example-archive", "other");
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/already managed by cloudgear/);
+  });
+
   test("import rejects unknown names and functions", () => {
     const res = run("import", "foo");
     expect(res.code).toBe(1);

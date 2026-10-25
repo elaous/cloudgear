@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { FunctionRouter, INVOKE_CONTENT_TYPE, response } from "@cloudgear/functions";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { FunctionRouter, INVOKE_CONTENT_TYPE, TOKEN_ENV, TOKEN_HEADER, response } from "@cloudgear/functions";
 import { createHandler, type FunctionUrlEvent } from "@cloudgear/functions/aws";
 import { buildInput, compilePath, matchPath } from "../packages/functions/http";
 
@@ -20,6 +23,18 @@ describe("http helpers", () => {
       { param: "path" },
     );
     expect(input).toEqual({ name: "body", q: "query", tag: ["a", "b"], param: "path" });
+  });
+
+  test("__proto__ keys become plain data and never change the prototype", () => {
+    const body = JSON.parse('{"__proto__":{"admin":true},"id":"1"}');
+    const input = buildInput(body, new URLSearchParams("tag=a"), {});
+    expect(Object.getPrototypeOf(input)).toBe(Object.prototype);
+    expect((input as any).admin).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(input))).toEqual({ ["__proto__"]: { admin: true }, id: "1", tag: "a" });
+
+    const fromQuery = buildInput(undefined, new URLSearchParams("__proto__=a&__proto__=b"), {});
+    expect(Object.getPrototypeOf(fromQuery)).toBe(Object.prototype);
+    expect(Object.keys(fromQuery)).toEqual(["__proto__"]);
   });
 
   test("a non-object body is exposed as input.body", () => {
@@ -56,10 +71,25 @@ describe("FunctionRouter (local mode)", () => {
     expect(res.headers.get("x-test")).toBe("1");
   });
 
-  test("turns thrown errors into 500s", async () => {
-    const res = await router.fetch(new Request("http://app/boom"));
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "kaboom" });
+  test("turns thrown errors into generic 500s and logs the cause", async () => {
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await router.fetch(new Request("http://app/boom"));
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Internal Server Error" });
+      expect(log).toHaveBeenCalledTimes(1);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  test("answers 400 for malformed percent-encoding and invalid JSON", async () => {
+    const r = new FunctionRouter("aws", { mode: "local" }).add("POST", "/p/{id}", echo);
+    expect((await r.fetch(new Request("http://app/p/%E0%A4%A", { method: "POST" }))).status).toBe(400);
+    const bad = await r.fetch(
+      new Request("http://app/p/1", { method: "POST", headers: { "content-type": "application/json" }, body: "{" }),
+    );
+    expect(bad.status).toBe(400);
   });
 
   test("404 for unknown paths, 405 for a known path with another method", async () => {
@@ -122,6 +152,71 @@ describe("FunctionRouter (remote mode)", () => {
     expect((await router.fetch(new Request("http://app/x"))).status).toBe(502);
   });
 
+  test("502 when the function URL is unreachable", async () => {
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const router = new FunctionRouter("aws", { endpoints: { "GET /x": "http://127.0.0.1:1/" } }).add("GET", "/x", echo);
+      const res = await router.fetch(new Request("http://app/x"));
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ error: "Function unreachable" });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  test("sends the invoke token, and the function rejects callers without it", async () => {
+    process.env[TOKEN_ENV] = "s3cret";
+    try {
+      const url = fakeFunctionUrl(createHandler(echo, [{ method: "GET", path: "/x" }]));
+      const good = new FunctionRouter("aws", { endpoints: { "GET /x": url }, token: "s3cret" }).add("GET", "/x", echo);
+      expect((await good.fetch(new Request("http://app/x?a=1"))).status).toBe(200);
+
+      const wrong = new FunctionRouter("aws", { endpoints: { "GET /x": url }, token: "nope" }).add("GET", "/x", echo);
+      expect((await wrong.fetch(new Request("http://app/x"))).status).toBe(403);
+
+      const direct = await fetch(new URL("/x", url));
+      expect(direct.status).toBe(403);
+    } finally {
+      delete process.env[TOKEN_ENV];
+    }
+  });
+
+  describe("endpoints file", () => {
+    const dirs: string[] = [];
+    const originalCwd = process.cwd();
+    afterEach(() => {
+      process.chdir(originalCwd);
+      while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
+    });
+    const projectWith = (file: object) => {
+      const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear-endpoints-")));
+      dirs.push(dir);
+      fs.mkdirSync(path.join(dir, ".cloudgear"));
+      fs.writeFileSync(path.join(dir, ".cloudgear", "endpoints.json"), JSON.stringify(file));
+      fs.mkdirSync(path.join(dir, "src", "deep"), { recursive: true });
+      return dir;
+    };
+
+    test("is found from a nested working directory and supplies the token", () => {
+      const dir = projectWith({ provider: "aws", routes: { "GET /x": "https://fn" }, token: "t" });
+      process.chdir(path.join(dir, "src", "deep"));
+      const router = new FunctionRouter("aws").add("GET", "/x", echo);
+      expect(router.mode).toBe("remote");
+    });
+
+    test("with no routes (after destroy) the router stays local", () => {
+      const dir = projectWith({ provider: "aws", routes: {} });
+      process.chdir(dir);
+      expect(new FunctionRouter("aws").add("GET", "/x", echo).mode).toBe("local");
+    });
+
+    test("rejects a file deployed for another provider", () => {
+      const dir = projectWith({ provider: "gcp", routes: { "GET /x": "https://fn" } });
+      process.chdir(dir);
+      expect(() => new FunctionRouter("aws").mode).toThrow(/deployed for provider "gcp"/);
+    });
+  });
+
   test("reads endpoints from CLOUDGEAR_ENDPOINTS", () => {
     process.env.CLOUDGEAR_ENDPOINTS = JSON.stringify({ "GET /x": "https://example" });
     try {
@@ -157,6 +252,21 @@ describe("aws createHandler", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ verbose: "1", id: "5" });
+  });
+
+  test("with a token configured, only invoke calls presenting it are served", async () => {
+    process.env[TOKEN_ENV] = "tok";
+    try {
+      const invoke = (headers: Record<string, string>) =>
+        handler(event({ headers: { "content-type": INVOKE_CONTENT_TYPE, ...headers }, body: "{}" }));
+      expect((await invoke({ [TOKEN_HEADER]: "tok" })).statusCode).toBe(200);
+      expect((await invoke({})).statusCode).toBe(403);
+      expect((await invoke({ [TOKEN_HEADER]: "tok2" })).statusCode).toBe(403);
+      const direct = await handler(event({ rawPath: "/items/5", requestContext: { http: { method: "GET" } } }));
+      expect(direct.statusCode).toBe(403);
+    } finally {
+      delete process.env[TOKEN_ENV];
+    }
   });
 
   test("decodes base64 bodies", async () => {

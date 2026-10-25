@@ -1,5 +1,8 @@
+import { timingSafeEqual } from "node:crypto";
 import {
   INVOKE_CONTENT_TYPE,
+  TOKEN_ENV,
+  TOKEN_HEADER,
   buildInput,
   compilePath,
   invoke,
@@ -38,6 +41,14 @@ export function createHandler(fn: Handler, routes: RouteSpec[]) {
       : "";
     const contentType = headers["content-type"] ?? null;
 
+    const token = process.env[TOKEN_ENV];
+    if (token) {
+      const isInvoke = contentType?.startsWith(INVOKE_CONTENT_TYPE) ?? false;
+      if (!isInvoke || !tokenMatches(headers[TOKEN_HEADER], token)) {
+        return toLambda({ status: 403, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Forbidden" }) });
+      }
+    }
+
     let input: unknown;
     try {
       input = resolveInput(compiled, event, text, contentType);
@@ -67,6 +78,13 @@ function resolveInput(
     return buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params);
   }
   return undefined;
+}
+
+function tokenMatches(given: string | undefined, expected: string): boolean {
+  if (given === undefined) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function toLambda(result: HttpResult): FunctionUrlResult {

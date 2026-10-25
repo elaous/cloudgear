@@ -8,6 +8,7 @@ import { awsDrivers, policyDocument, type SendClient } from "../src/deploy/aws";
 import { formatPlan, plan, type FunctionComparable } from "../src/deploy/plan";
 import type { State } from "../src/deploy/state";
 import { zip } from "../src/build/zip";
+import { fitName, sanitizeName } from "../src/names";
 
 const fn = (overrides: Partial<FunctionSpec> = {}): FunctionSpec => ({
   name: "foo",
@@ -234,6 +235,100 @@ describe("aws drivers", () => {
     expect(() =>
       policyDocument({ permissions: [{ type: "@gcp.Storage", physical_name: "x", actions: [] }] } as unknown as FunctionComparable),
     ).toThrow(/No IAM mapping/);
+  });
+});
+
+describe("invoke token", () => {
+  test("is part of every function's env and of the endpoints file", async () => {
+    const state = emptyState();
+    state.invoke_token = "tok";
+    const spec = plan(baseConfig(), state).find((a) => a.kind === "function")!.desired!.spec as unknown as FunctionComparable;
+    expect(spec.env).toMatchObject({ CLOUDGEAR_INVOKE_TOKEN: "tok", CLOUDGEAR_BLOB_DATA: "data" });
+
+    const aws = await applyAll(baseConfig(), state);
+    const create = aws.calls.find((c) => c.name === "CreateFunctionCommand")!;
+    expect(create.input.Environment.Variables.CLOUDGEAR_INVOKE_TOKEN).toBe("tok");
+    expect(endpointsFrom(baseConfig(), state).token).toBe("tok");
+  });
+
+  test("rotating it is a config update", async () => {
+    const state = emptyState();
+    state.invoke_token = "one";
+    await applyAll(baseConfig(), state);
+    state.invoke_token = "two";
+    expect(plan(baseConfig(), state).find((a) => a.kind === "function")).toMatchObject({ op: "update", changes: ["config"] });
+  });
+});
+
+describe("failure handling", () => {
+  test("a mid-create failure rolls back what that call created", async () => {
+    const state = emptyState();
+    const aws = fakeAws({
+      CreateFunctionUrlConfigCommand: () => {
+        throw new Error("boom");
+      },
+    });
+    await expect(apply(plan(baseConfig(), state), state, aws.drivers, { save: () => {} })).rejects.toThrow("boom");
+    expect(aws.names().slice(-4)).toEqual([
+      "DeleteFunctionCommand",
+      "DeleteRolePolicyCommand",
+      "DetachRolePolicyCommand",
+      "DeleteRoleCommand",
+    ]);
+    expect(Object.keys(state.entries)).toEqual(["@aws.S3.data"]);
+  });
+
+  test("a role that already exists is left alone", async () => {
+    const aws = fakeAws({
+      CreateRoleCommand: () => {
+        throw Object.assign(new Error("exists"), { name: "EntityAlreadyExists" });
+      },
+    });
+    await expect(applyAll(baseConfig(), emptyState(), aws)).rejects.toThrow("exists");
+    expect(aws.names()).not.toContain("DeleteRoleCommand");
+  });
+
+  test("deleting a non-empty bucket explains what to do", async () => {
+    const state = emptyState();
+    await applyAll(baseConfig(), state);
+    const aws = fakeAws({
+      DeleteBucketCommand: () => {
+        throw Object.assign(new Error("x"), { name: "BucketNotEmpty" });
+      },
+    });
+    await expect(applyAll(baseConfig({ resource: [], function: [] }), state, aws)).rejects.toThrow(
+      /Bucket "data" is not empty; empty it/,
+    );
+    expect(state.entries["@aws.Lambda.foo"]).toBeUndefined();
+    expect(state.entries["@aws.S3.data"]).toBeDefined();
+  });
+});
+
+describe("names", () => {
+  test("sanitizeName keeps Lambda-safe characters", () => {
+    expect(sanitizeName("[id].tsx")).toBe("id-tsx");
+    expect(sanitizeName("get_item-2")).toBe("get_item-2");
+    expect(sanitizeName("!!!")).toBe("fn");
+  });
+
+  test("fitName leaves short names and keeps long names distinct", () => {
+    expect(fitName("short", 64)).toBe("short");
+    const prefix = "p".repeat(70);
+    const a = fitName(`${prefix}-one`, 64);
+    const b = fitName(`${prefix}-two`, 64);
+    expect(a).toHaveLength(64);
+    expect(a).not.toBe(b);
+  });
+
+  test("two functions sharing a long prefix get different IAM roles", async () => {
+    const prefix = "p".repeat(70);
+    const config = baseConfig({
+      function: [fn({ name: "a", physical_name: `${prefix}-a` }), fn({ name: "b", physical_name: `${prefix}-b` })],
+    });
+    const aws = await applyAll(config, emptyState());
+    const roles = aws.calls.filter((c) => c.name === "CreateRoleCommand").map((c) => c.input.RoleName);
+    expect(new Set(roles).size).toBe(2);
+    expect(roles.every((r) => r.length <= 64)).toBe(true);
   });
 });
 

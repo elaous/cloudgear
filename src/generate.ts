@@ -4,6 +4,7 @@ import { BlobStore } from "@cloudgear/blob";
 import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
+import { fitName, sanitizeName } from "./names";
 import { providerProfile } from "./providers";
 
 export interface GenerateOptions {
@@ -28,6 +29,14 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     }
   }
 
+  const envVars = new Map<string, string>();
+  for (const resource of model.resources) {
+    const envVar = BlobStore.envVarFor(resource.name);
+    const clash = envVars.get(envVar);
+    if (clash) throw new Error(`BlobStores "${clash}" and "${resource.name}" map to the same env var ${envVar}; rename one`);
+    envVars.set(envVar, resource.name);
+  }
+
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
     const bundle = await bundleFunction({
@@ -42,7 +51,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     functions.push({
       name: fn.name,
       type: profile.function.type,
-      physical_name: `${project}-${fn.name}`.slice(0, 64),
+      physical_name: fitName(`${project}-${sanitizeName(fn.name)}`, 64),
       runtime: profile.function.runtime,
       memory_mb: profile.function.memoryMb,
       timeout_s: profile.function.timeoutS,

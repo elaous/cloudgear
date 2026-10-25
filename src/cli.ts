@@ -6,7 +6,7 @@ import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { formatPlan, hasChanges, plan } from "./deploy/plan";
-import { loadState, saveState, stateKey } from "./deploy/state";
+import { ensureInvokeToken, loadState, saveState, stateKey } from "./deploy/state";
 import { generate } from "./generate";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -63,14 +63,16 @@ async function main() {
     }
     case "plan": {
       const config = readConfig(configPath);
-      const actions = plan(config, loadState(statePath, config.project, config.provider));
-      console.log(formatPlan(actions));
+      const state = loadState(statePath, config.project, config.provider);
+      ensureInvokeToken(state);
+      console.log(formatPlan(plan(config, state)));
       return;
     }
     case "apply":
     case "destroy": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
+      ensureInvokeToken(state);
       const target = command === "destroy" ? { ...config, resource: [], function: [] } : config;
       const actions = plan(target, state);
       console.log(formatPlan(actions));
@@ -88,8 +90,14 @@ async function main() {
       }
       const endpointsPath = path.join(workDir, "endpoints.json");
       fs.mkdirSync(workDir, { recursive: true });
-      fs.writeFileSync(endpointsPath, JSON.stringify(endpointsFrom(config, state), null, 2) + "\n");
-      console.log(`cloudgear: ${command} complete, endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);
+      const endpoints = endpointsFrom(config, state);
+      if (Object.keys(endpoints.routes).length) {
+        fs.writeFileSync(endpointsPath, JSON.stringify(endpoints, null, 2) + "\n");
+        console.log(`cloudgear: ${command} complete, endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);
+      } else {
+        fs.rmSync(endpointsPath, { force: true });
+        console.log(`cloudgear: ${command} complete, no deployed endpoints`);
+      }
       return;
     }
     case "import": {
@@ -102,6 +110,10 @@ async function main() {
         throw new Error(`No resource named "${name}" in ${values.config} (resources: ${known}); functions cannot be imported`);
       }
       const state = loadState(statePath, config.project, config.provider);
+      const existing = state.entries[stateKey(resource)];
+      if (existing && !existing.imported) {
+        throw new Error(`${resource.type} ${name} is already managed by cloudgear; destroy it before importing another`);
+      }
       const physical = physicalId ?? resource.physical_name;
       state.entries[stateKey(resource)] = {
         kind: "resource",

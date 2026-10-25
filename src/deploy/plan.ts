@@ -1,3 +1,4 @@
+import { TOKEN_ENV } from "@cloudgear/functions";
 import type { CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
 import { stateKey, type State, type StateEntry } from "./state";
 
@@ -67,9 +68,12 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       memory_mb: fn.memory_mb,
       timeout_s: fn.timeout_s,
       code: fn.bundle.sha256,
-      env: Object.fromEntries(
-        fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
-      ),
+      env: {
+        ...Object.fromEntries(
+          fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
+        ),
+        ...(state.invoke_token ? { [TOKEN_ENV]: state.invoke_token } : {}),
+      },
       permissions: fn.permission.map((p) => ({
         type: resources.get(p.resource)?.type ?? "",
         physical_name: physicalOf(p.resource),

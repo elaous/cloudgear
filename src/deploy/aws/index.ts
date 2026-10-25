@@ -23,6 +23,7 @@ import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
 import type { FunctionSpec } from "../../config/schema";
 import { zip } from "../../build/zip";
+import { fitName } from "../../names";
 
 export interface SendClient {
   send(command: any): Promise<any>;
@@ -92,7 +93,16 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         return {};
       },
       async delete(current) {
-        await ignore(s3.send(new DeleteBucketCommand({ Bucket: current.physical_name })), "NoSuchBucket");
+        try {
+          await s3.send(new DeleteBucketCommand({ Bucket: current.physical_name }));
+        } catch (err) {
+          const name = (err as { name?: string }).name;
+          if (name === "NoSuchBucket") return;
+          if (name === "BucketNotEmpty") {
+            throw new Error(`Bucket "${current.physical_name}" is not empty; empty it, or run cloudgear import to keep it, then retry`);
+          }
+          throw err;
+        }
       },
     },
 
@@ -100,55 +110,66 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       async create(entry: DesiredEntry) {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = roleNameFor(entry.physical_name);
-        const role = await iam.send(new CreateRoleCommand({ RoleName: roleName, AssumeRolePolicyDocument: LAMBDA_TRUST_POLICY }));
-        await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY }));
-        await putPermissions(roleName, spec);
+        // Undo steps for what this call created, so a failure never leaves orphans behind.
+        const undo: (() => Promise<unknown>)[] = [];
+        try {
+          const role = await iam.send(new CreateRoleCommand({ RoleName: roleName, AssumeRolePolicyDocument: LAMBDA_TRUST_POLICY }));
+          undo.push(() => iam.send(new DeleteRoleCommand({ RoleName: roleName })));
+          await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY }));
+          undo.push(() => iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })));
+          await putPermissions(roleName, spec);
+          undo.push(() => iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })));
 
-        const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }]);
-        let created: any;
-        // A new IAM role takes a few seconds before Lambda can assume it.
-        for (let attempt = 0; ; attempt++) {
-          try {
-            created = await lambda.send(
-              new CreateFunctionCommand({
-                FunctionName: entry.physical_name,
-                Runtime: spec.runtime as any,
-                Role: role.Role.Arn,
-                Handler: "index.handler",
-                Code: { ZipFile: code },
-                MemorySize: spec.memory_mb,
-                Timeout: spec.timeout_s,
-                Environment: environment(spec),
-              }),
-            );
-            break;
-          } catch (err) {
-            if (attempt >= 10 || !/cannot be assumed/i.test((err as Error).message)) throw err;
-            await sleep(3000);
+          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }]);
+          let created: any;
+          // A new IAM role takes a few seconds before Lambda can assume it.
+          for (let attempt = 0; ; attempt++) {
+            try {
+              created = await lambda.send(
+                new CreateFunctionCommand({
+                  FunctionName: entry.physical_name,
+                  Runtime: spec.runtime as any,
+                  Role: role.Role.Arn,
+                  Handler: "index.handler",
+                  Code: { ZipFile: code },
+                  MemorySize: spec.memory_mb,
+                  Timeout: spec.timeout_s,
+                  Environment: environment(spec),
+                }),
+              );
+              break;
+            } catch (err) {
+              if (attempt >= 10 || !/cannot be assumed/i.test((err as Error).message)) throw err;
+              await sleep(3000);
+            }
           }
-        }
-        await waitForFunction(entry.physical_name);
+          undo.push(() => lambda.send(new DeleteFunctionCommand({ FunctionName: entry.physical_name })));
+          await waitForFunction(entry.physical_name);
 
-        const url = await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: "NONE" }));
-        await lambda.send(
-          new AddPermissionCommand({
-            FunctionName: entry.physical_name,
-            StatementId: "cloudgear-url",
-            Action: "lambda:InvokeFunctionUrl",
-            Principal: "*",
-            FunctionUrlAuthType: "NONE",
-          }),
-        );
-        await lambda.send(
-          new AddPermissionCommand({
-            FunctionName: entry.physical_name,
-            StatementId: "cloudgear-url-invoke",
-            Action: "lambda:InvokeFunction",
-            Principal: "*",
-            InvokedViaFunctionUrl: true,
-          }),
-        );
-        return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, url: url.FunctionUrl };
+          const url = await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: "NONE" }));
+          await lambda.send(
+            new AddPermissionCommand({
+              FunctionName: entry.physical_name,
+              StatementId: "cloudgear-url",
+              Action: "lambda:InvokeFunctionUrl",
+              Principal: "*",
+              FunctionUrlAuthType: "NONE",
+            }),
+          );
+          await lambda.send(
+            new AddPermissionCommand({
+              FunctionName: entry.physical_name,
+              StatementId: "cloudgear-url-invoke",
+              Action: "lambda:InvokeFunction",
+              Principal: "*",
+              InvokedViaFunctionUrl: true,
+            }),
+          );
+          return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, url: url.FunctionUrl };
+        } catch (err) {
+          for (const step of undo.reverse()) await step().catch(() => {});
+          throw err;
+        }
       },
 
       async update(entry, current, changes) {
@@ -201,7 +222,7 @@ export function policyDocument(spec: FunctionComparable): string {
 }
 
 function roleNameFor(functionName: string): string {
-  return `${functionName.slice(0, 59)}-role`;
+  return fitName(`${functionName}-role`, 64);
 }
 
 async function ignore(promise: Promise<unknown>, errorName: string): Promise<void> {

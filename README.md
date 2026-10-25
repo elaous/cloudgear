@@ -52,7 +52,8 @@ Each routed function receives a single input object built from the request:
 JSON/form body fields, then query params, then path params (later sources win
 on name clashes). A non-object body is passed as `input.body`. The return
 value is sent as JSON; return `response(body, { status, headers })` to control
-the status or headers. Thrown errors become `500 {"error": message}`.
+the status or headers. Thrown errors are logged and answered with a generic
+`500 {"error": "Internal Server Error"}`.
 
 `.add()` type-checks route path params against the function's input type, so
 `.add("GET", "/x/{id}", fn)` fails to compile when `fn`'s input has no `id`.
@@ -64,16 +65,21 @@ exposed to mount elsewhere). For each request it either:
 
 - **remote**: POSTs the input object to the route's deployed function URL
   (content type `application/vnd.cloudgear.invoke+json`) and relays the
-  response. Function URLs come from `.cloudgear/endpoints.json`, written by
-  `cloudgear apply`, or from `$CLOUDGEAR_ENDPOINTS` (JSON) or
-  `$CLOUDGEAR_ENDPOINTS_FILE`.
+  response. Function URLs come from `.cloudgear/endpoints.json` (found by
+  searching up from the working directory), written by `cloudgear apply`,
+  or from `$CLOUDGEAR_ENDPOINTS` (JSON) or `$CLOUDGEAR_ENDPOINTS_FILE`. A
+  file with no routes, as left by `destroy`, means local mode.
 - **local**: runs the function in-process. This is the default when no
   endpoints file exists, so `bun main.ts` works before anything is deployed.
   Force a mode with `new FunctionRouter("aws", { mode: "local" | "remote" })`.
 
-A deployed function also accepts direct HTTP calls on its own URL
-(`GET https://<fn-url>/foo/42?q=x`); it matches its routes and builds the
-same input object.
+Function URLs are public, so every deployed function carries a shared
+secret: `cloudgear apply` generates `invoke_token` in the state file, sets it
+as `CLOUDGEAR_INVOKE_TOKEN` on each function and writes it to
+`endpoints.json`. A function answers `403` unless the request is a router
+call presenting the token in `x-cloudgear-token`. Without the env var (local
+runs) the adapter also serves direct HTTP calls that match its routes.
+Treat `.cloudgear/` as secret; it is git-ignored.
 
 ### Runtime: `BlobStore`
 
@@ -112,7 +118,7 @@ from the entry file and following imports:
 | --- | --- |
 | `new FunctionRouter("aws").add(method, path, fn)` | one `@aws.Lambda` per distinct `fn`, behind a public function URL |
 | `new BlobStore("aws", "://myblob")` | `@aws.S3` bucket `myblob` |
-| `store.get/getText/getJson(...)` inside `fn` | `s3:GetObject` |
+| `store.get/getText/getJson(...)` inside `fn` | `s3:GetObject`, `s3:ListBucket` (S3 answers 403 instead of "not found" without it) |
 | `store.exists(...)` | `s3:GetObject`, `s3:ListBucket` |
 | `store.put(...)` | `s3:PutObject` |
 | `store.delete(...)` | `s3:DeleteObject` |
@@ -122,14 +128,18 @@ from the entry file and following imports:
 `delete`, `list`) in `BLOB_OPERATIONS`; `src/providers.ts` maps those to each
 provider's permissions.
 
-Permissions are traced per function through every local helper it calls,
-across files. A store passed around as a value (for example as an argument)
-gets every operation granted, with a warning.
+Permissions are traced per function through every local function, method,
+constructor and variable initializer it reaches, across files. A store
+passed around as a value (an argument, an alias) gets every operation
+granted, with a warning. A store used at module level, outside any
+function, gets no inferred permission and a warning.
 
 Requirements the analyzer enforces:
 
 - Exactly one `FunctionRouter` per app; provider, method and path MUST be
-  string literals.
+  string literals. `.add(...)` calls MUST be on the router variable or a
+  chain from it (variables holding a chain result are followed); passing
+  the router to a function, or exporting it, is rejected.
 - A routed function MUST be a named, exported function (declaration or
   `const` arrow) in your project, so it can be bundled on its own.
 - `new BlobStore(...)` MUST be assigned to a variable, with literal arguments,
@@ -191,6 +201,10 @@ made. Changing a physical name is a replace. `apply` asks for confirmation
 (skip with `--auto-approve`), saves state after every step so a failure keeps
 what succeeded, and writes `.cloudgear/endpoints.json` for the router.
 
+If a deploy step fails part-way through creating a function, what that call
+created is rolled back. Deleting a bucket that still has objects fails with a
+message instead of emptying it.
+
 On AWS each function gets an IAM role (`AWSLambdaBasicExecutionRole` plus an
 inline policy with the inferred S3 permissions), a Lambda function and a
 function URL with `AuthType: NONE`. Region comes from `--region`,
@@ -226,8 +240,9 @@ Where each moving part lives, since several are called across packages:
 
 Early draft. Only the `aws` provider has inference rules and deploy drivers;
 `BlobStore` is the only resource client. Function URLs are public
-(`AuthType: NONE`). Input objects are not validated against their TypeScript
-types at runtime.
+(`AuthType: NONE`), protected only by the invoke token; there is no
+throttling or reserved concurrency. Input objects are not validated against
+their TypeScript types at runtime.
 
 ## Legacy: CDK shorthand
 

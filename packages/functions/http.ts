@@ -6,6 +6,9 @@ export type Provider = "aws" | "gcp" | "azure";
 // Body of a router -> function call: the already-assembled input object.
 export const INVOKE_CONTENT_TYPE = "application/vnd.cloudgear.invoke+json";
 export const ROUTE_HEADER = "x-cloudgear-route";
+export const TOKEN_HEADER = "x-cloudgear-token";
+// Set on deployed functions; the router must present it to invoke them.
+export const TOKEN_ENV = "CLOUDGEAR_INVOKE_TOKEN";
 
 export type PathParams<P extends string> = P extends `${string}{${infer Name}}${infer Rest}`
   ? Name | PathParams<Rest>
@@ -80,7 +83,7 @@ export function matchPath(
 ): Record<string, string> | null {
   const match = compiled.regex.exec(pathname);
   if (!match) return null;
-  const params: Record<string, string> = {};
+  const params: Record<string, string> = Object.create(null);
   compiled.params.forEach((name, i) => {
     params[name] = decodeURIComponent(match[i + 1]!);
   });
@@ -94,13 +97,16 @@ export function buildInput(
   params: Record<string, string>,
 ): Record<string, unknown> {
   const input: Record<string, unknown> = {};
-  if (isPlainObject(body)) Object.assign(input, body);
-  else if (body !== undefined) input.body = body;
+  const set = (key: string, value: unknown) =>
+    Object.defineProperty(input, key, { value, enumerable: true, writable: true, configurable: true });
+  if (isPlainObject(body)) for (const [key, value] of Object.entries(body)) set(key, value);
+  else if (body !== undefined) set("body", body);
   for (const key of new Set(query.keys())) {
     const values = query.getAll(key);
-    input[key] = values.length > 1 ? values : values[0];
+    set(key, values.length > 1 ? values : values[0]);
   }
-  return Object.assign(input, params);
+  for (const [key, value] of Object.entries(params)) set(key, value);
+  return input;
 }
 
 export function parseBody(text: string, contentType: string | null): unknown {
@@ -116,7 +122,8 @@ export async function invoke(fn: Handler, input: unknown): Promise<HttpResult> {
   try {
     return toHttpResult(await fn(input));
   } catch (err) {
-    return toHttpResult(response({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }));
+    console.error(err);
+    return toHttpResult(response({ error: "Internal Server Error" }, { status: 500 }));
   }
 }
 

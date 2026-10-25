@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package cloudgear;
+
+// Written by `cloudgear generate`, read by `cloudgear plan|apply|import|destroy`.
+message Config {
+  string project = 1;
+  // "aws" | "gcp" | ...
+  string provider = 2;
+  repeated Resource resource = 3;
+  repeated Function function = 4;
+}
+
+message Resource {
+  // Logical name, from the client URI, e.g. "myblob" in `new BlobStore("aws", "://myblob")`.
+  string name = 1;
+  // Inferred flagship service, e.g. "@aws.S3".
+  string type = 2;
+  string physical_name = 3;
+  // `// cloudgear: dry` -- never created, updated or deleted.
+  bool dry = 4;
+  // "<file>:<line>" of the client construction.
+  string source = 5;
+}
+
+message Function {
+  string name = 1;
+  // Inferred flagship service, e.g. "@aws.Lambda".
+  string type = 2;
+  string physical_name = 3;
+  string runtime = 4;
+  int32 memory_mb = 5;
+  int32 timeout_s = 6;
+  Source source = 7;
+  repeated Route route = 8;
+  Bundle bundle = 9;
+  repeated Permission permission = 10;
+  repeated Env env = 11;
+}
+
+message Source {
+  string file = 1;
+  string export = 2;
+  string input_type = 3;
+}
+
+message Route {
+  string method = 1;
+  string path = 2;
+}
+
+message Bundle {
+  // Single-file bundle of the function's import tree, node_modules included.
+  string path = 1;
+  string sha256 = 2;
+}
+
+message Permission {
+  // Logical name of a Resource.
+  string resource = 1;
+  repeated string action = 2;
+}
+
+message Env {
+  string key = 1;
+  oneof source {
+    string value = 2;
+    // Logical name of a Resource; its physical name becomes the value.
+    string value_from = 3;
+  }
+}

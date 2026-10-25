@@ -2,19 +2,31 @@
   "name": "cloudgear",
   "version": "0.1.0",
   "private": true,
-  "description": "Parses a TypeScript infra-shorthand file via AST and generates an AWS CDK stack from a convention-based plugin per resource type.",
+  "description": "Serverless function router plus AST-inferred infrastructure: generate a prototxt config from a TypeScript app, then plan/apply it to AWS.",
   "type": "module",
   "module": "factory.ts",
   "scripts": {
     "generate": "bun factory.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "cloudgear": "bun src/cli.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@aws-sdk/client-iam": "^3.700.0",
+    "@aws-sdk/client-lambda": "^3.700.0",
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@cloudgear/blob": "workspace:*",
+    "@cloudgear/functions": "workspace:*",
     "ts-morph": "^24.0.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "bin": {
+    "cloudgear": "src/cli.ts"
   }
 }

@@ -1,0 +1,17 @@
+{
+  "name": "@cloudgear/blob",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./drivers/memory": "./drivers/memory.ts",
+    "./drivers/s3": "./drivers/s3.ts"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.700.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": { "optional": true }
+  }
+}

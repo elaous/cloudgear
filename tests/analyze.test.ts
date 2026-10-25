@@ -158,8 +158,24 @@ describe("analyzeApp", () => {
       expect(orderBySpecificity(["/b", "/a"])).toEqual(["/b", "/a"]);
     });
 
+    test("orderBySpecificity does not confuse a literal x with a wildcard", () => {
+      expect(orderBySpecificity(["/x*", "/x*x*"])).toEqual(["/x*x*", "/x*"]);
+      expect(orderBySpecificity(["/x*x*", "/x*"])).toEqual(["/x*x*", "/x*"]);
+    });
+
+    test("orderBySpecificity stays fast for a couple of hundred patterns", () => {
+      const patterns = Array.from({ length: 200 }, (_, i) => `/api/v${i}/*/items/*`);
+      const started = performance.now();
+      expect(orderBySpecificity(patterns)).toHaveLength(200);
+      expect(performance.now() - started).toBeLessThan(500);
+    });
+
+    test("two-parameter routes would capture asset paths and are rejected", () => {
+      expect(() => analyzeApp(fixture("cdn/two-params.ts"))).toThrow(/becomes "\/\*\/\*", which would capture the static site's \/assets\/app\.js/);
+    });
+
     test("a route that would take over the static site's own pages is rejected", () => {
-      expect(() => analyzeApp(fixture("cdn/catch-all.ts"))).toThrow(/GET \/\{slug\} becomes "\/\*", which would capture the static site's own pages/);
+      expect(() => analyzeApp(fixture("cdn/catch-all.ts"))).toThrow(/GET \/\{slug\} becomes "\/\*", which would capture the static site's \//);
     });
 
     test("path characters CloudFront does not allow are rejected", () => {

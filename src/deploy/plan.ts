@@ -20,6 +20,8 @@ export interface DesiredEntry {
 
 export interface CertificateComparable {
   domain: string;
+  // The certificate is for a CDN that will own the domain's record, so that record must be free.
+  for_cdn: boolean;
   dns_provider: string;
   dns_zone: string;
 }
@@ -133,6 +135,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       dry: false,
       spec: {
         domain: config.certificate.domain,
+        for_cdn: !!config.cdn,
         dns_provider: config.dns.provider,
         dns_zone: config.dns.zone,
       } satisfies CertificateComparable,

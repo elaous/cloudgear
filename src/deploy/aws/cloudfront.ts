@@ -222,14 +222,12 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
 
     async update(entry, current, _changes, context) {
       const outputs = { ...current.outputs };
-      const before = (current.spec as unknown as Partial<CdnComparable>).behaviors ?? [];
       const spec = entry.spec as unknown as CdnComparable;
+      const before = servedFunctions(current.spec);
       try {
         await converge(entry, context, outputs);
         const stillServed = new Set(spec.behaviors.map((b) => b.function));
-        for (const gone of new Set(before.map((b) => b.function).filter((fn) => !stillServed.has(fn)))) {
-          await revokeDistribution(gone, spec.domain);
-        }
+        for (const gone of before.filter((fn) => !stillServed.has(fn))) await revokeDistribution(gone, spec.domain);
         return outputs;
       } catch (err) {
         throw new PartialApplyError(err, outputs);
@@ -252,7 +250,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: id, IfMatch: await etagOfOac(id) }), "NoSuchOriginAccessControl");
       }
       if (spec.bucket) await removeBucketStatements(spec as CdnComparable);
-      for (const fn of new Set((spec.behaviors ?? []).map((b) => b.function))) await revokeDistribution(fn, domain);
+      for (const fn of servedFunctions(current.spec)) await revokeDistribution(fn, domain);
     },
   };
 
@@ -273,7 +271,12 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     }
     // A distribution can only be deleted once disabling has propagated, and the ETag may have changed meanwhile.
     if (!(await waitDeployed(id))) throw new Error(`Distribution ${id} is still being disabled; run apply again in a few minutes`);
-    etag = (await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }))).ETag;
+    try {
+      etag = (await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }))).ETag;
+    } catch (err) {
+      if ((err as { name?: string }).name === "NoSuchDistribution") return;
+      throw err;
+    }
     await ignoreMissing(deps.cloudfront, new DeleteDistributionCommand({ Id: id, IfMatch: etag }), "NoSuchDistribution");
   }
 
@@ -285,6 +288,12 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       throw err;
     }
   }
+}
+
+// Functions the entry serves or served: its (possibly attempted) spec plus the last one that fully applied.
+function servedFunctions(spec: Record<string, unknown>): string[] {
+  const names = (s: unknown) => ((s as Partial<CdnComparable> | undefined)?.behaviors ?? []).map((b) => b.function);
+  return [...new Set([...names(spec), ...names(spec.previous)])];
 }
 
 async function ignoreMissing(client: SendClient, command: unknown, errorName: string) {

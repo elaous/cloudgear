@@ -2,6 +2,7 @@ import { DeleteCertificateCommand, DescribeCertificateCommand, RequestCertificat
 import type { DnsDriver } from "@cloudgear/dns";
 import { PartialApplyError, type Driver } from "../apply";
 import type { CertificateComparable } from "../plan";
+import { stateKey } from "../state";
 import type { SendClient } from "./index";
 
 export interface CertificateDeps {
@@ -58,9 +59,16 @@ export function certificateDriver(deps: CertificateDeps): Driver {
   }
 
   return {
-    async create(entry) {
+    async create(entry, context) {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};
+      // Fail before requesting anything if the CDN could not take over the domain's record later.
+      if (spec.for_cdn && !context.entry(stateKey({ type: "@aws.CloudFront", name: spec.domain }))) {
+        const record = await (await deps.dns(spec.dns_provider, spec.dns_zone)).get(spec.domain, "CNAME");
+        if (record) {
+          throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
+        }
+      }
       try {
         const requested = await deps.acm.send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS" }));
         const arn: string = requested.CertificateArn;

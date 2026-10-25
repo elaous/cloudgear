@@ -29,7 +29,11 @@ export class PartialApplyError extends Error {
 }
 
 // Kept alongside the attempted spec so the next plan sees a difference and drivers still know what was set up.
-export const incompleteSpec = (spec: Record<string, unknown>) => ({ ...spec, incomplete: true });
+// `previous` is the last fully applied spec, so cleanup still knows what existed before the failed change.
+export const incompleteSpec = (spec: Record<string, unknown>, before?: Record<string, unknown>) => {
+  const previous = before?.incomplete ? before.previous : before;
+  return { ...spec, incomplete: true, ...(previous ? { previous } : {}) };
+};
 
 export interface ApplyOptions {
   save: (state: State) => void;
@@ -93,7 +97,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
           record(desired!, await driverFor(action.type).update(desired!, current!, action.changes, context), current);
         } catch (err) {
           if (err instanceof PartialApplyError) {
-            state.entries[action.key] = { ...current!, spec: incompleteSpec(desired!.spec), outputs: err.outputs, deps: desired!.deps };
+            state.entries[action.key] = { ...current!, spec: incompleteSpec(desired!.spec, current!.spec), outputs: err.outputs, deps: desired!.deps };
             options.save(state);
             throw err.original;
           }

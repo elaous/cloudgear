@@ -409,9 +409,10 @@ export function analyzeApp(entryPath: string): AppModel {
       if (!/^[A-Za-z0-9_\-.*$/~"'@:+]+$/.test(pattern)) {
         throw new Error(`${at}: CloudFront path patterns allow only letters, digits and _ - . * $ / ~ " ' @ : +; ${route.method} ${route.path} does not qualify`);
       }
-      if (patternMatches(pattern, "/index.html") || patternMatches(pattern, "/")) {
+      const shadowed = SITE_PATHS.find((sitePath) => patternMatches(pattern, sitePath));
+      if (shadowed) {
         throw new Error(
-          `${at}: ${route.method} ${route.path} becomes "${pattern}", which would capture the static site's own pages; put it under a fixed prefix such as /api`,
+          `${at}: ${route.method} ${route.path} becomes "${pattern}", which would capture the static site's ${shadowed}; put it under a fixed prefix such as /api`,
         );
       }
     };
@@ -681,24 +682,32 @@ function readStorePath(options: Node | undefined, at: string): string {
 // A routed function is bundled through a named export, or as a method of an exported object.
 // CloudFront's `*` also matches "/", so "/users/*" would swallow "/users/*/posts/*". A pattern must
 // come after every pattern that matches only a subset of its paths; otherwise fewer wildcards, then longer, first.
+// Paths a static site normally serves; an API route must not capture them.
+const SITE_PATHS = ["/", "/index.html", "/favicon.ico", "/assets/app.js", "/static/app.js"];
+
 function patternMatches(pattern: string, path: string): boolean {
   const source = pattern.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${source}$`).test(path);
 }
 
 export function orderBySpecificity(patterns: string[]): string[] {
-  const sample = (pattern: string) => pattern.replace(/\*/g, "x");
-  const narrower = (a: string, b: string) => a !== b && patternMatches(b, sample(a)) && !patternMatches(a, sample(b));
+  // Stand in for `*` with a character no pattern contains, so a literal never looks like a wildcard's match.
+  const filler = ["#", "%", "!", "^", "\u0001"].find((c) => !patterns.some((p) => p.includes(c))) ?? "\u0002";
+  const regexes = patterns.map((p) => new RegExp(`^${p.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*")}$`));
+  const samples = patterns.map((p) => p.replace(/\*/g, filler));
+  const narrower = (a: number, b: number) => a !== b && regexes[b]!.test(samples[a]!) && !regexes[a]!.test(samples[b]!);
+  const narrow = patterns.map((_, a) => patterns.map((_, b) => narrower(a, b)));
   const wildcards = (pattern: string) => pattern.split("*").length - 1;
-  const remaining = [...patterns];
+
+  const remaining = new Set(patterns.keys());
   const ordered: string[] = [];
-  while (remaining.length) {
-    const ready = remaining
-      .filter((p) => !remaining.some((q) => narrower(q, p)))
-      .sort((a, b) => wildcards(a) - wildcards(b) || b.length - a.length);
-    const next = ready[0] ?? remaining[0]!;
-    ordered.push(next);
-    remaining.splice(remaining.indexOf(next), 1);
+  while (remaining.size) {
+    const ready = [...remaining]
+      .filter((p) => ![...remaining].some((q) => narrow[q]![p]))
+      .sort((a, b) => wildcards(patterns[a]!) - wildcards(patterns[b]!) || patterns[b]!.length - patterns[a]!.length);
+    const next = ready[0] ?? [...remaining][0]!;
+    ordered.push(patterns[next]!);
+    remaining.delete(next);
   }
   return ordered;
 }

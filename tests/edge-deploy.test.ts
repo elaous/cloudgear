@@ -295,14 +295,35 @@ describe("applying the edge", () => {
 describe("records and cleanup the CDN does not own", () => {
   const foreign = { name: DOMAIN, type: "CNAME" as const, values: ["old-site.example.net."], ttl: 300 };
 
-  test("an existing record for the domain stops the apply before anything is created", async () => {
+  test("an existing record for the domain stops the apply before the certificate is requested", async () => {
     const dns = new MemoryDnsDriver();
     await dns.upsert(foreign);
     const aws = fakeAws({}, dns);
     await expect(applyAll(cdnConfig(), emptyState(), aws)).rejects.toThrow(/DNS record cdn\.example\.com already exists \(CNAME old-site\.example\.net\.\)/);
+    expect(aws.names()).not.toContain("RequestCertificateCommand");
     expect(aws.names()).not.toContain("CreateDistributionCommand");
     expect(aws.names()).not.toContain("CreateOriginAccessControlCommand");
     expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
+  });
+
+  test("a certificate on its own does not mind a record for the domain", async () => {
+    const dns = new MemoryDnsDriver();
+    await dns.upsert(foreign);
+    const aws = fakeAws({}, dns);
+    await applyAll(cdnConfig({ cdn: undefined }), emptyState(), aws);
+    expect(aws.names()).toContain("RequestCertificateCommand");
+    expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
+  });
+
+  test("the distribution's own check still protects a certificate that already exists", async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig({ cdn: undefined }), state);
+    const dns = new MemoryDnsDriver();
+    await dns.upsert(foreign);
+    const aws = fakeAws({}, dns);
+    await expect(applyAll(cdnConfig(), state, aws)).rejects.toThrow(/already exists \(CNAME old-site/);
+    expect(aws.names()).not.toContain("CreateDistributionCommand");
+    expect(aws.names()).not.toContain("CreateOriginAccessControlCommand");
   });
 
   test("destroy leaves a record that no longer points at the distribution", async () => {
@@ -367,6 +388,47 @@ describe("records and cleanup the CDN does not own", () => {
     const resumed = await applyAll(next, state);
     expect(resumed.names()).not.toContain("CreateOriginAccessControlCommand");
     expect(state.entries[CDN_KEY]!.spec).not.toHaveProperty("incomplete");
+  });
+
+  test("permissions of a function dropped by a failed update are still revoked on retry and on destroy", async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    const dropped = cdnConfig({ cdn: { ...cdnConfig().cdn!, behavior: [] } });
+
+    const failing = fakeAws({
+      UpdateDistributionCommand: () => {
+        throw error("InvalidArgument", "bad config");
+      },
+    });
+    await expect(applyAll(dropped, state, failing)).rejects.toThrow("bad config");
+    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, behaviors: [], previous: { behaviors: [{ function: "app-foo" }] } });
+
+    const retry = await applyAll(dropped, state);
+    expect(retry.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
+    expect(state.entries[CDN_KEY]!.spec).not.toHaveProperty("previous");
+
+    // and a destroy after another failed update still knows what the distribution had been granted
+    const again = emptyState();
+    await applyAll(cdnConfig(), again);
+    await expect(applyAll(dropped, again, failing)).rejects.toThrow();
+    const gone = fakeAws({});
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, again, gone);
+    expect(gone.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
+  });
+
+  test("a distribution that vanished while disabling is not an error", async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    let reads = 0;
+    const aws = fakeAws({
+      GetDistributionConfigCommand: () => {
+        if (++reads === 2) throw error("NoSuchDistribution");
+        return { ETag: "e1", DistributionConfig: { CallerReference: "r", Enabled: true } };
+      },
+    });
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
+    expect(aws.names()).not.toContain("DeleteDistributionCommand");
+    expect(state.entries).toEqual({});
   });
 
   test("entries clean up through the DNS provider and zone recorded in their own spec", async () => {

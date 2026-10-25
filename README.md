@@ -262,8 +262,9 @@ Rules the analyzer enforces:
 - Routes become CloudFront path patterns. Patterns are ordered so a longer one
   is matched before one that would swallow it (`/users/*/posts/*` before
   `/users/*`, because CloudFront's `*` also matches `/`). A route that would
-  capture the site's own pages (`/{slug}` becomes `/*`) is rejected: put API
-  routes under a fixed prefix. Patterns allow only letters, digits and
+  capture the site's own paths (`/`, `/index.html`, `/favicon.ico`,
+  `/assets/*`, `/static/*`; so `/{slug}` and `/{a}/{b}` are rejected) is
+  rejected: put API routes under a fixed prefix. Patterns allow only letters, digits and
   `_ - . * $ / ~ " ' @ : +`, and more than 25 behaviors exceeds CloudFront's
   default quota (a warning). An exact pattern like `/items` does not match
   `/items/`, which then goes to the site.
@@ -274,8 +275,8 @@ Rules the analyzer enforces:
 - HEAD requests are served by the GET route, without a body.
 
 cloudgear never overwrites a DNS record it does not own: if the domain
-already has a record pointing elsewhere, `apply` stops before creating
-anything, and `destroy` only removes the record while it still points at the
+already has a record pointing elsewhere, `apply` stops before the certificate
+is requested, and `destroy` only removes the record while it still points at the
 distribution cloudgear created. The certificate's validation record is left in
 place on destroy, because ACM shares it between certificates for a domain.
 

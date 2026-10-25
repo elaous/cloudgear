@@ -243,6 +243,18 @@ function collectAddCalls(router: NewExpression, where: (node: Node) => string): 
       return;
     }
     if (Node.isExpressionStatement(parent)) return;
+    // Usages in other files are separate references, followed on their own.
+    if (
+      Node.isImportSpecifier(parent) ||
+      Node.isExportSpecifier(parent) ||
+      Node.isTypeQuery(parent) ||
+      Node.isVoidExpression(parent)
+    ) {
+      return;
+    }
+    if (Node.isExportAssignment(parent)) {
+      throw new Error(`${where(top)}: export the router with a name (export const router = ...) so its routes can be traced`);
+    }
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === top && ROUTER_MEMBERS.has(parent.getName())) return;
     throw new Error(
       `${where(top)}: the router is used in a way cloudgear cannot trace ("${parent?.getText().slice(0, 60)}"); keep .add(...) calls on the router variable`,

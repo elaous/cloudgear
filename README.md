@@ -66,7 +66,7 @@ exposed to mount elsewhere). For each request it either:
 - **remote**: POSTs the input object to the route's deployed function URL
   (content type `application/vnd.cloudgear.invoke+json`) and relays the
   response. Function URLs come from `.cloudgear/endpoints.json` (found by
-  searching up from the working directory), written by `cloudgear apply`,
+  searching up from the working directory to the nearest `package.json`), written by `cloudgear apply`,
   or from `$CLOUDGEAR_ENDPOINTS` (JSON) or `$CLOUDGEAR_ENDPOINTS_FILE`. A
   file with no routes, as left by `destroy`, means local mode.
 - **local**: runs the function in-process. This is the default when no

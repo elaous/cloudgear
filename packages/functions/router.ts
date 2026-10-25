@@ -155,7 +155,8 @@ export function request(
 
 function readEndpoints(provider: string, file?: string): Endpoints | null {
   if (process.env.CLOUDGEAR_ENDPOINTS) {
-    return { routes: JSON.parse(process.env.CLOUDGEAR_ENDPOINTS), token: process.env[TOKEN_ENV] };
+    const routes = JSON.parse(process.env.CLOUDGEAR_ENDPOINTS);
+    return Object.keys(routes).length ? { routes, token: process.env[TOKEN_ENV] } : null;
   }
   const resolved = file ?? process.env.CLOUDGEAR_ENDPOINTS_FILE ?? findUp(process.cwd(), DEFAULT_ENDPOINTS_FILE);
   if (!resolved || !fs.existsSync(resolved)) return null;
@@ -165,13 +166,14 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   }
   // Nothing deployed (for example after destroy): stay in local mode.
   if (Object.keys(parsed.routes).length === 0) return null;
-  return { routes: parsed.routes, token: parsed.token };
+  return { routes: parsed.routes, token: parsed.token ?? process.env[TOKEN_ENV] };
 }
 
+// Stops at the nearest package.json so a parent project's endpoints are never picked up.
 function findUp(dir: string, relativeFile: string): string | undefined {
   for (let current = path.resolve(dir); ; current = path.dirname(current)) {
     const candidate = path.join(current, relativeFile);
     if (fs.existsSync(candidate)) return candidate;
-    if (path.dirname(current) === current) return undefined;
+    if (fs.existsSync(path.join(current, "package.json")) || path.dirname(current) === current) return undefined;
   }
 }

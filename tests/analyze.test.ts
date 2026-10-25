@@ -55,6 +55,11 @@ describe("analyzeApp", () => {
     expect(model.functions.map((f) => f.routes[0]!.path)).toEqual(["/a", "/b", "/c"]);
   });
 
+  test("follows a router defined in one module and populated in another", () => {
+    const model = analyzeApp(fixture("split/main.ts"));
+    expect(model.functions.map((f) => [f.name, f.routes])).toEqual([["hello", [{ method: "GET", path: "/hello" }]]]);
+  });
+
   test("traces class methods, object methods and variable aliases", () => {
     const model = analyzeApp(fixture("indirect-usage.ts"));
     const uses = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
@@ -76,6 +81,7 @@ describe("analyzeApp", () => {
 
   test.each([
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
+    ["default-export.ts", /export the router with a name/],
     ["no-routes.ts", /FunctionRouter has no \.add\(\.\.\.\) routes/],
     ["unexported.ts", /must be exported/],
     ["inline.ts", /must reference a named function/],
@@ -143,6 +149,12 @@ describe("generate", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ error: "not found" }),
     });
+  });
+
+  test("rejects functions whose sanitized names collide", async () => {
+    await expect(
+      generate({ entry: fixture("name-collision.ts"), configPath: path.join(dir, "z.prototxt"), buildDir: path.join(dir, "b") }),
+    ).rejects.toThrow(/both deploy as/);
   });
 
   test("rejects stores that map to the same env var", async () => {

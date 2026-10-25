@@ -37,6 +37,14 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     envVars.set(envVar, resource.name);
   }
 
+  const physicalNames = new Map<string, string>();
+  for (const fn of model.functions) {
+    const physical = fitName(`${project}-${sanitizeName(fn.name)}`, 64);
+    const clash = physicalNames.get(physical);
+    if (clash) throw new Error(`Functions "${clash}" and "${fn.name}" both deploy as "${physical}"; rename one`);
+    physicalNames.set(physical, fn.name);
+  }
+
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
     const bundle = await bundleFunction({

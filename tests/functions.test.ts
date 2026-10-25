@@ -191,6 +191,7 @@ describe("FunctionRouter (remote mode)", () => {
     const projectWith = (file: object) => {
       const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear-endpoints-")));
       dirs.push(dir);
+      fs.writeFileSync(path.join(dir, "package.json"), "{}");
       fs.mkdirSync(path.join(dir, ".cloudgear"));
       fs.writeFileSync(path.join(dir, ".cloudgear", "endpoints.json"), JSON.stringify(file));
       fs.mkdirSync(path.join(dir, "src", "deep"), { recursive: true });
@@ -204,6 +205,34 @@ describe("FunctionRouter (remote mode)", () => {
       expect(router.mode).toBe("remote");
     });
 
+    test("is not taken from a parent project that has its own package.json", () => {
+      const parent = projectWith({ provider: "aws", routes: { "GET /x": "https://other-project" } });
+      const child = path.join(parent, "child");
+      fs.mkdirSync(child);
+      fs.writeFileSync(path.join(child, "package.json"), "{}");
+      process.chdir(child);
+      expect(new FunctionRouter("aws").add("GET", "/x", echo).mode).toBe("local");
+    });
+
+    test("falls back to the token env var when the file has none", async () => {
+      const dir = projectWith({ provider: "aws", routes: { "GET /x": "http://127.0.0.1:1/" } });
+      process.chdir(dir);
+      process.env[TOKEN_ENV] = "from-env";
+      const sent: (string | null)[] = [];
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+        sent.push(new Headers(init.headers).get(TOKEN_HEADER));
+        return new Response("{}");
+      }) as typeof fetch;
+      try {
+        await new FunctionRouter("aws").add("GET", "/x", echo).fetch(new Request("http://app/x"));
+      } finally {
+        globalThis.fetch = original;
+        delete process.env[TOKEN_ENV];
+      }
+      expect(sent).toEqual(["from-env"]);
+    });
+
     test("with no routes (after destroy) the router stays local", () => {
       const dir = projectWith({ provider: "aws", routes: {} });
       process.chdir(dir);
@@ -215,6 +244,15 @@ describe("FunctionRouter (remote mode)", () => {
       process.chdir(dir);
       expect(() => new FunctionRouter("aws").mode).toThrow(/deployed for provider "gcp"/);
     });
+  });
+
+  test("an empty CLOUDGEAR_ENDPOINTS means local mode", () => {
+    process.env.CLOUDGEAR_ENDPOINTS = "{}";
+    try {
+      expect(new FunctionRouter("aws", { endpointsFile: "/nonexistent" }).mode).toBe("local");
+    } finally {
+      delete process.env.CLOUDGEAR_ENDPOINTS;
+    }
   });
 
   test("reads endpoints from CLOUDGEAR_ENDPOINTS", () => {

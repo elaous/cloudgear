@@ -6,7 +6,7 @@ import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { formatPlan, hasChanges, plan } from "./deploy/plan";
-import { ensureInvokeToken, loadState, saveState, stateKey } from "./deploy/state";
+import { ensureInvokeToken, loadState, saveState, stateKey, type State } from "./deploy/state";
 import { generate } from "./generate";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -83,21 +83,18 @@ async function main() {
           console.log("Cancelled.");
           return;
         }
-        await apply(actions, state, drivers(config, configPath, values.region), {
-          save: (s) => saveState(statePath, s),
-          log: (message) => console.log(`cloudgear: ${message}`),
-        });
+        try {
+          await apply(actions, state, drivers(config, configPath, values.region), {
+            save: (s) => saveState(statePath, s),
+            log: (message) => console.log(`cloudgear: ${message}`),
+          });
+          console.log(`cloudgear: ${command} complete`);
+        } finally {
+          writeEndpoints(config, state, workDir);
+        }
+        return;
       }
-      const endpointsPath = path.join(workDir, "endpoints.json");
-      fs.mkdirSync(workDir, { recursive: true });
-      const endpoints = endpointsFrom(config, state);
-      if (Object.keys(endpoints.routes).length) {
-        fs.writeFileSync(endpointsPath, JSON.stringify(endpoints, null, 2) + "\n");
-        console.log(`cloudgear: ${command} complete, endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);
-      } else {
-        fs.rmSync(endpointsPath, { force: true });
-        console.log(`cloudgear: ${command} complete, no deployed endpoints`);
-      }
+      writeEndpoints(config, state, workDir);
       return;
     }
     case "import": {
@@ -130,6 +127,19 @@ async function main() {
     }
     default:
       throw new Error(`Unknown command "${command}"\n\n${USAGE}`);
+  }
+}
+
+function writeEndpoints(config: CloudgearConfig, state: State, workDir: string): void {
+  const endpointsPath = path.join(workDir, "endpoints.json");
+  const endpoints = endpointsFrom(config, state);
+  if (Object.keys(endpoints.routes).length) {
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.writeFileSync(endpointsPath, JSON.stringify(endpoints, null, 2) + "\n");
+    console.log(`cloudgear: endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);
+  } else {
+    fs.rmSync(endpointsPath, { force: true });
+    console.log("cloudgear: no deployed endpoints");
   }
 }
 

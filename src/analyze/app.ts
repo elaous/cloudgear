@@ -17,6 +17,8 @@ export interface AnalyzedResource {
   kind: "BlobStore";
   name: string;
   provider: string;
+  // Declared region; undefined means the region the app is deployed to.
+  region?: string;
   dry: boolean;
   file: string;
   line: number;
@@ -41,6 +43,17 @@ export interface AnalyzedFunction {
   routes: { method: string; path: string; name: string }[];
   // `${resource}\0${path}` -> accesses performed on that store
   uses: Map<string, StoreUse>;
+  // Every route is `public`, so the function skips token verification.
+  anonymous?: boolean;
+}
+
+// Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
+export interface JwtSettings {
+  issuer: string;
+  audience?: string | string[];
+  jwksUri?: string;
+  clockToleranceSeconds?: number;
+  header: string;
 }
 
 interface Store {
@@ -72,7 +85,11 @@ export interface EdgeModel {
 
 export interface AppModel extends EdgeModel {
   provider: string;
+  // Region of the functions, from the router's options; undefined means the deploy default.
+  region?: string;
   authenticated: Authentication;
+  // Set with a CDN, where viewers reach functions directly and each function verifies the token.
+  jwt?: JwtSettings;
   entry: string;
   resources: AnalyzedResource[];
   functions: AnalyzedFunction[];
@@ -114,6 +131,7 @@ export function analyzeApp(entryPath: string): AppModel {
     const provider = stringLiteral(providerArg, `${where(expr)}: BlobStore provider`);
     const uri = stringLiteral(uriArg, `${where(expr)}: BlobStore URI`);
     const storePath = readStorePath(optionsArg, where(expr));
+    const storeRegion = readRegion(optionsArg, `${where(expr)}: BlobStore`);
     const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
     if (!decl || decl.getInitializer() !== expr) {
       throw new Error(`${where(expr)}: assign new BlobStore(...) to a variable so its usage can be traced`);
@@ -122,14 +140,15 @@ export function analyzeApp(entryPath: string): AppModel {
       kind: "BlobStore",
       name: parseBlobUri(provider as BlobProvider, uri),
       provider,
+      region: storeRegion,
       dry: readDirectives(decl, where(expr)).has("dry"),
       file: relative(expr.getSourceFile().getFilePath()),
       line: expr.getStartLineNumber(),
     };
     const existing = resources.get(resource.name);
-    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider)) {
+    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region)) {
       throw new Error(
-        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider or directives`,
+        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region or directives`,
       );
     }
     resources.set(resource.name, existing ?? resource);
@@ -143,6 +162,7 @@ export function analyzeApp(entryPath: string): AppModel {
   const router = routers[0]!;
   const provider = stringLiteral(router.getArguments()[0], `${where(router)}: FunctionRouter provider`);
   const authenticated = readAuthenticated(router.getArguments()[1], where(router));
+  const routerRegion = readRegion(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   if (authenticated === "none") {
     warnings.push(`${where(router)}: authenticated is "none"; deployed functions can be invoked by anyone with their URL`);
   }
@@ -151,6 +171,7 @@ export function analyzeApp(entryPath: string): AppModel {
       `${where(router)}: authenticate is set but authenticated is "none"; deployed functions will not receive the caller's identity`,
     );
   }
+  const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
 
@@ -228,10 +249,24 @@ export function analyzeApp(entryPath: string): AppModel {
 
   warnModuleLevelUse();
   const edge = analyzeEdge();
+  const verifying = !!jwtSettings && !!edge.cdn?.behaviors.length;
+  if (verifying) {
+    for (const fn of functions.values()) {
+      const flags = fn.routes.map((r) => publicRoutes.get(`${r.method} ${r.path}`) ?? false);
+      if (flags.some(Boolean) && !flags.every(Boolean)) {
+        throw new Error(
+          `${fn.file}: "${fn.name}" serves both public and protected routes; with a cdn a function verifies tokens as a whole, so give each its own function`,
+        );
+      }
+      fn.anonymous = flags.every(Boolean);
+    }
+  }
 
   return {
     ...edge,
+    jwt: verifying ? jwtSettings : undefined,
     provider,
+    region: routerRegion,
     authenticated,
     entry: relative(entry),
     resources: [...resources.values()],
@@ -278,6 +313,42 @@ export function analyzeApp(entryPath: string): AppModel {
     };
     visit(root);
     root.forEachDescendant((node) => void visit(node));
+  }
+
+  function readJwtAuth(options: Node | undefined, at: string): JwtSettings | undefined {
+    if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
+    const prop = options.getProperties().find((p) => propName(p) === "authenticate");
+    const init = prop && Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    if (!init || !Node.isCallExpression(init)) return undefined;
+    const decl = resolveSymbol(init.getExpression().getSymbol())?.getDeclarations()[0];
+    const isJwtAuth =
+      !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "jwtAuth" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+    if (!isJwtAuth) return undefined;
+    const arg = init.getArguments()[0];
+    const what = `${at}: jwtAuth`;
+    if (!arg || !Node.isObjectLiteralExpression(arg)) throw new Error(`${what} options must be an object literal so cloudgear can read them`);
+    const settings: JwtSettings = { issuer: "", header: "authorization" };
+    for (const p of arg.getProperties()) {
+      if (Node.isSpreadAssignment(p)) throw new Error(`${what}: spread in options cannot be analyzed`);
+      const key = propName(p);
+      const value = Node.isPropertyAssignment(p) ? p.getInitializer() : undefined;
+      if (key === "issuer") settings.issuer = stringLiteral(value, `${what} issuer`);
+      else if (key === "jwksUri") settings.jwksUri = stringLiteral(value, `${what} jwksUri`);
+      else if (key === "header") settings.header = stringLiteral(value, `${what} header`).toLowerCase();
+      else if (key === "audience") {
+        settings.audience =
+          value && Node.isArrayLiteralExpression(value)
+            ? value.getElements().map((e) => stringLiteral(e, `${what} audience`))
+            : stringLiteral(value, `${what} audience`);
+      } else if (key === "clockToleranceSeconds") {
+        if (!value || !Node.isNumericLiteral(value)) throw new Error(`${what} clockToleranceSeconds must be a number literal`);
+        settings.clockToleranceSeconds = Number(value.getLiteralText());
+      } else if (key !== undefined) {
+        throw new Error(`${what}: unknown option "${key}"`);
+      }
+    }
+    if (!settings.issuer) throw new Error(`${what} needs an issuer`);
+    return settings;
   }
 
   function analyzeEdge(): EdgeModel {
@@ -376,7 +447,13 @@ export function analyzeApp(entryPath: string): AppModel {
           throw new Error(`${where(router)}: a CDN reaches functions through CloudFront, which needs authenticated: "iam"`);
         }
         const options = router.getArguments()[1];
-        if (hasOption(options, "authenticate")) {
+        if (hasOption(options, "authenticate") && jwtSettings) {
+          if (jwtSettings.header === "authorization") {
+            throw new Error(
+              `${where(router)}: with a cdn, jwtAuth needs a header other than "authorization" (for example { header: "x-auth-token" }); CloudFront origin access control signs requests to functions with that header`,
+            );
+          }
+        } else if (hasOption(options, "authenticate")) {
           const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
           if (open) {
             throw new Error(
@@ -559,6 +636,15 @@ function readRouteOptions(options: Node | undefined, at: string): { name?: strin
     }
   }
   return result;
+}
+
+// "eu-west-1", "us-gov-east-1", "cn-north-1"
+const REGION = /^[a-z]{2,5}(-[a-z]+)+-\d$/;
+
+function readRegion(options: Node | undefined, at: string): string | undefined {
+  const region = readStringOption(options, "region", `${at} options`);
+  if (region !== undefined && !REGION.test(region)) throw new Error(`${at}: "${region}" is not an AWS region such as "eu-west-1"`);
+  return region;
 }
 
 function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {

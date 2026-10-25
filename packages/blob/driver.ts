@@ -9,7 +9,12 @@ export interface BlobDriver {
   exists(key: string): Promise<boolean>;
 }
 
-export type BlobDriverFactory = (location: string) => BlobDriver | Promise<BlobDriver>;
+export interface BlobDriverOptions {
+  // Where the store lives, when it is not the provider's default region.
+  region?: string;
+}
+
+export type BlobDriverFactory = (location: string, options: BlobDriverOptions) => BlobDriver | Promise<BlobDriver>;
 
 export const URI_SCHEMES: Record<BlobProvider, string> = { aws: "s3", gcp: "gs", azure: "az" };
 
@@ -23,7 +28,7 @@ export function registerBlobDriver(provider: BlobProvider, factory: BlobDriverFa
   factories.set(provider, factory);
 }
 
-export async function createBlobDriver(provider: BlobProvider, location: string): Promise<BlobDriver> {
+export async function createBlobDriver(provider: BlobProvider, location: string, options: BlobDriverOptions = {}): Promise<BlobDriver> {
   if (process.env.CLOUDGEAR_BLOB_DRIVER === "memory") {
     return (await import("./drivers/memory")).createMemoryDriver(location);
   }
@@ -34,7 +39,7 @@ export async function createBlobDriver(provider: BlobProvider, location: string)
     factory = await load();
     factories.set(provider, factory);
   }
-  return factory(location);
+  return factory(location, options);
 }
 
 export function parseBlobUri(provider: BlobProvider, uri: string): string {

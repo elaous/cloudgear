@@ -10,7 +10,12 @@ export interface JwtAuthOptions {
   // Defaults to `<issuer>/.well-known/jwks.json` (Cognito, Clerk, Auth0 style issuers).
   jwksUri?: string;
   clockToleranceSeconds?: number;
+  // Header carrying the token. Defaults to `authorization` (`Bearer <jwt>`); any other header holds
+  // the bare token (a `Bearer ` prefix is tolerated). `cloudgear generate` reads it, so it MUST be a literal.
+  header?: string;
 }
+
+export type JwtAuthenticator = Authenticator & { readonly header: string };
 
 // Asymmetric algorithms only, so a token can never be validated against a shared secret.
 const ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"];
@@ -30,12 +35,14 @@ const INVALID_TOKEN = [
 
 // Verifies `Authorization: Bearer <jwt>` against the issuer's JWKS. Invalid tokens yield null (401);
 // a JWKS endpoint that is unreachable or returns garbage throws (the router answers 503).
-export function jwtAuth(options: JwtAuthOptions): Authenticator {
+export function jwtAuth(options: JwtAuthOptions): JwtAuthenticator {
+  const header = (options.header ?? "authorization").toLowerCase();
   const jwksUri = options.jwksUri ?? `${options.issuer.replace(/\/$/, "")}/.well-known/jwks.json`;
   const keys = createRemoteJWKSet(new URL(jwksUri));
 
-  return async (req) => {
-    const token = /^Bearer\s+(\S+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];
+  const authenticate: Authenticator = async (req) => {
+    const value = req.headers.get(header)?.trim() ?? "";
+    const token = header === "authorization" ? /^Bearer\s+(\S+)$/i.exec(value)?.[1] : /^(?:Bearer\s+)?(\S+)$/i.exec(value)?.[1];
     if (!token) return null;
     try {
       const { payload } = await jwtVerify(token, keys, {
@@ -51,4 +58,5 @@ export function jwtAuth(options: JwtAuthOptions): Authenticator {
       throw err;
     }
   };
+  return Object.assign(authenticate, { header });
 }

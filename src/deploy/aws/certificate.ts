@@ -32,6 +32,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
   // Validates and waits until issued; safe to run again after a partial failure.
   async function validate(arn: string, outputs: Record<string, string>, spec: CertificateComparable): Promise<Record<string, string>> {
     let record: { Name: string; Value: string } | undefined;
+    deps.log("waiting for ACM's DNS validation record");
     for (let attempt = 0; attempt < RECORD_ATTEMPTS && !record; attempt++) {
       record = (await describe(arn))?.DomainValidationOptions?.[0]?.ResourceRecord;
       if (!record) await deps.sleep(POLL_MS / 2);
@@ -48,10 +49,15 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       throw new Error(`DNS record ${name} already exists with a different value (${existing.values[0]}); remove it so the certificate can be validated`);
     }
     if (!existing) await dns.upsert({ name, type: "CNAME", values: [record.Value], ttl: 300 });
+    deps.log(existing ? `validation record ${name} is already in place` : `wrote validation record ${name}`);
 
+    deps.log("waiting for the certificate to be issued");
     for (let attempt = 0; attempt < ISSUE_ATTEMPTS; attempt++) {
       const status = (await describe(arn))?.Status;
-      if (status === "ISSUED") return outputs;
+      if (status === "ISSUED") {
+        deps.log("certificate issued");
+        return outputs;
+      }
       if (status && FAILED.has(status)) throw new Error(`Certificate ${arn} ended as ${status}`);
       await deps.sleep(POLL_MS);
     }
@@ -73,6 +79,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
         const requested = await deps.acm.send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS" }));
         const arn: string = requested.CertificateArn;
         outputs.arn = arn;
+        deps.log(`requested a certificate for ${spec.domain}`);
         return await validate(arn, outputs, spec);
       } catch (err) {
         throw outputs.arn ? new PartialApplyError(err, outputs) : err;

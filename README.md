@@ -162,7 +162,8 @@ export function me(input: unknown, context: RequestContext) {
 }
 ```
 
-`jwtAuth` verifies `Authorization: Bearer <jwt>` against the issuer's JWKS
+`jwtAuth` verifies `Authorization: Bearer <jwt>` (or the bare token in
+`header`, see Identity behind a CDN) against the issuer's JWKS
 (`<issuer>/.well-known/jwks.json`, or `jwksUri`), accepts only asymmetric
 algorithms, and checks issuer, expiry and, when given, audience. Always set
 `audience`: without it any token from the issuer is accepted. Missing or
@@ -253,11 +254,16 @@ Rules the analyzer enforces:
   different ones; give them different paths. Path params become `*`.
 - Requests through the CDN reach functions directly, so the router's
   `authenticate` hook and `rateLimit` do not run for them. `generate` refuses
-  a router that has `authenticate` unless every route is `{ public: true }`,
-  and warns about `rateLimit`.
+  a router that has a custom `authenticate` unless every route is
+  `{ public: true }`, and warns about `rateLimit`. With
+  `authenticate: jwtAuth({...})` the functions verify tokens themselves
+  (see Identity behind a CDN).
 - A `dry` bucket is not created or deleted, but the CDN still adds one
   statement to its bucket policy (and removes it again), which `generate`
-  warns about. The bucket (or its `path`) is public through the CDN, so
+  warns about. The CDN's bucket policy statement only allows `s3:GetObject`
+  under the site's path, for that one distribution; because it cannot list
+  the bucket, a missing file is answered with 403 rather than 404. The bucket
+  (or its `path`) is public through the CDN, so
   `generate` also warns when a function uses the same files.
 - Routes become CloudFront path patterns. Patterns are ordered so a longer one
   is matched before one that would swallow it (`/users/*/posts/*` before
@@ -271,7 +277,28 @@ Rules the analyzer enforces:
 - Anyone can reach functions through the CDN with their own requests, so
   functions behind it never trust a caller identity (`context.auth` is not
   populated), and the router's invoke protocol still ignores method and path
-  matching there. This is why `authenticate` needs every route to be public.
+  matching there. This is why a custom `authenticate` needs every route to be
+  public.
+
+#### Identity behind a CDN
+
+With a CDN and `authenticate: jwtAuth({...})`, `generate` reads the literal
+settings (`issuer`, `audience`, `jwksUri`, `clockToleranceSeconds`, `header`)
+and bakes the same verification into each function's bundle. Every request,
+whether from a viewer or from the router, then carries a token that the
+function checks, and `context.auth` is the verified principal. Rules:
+
+- `header` MUST be set to something other than `authorization` (for example
+  `{ header: "x-auth-token" }`): CloudFront's origin access control signs
+  requests to functions with `Authorization`, so it may replace the viewer's.
+  The header holds the bare token (a `Bearer ` prefix is tolerated). The
+  frontend MUST send it; the router forwards it on remote calls.
+- Options MUST be string, string-array or number literals.
+- A function whose routes are all `{ public: true }` skips verification. A
+  function with both public and protected routes is refused: give each its own
+  function.
+- A bad token gets 401, a JWKS outage 503. Functions still never trust a
+  `context` sent in the request.
 - HEAD requests are served by the GET route, without a body.
 
 cloudgear never overwrites a DNS record it does not own: if the domain
@@ -289,8 +316,8 @@ documents that a POST or PUT through CloudFront to a Lambda function URL needs
 the client to send `x-amz-content-sha256` (the SHA-256 of the body), and an
 origin access control may replace the `Authorization` header with its own
 signature; check both before relying on this for write routes or per-user
-tokens. The S3 origin uses the regional bucket domain in the deploy region, so
-the bucket MUST live there.
+tokens. The S3 origin uses the regional bucket domain of the bucket's own
+`region` (see Regions).
 
 ### Runtime: `BlobStore`
 
@@ -447,9 +474,17 @@ message instead of emptying it.
 
 On AWS each function gets an IAM role (`AWSLambdaBasicExecutionRole` plus an
 inline policy with the inferred S3 permissions), a Lambda function and a
-function URL with `AuthType: AWS_IAM`. Region comes from `--region`,
-`$AWS_REGION` or `$AWS_DEFAULT_REGION`; credentials from the standard AWS SDK
-chain.
+function URL with `AuthType: AWS_IAM`. Credentials come from the standard AWS
+SDK chain.
+
+#### Regions
+
+The deploy region is the router's `region` option, else `--region`, else
+`$AWS_REGION` or `$AWS_DEFAULT_REGION`. A `BlobStore` can pass its own
+`region` (`new BlobStore("aws", "://data", { region: "eu-west-1" })`) to live
+elsewhere; the CDN then reads it from that region. Both options MUST be string
+literals, since `cloudgear generate` reads them. A bucket cannot move between
+regions: changing `region` on an existing bucket fails the apply.
 
 ## `cloudgear import`
 

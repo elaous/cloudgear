@@ -1,3 +1,4 @@
+import type { Authenticator } from "../auth";
 import {
   INVOKE_CONTENT_TYPE,
   buildInput,
@@ -30,6 +31,10 @@ export interface FunctionUrlResult {
 export interface HandlerOptions {
   // Honour the router's `context` (the caller's identity). Safe only when callers are IAM-authenticated.
   trustContext?: boolean;
+  // Verifies every request itself (token in the request headers) and sets `context.auth`:
+  // 401 for a bad token, 503 when the verifier fails. Skipped when `anonymous`.
+  authenticate?: Authenticator;
+  anonymous?: boolean;
 }
 
 export function createHandler(fn: Handler, routes: RouteSpec[], options: HandlerOptions = {}) {
@@ -44,6 +49,21 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
       : "";
     const contentType = headers["content-type"] ?? null;
 
+    // Unauthenticated callers learn nothing about routes: verify before parsing or routing.
+    let context: RequestContext | undefined;
+    if (options.authenticate && !options.anonymous) {
+      const req = new Request("https://function.invalid/", { headers });
+      let principal: Awaited<ReturnType<Authenticator>>;
+      try {
+        principal = await options.authenticate(req);
+      } catch (err) {
+        console.error(err);
+        return toLambda(json(503, { error: "Authentication unavailable" }));
+      }
+      if (!principal) return toLambda(json(401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" }));
+      context = { auth: principal };
+    }
+
     let resolved: Resolved | undefined;
     try {
       resolved = resolveInput(compiled, event, text, contentType, options.trustContext ?? false);
@@ -53,7 +73,7 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
     if (!resolved) {
       return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
     }
-    const result = await invoke(fn, resolved.input, resolved.context);
+    const result = await invoke(fn, resolved.input, context ?? resolved.context);
     // A HEAD request served by a GET route gets the headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
   };
@@ -98,6 +118,10 @@ function resolveInput(
     context: {},
     headOnly,
   };
+}
+
+function json(status: number, body: unknown, headers: Record<string, string> = {}): HttpResult {
+  return { status, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) };
 }
 
 function toLambda(result: HttpResult): FunctionUrlResult {

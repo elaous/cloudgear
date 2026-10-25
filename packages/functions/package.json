@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./index.ts",
+    "./auth": "./auth.ts",
     "./drivers/aws": "./drivers/aws.ts"
   },
   "dependencies": {

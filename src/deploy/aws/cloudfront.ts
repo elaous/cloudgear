@@ -24,7 +24,7 @@ import type { SendClient } from "./index";
 
 export interface CloudFrontDeps {
   cloudfront: SendClient;
-  s3: SendClient;
+  s3: (region?: string) => SendClient;
   lambda: SendClient;
   dns: (provider: string, zone: string) => Promise<DnsDriver>;
   region: string;
@@ -94,30 +94,35 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 
   async function putBucketStatements(spec: CdnComparable, distributionArn: string) {
-    const policy = await readBucketPolicy(spec.bucket);
+    const policy = await readBucketPolicy(spec.bucket, spec.bucket_region);
     const id = tag(spec.domain);
     const objectArn = `arn:aws:s3:::${spec.bucket}/${spec.path}*`;
     const condition = { StringEquals: { "AWS:SourceArn": distributionArn } };
     const statements = policy.Statement.filter((s: { Sid?: string }) => !s.Sid?.startsWith(`cloudgear-cdn-${id}`));
-    statements.push(
-      { Sid: `cloudgear-cdn-${id}-read`, Effect: "Allow", Principal: { Service: CLOUDFRONT }, Action: "s3:GetObject", Resource: objectArn, Condition: condition },
-      { Sid: `cloudgear-cdn-${id}-list`, Effect: "Allow", Principal: { Service: CLOUDFRONT }, Action: "s3:ListBucket", Resource: `arn:aws:s3:::${spec.bucket}`, Condition: condition },
-    );
-    await deps.s3.send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: statements }) }));
+    // The CDN only reads objects; earlier versions also granted ListBucket, which is dropped here on the next apply.
+    statements.push({
+      Sid: `cloudgear-cdn-${id}-read`,
+      Effect: "Allow",
+      Principal: { Service: CLOUDFRONT },
+      Action: "s3:GetObject",
+      Resource: objectArn,
+      Condition: condition,
+    });
+    await deps.s3(spec.bucket_region).send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: statements }) }));
   }
 
   async function removeBucketStatements(spec: CdnComparable) {
-    const policy = await readBucketPolicy(spec.bucket);
+    const policy = await readBucketPolicy(spec.bucket, spec.bucket_region);
     const id = `cloudgear-cdn-${tag(spec.domain)}`;
     const kept = policy.Statement.filter((s: { Sid?: string }) => !s.Sid?.startsWith(id));
     if (kept.length === policy.Statement.length) return;
-    if (kept.length === 0) await deps.s3.send(new DeleteBucketPolicyCommand({ Bucket: spec.bucket }));
-    else await deps.s3.send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: kept }) }));
+    if (kept.length === 0) await deps.s3(spec.bucket_region).send(new DeleteBucketPolicyCommand({ Bucket: spec.bucket }));
+    else await deps.s3(spec.bucket_region).send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: kept }) }));
   }
 
-  async function readBucketPolicy(bucket: string): Promise<{ Version: string; Statement: any[]; [key: string]: unknown }> {
+  async function readBucketPolicy(bucket: string, region?: string): Promise<{ Version: string; Statement: any[]; [key: string]: unknown }> {
     try {
-      const res = await deps.s3.send(new GetBucketPolicyCommand({ Bucket: bucket }));
+      const res = await deps.s3(region).send(new GetBucketPolicyCommand({ Bucket: bucket }));
       const policy = JSON.parse(res.Policy);
       return { ...policy, Statement: Array.isArray(policy.Statement) ? policy.Statement : [policy.Statement] };
     } catch (err) {
@@ -185,28 +190,36 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
     }
 
+    deps.log("creating origin access controls");
     outputs.oac_s3 = await ensureOac(`cloudgear-${spec.domain}-s3`, "s3", outputs.oac_s3);
     if (origins.size) outputs.oac_lambda = await ensureOac(`cloudgear-${spec.domain}-lambda`, "lambda", outputs.oac_lambda);
 
     const config = (reference: string, enabled = true) =>
-      buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: deps.region, oacS3: outputs.oac_s3!, oacLambda: outputs.oac_lambda, origins, reference, enabled });
+      buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: spec.bucket_region || deps.region, oacS3: outputs.oac_s3!, oacLambda: outputs.oac_lambda, origins, reference, enabled });
 
     if (!outputs.id) {
+      deps.log(`creating the distribution for ${spec.domain}`);
       const created = await deps.cloudfront.send(new CreateDistributionCommand({ DistributionConfig: config(`cloudgear-${tag(spec.domain)}-${Date.now()}`) }));
       outputs.id = created.Distribution.Id;
       outputs.arn = created.Distribution.ARN;
       outputs.domain_name = created.Distribution.DomainName;
+      deps.log(`distribution ${outputs.id} will be served from ${outputs.domain_name}`);
     } else {
+      deps.log(`updating distribution ${outputs.id}`);
       const current = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: outputs.id }));
       await deps.cloudfront.send(
         new UpdateDistributionCommand({ Id: outputs.id, IfMatch: current.ETag, DistributionConfig: config(current.DistributionConfig.CallerReference) }),
       );
     }
 
+    deps.log(`allowing the distribution to read ${spec.bucket} and call ${origins.size} function(s)`);
     await putBucketStatements(spec, outputs.arn!);
     for (const origin of origins.values()) await allowDistribution(origin.physical, spec.domain, outputs.arn!);
+    deps.log(`pointing ${spec.domain} at ${outputs.domain_name}`);
     await dns.upsert({ name: spec.domain, type: "CNAME", values: [outputs.domain_name!], ttl: 300 });
+    deps.log("waiting for the distribution to deploy");
     outputs.status = (await waitDeployed(outputs.id!)) ? "Deployed" : "InProgress";
+    if (outputs.status === "Deployed") deps.log(`${spec.domain} is live`);
     return outputs;
   }
 

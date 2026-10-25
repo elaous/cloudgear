@@ -41,6 +41,7 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
   const calls: { name: string; input: any }[] = [];
   const counts = new Map<string, number>();
   const sleeps: number[] = [];
+  const logs: string[] = [];
   const defaults: Record<string, (input: any) => any> = {
     CreateRoleCommand: (input) => ({ Role: { Arn: `arn:aws:iam::1:role/${input.RoleName}` } }),
     CreateFunctionCommand: (input) => ({ FunctionArn: `arn:aws:lambda:x:1:function:${input.FunctionName}` }),
@@ -83,8 +84,9 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
     clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client },
     dns: dns ? (provider, zone) => (onDns?.(provider, zone), dns) : undefined,
     sleep: async () => void sleeps.push(0),
+    log: (message) => void logs.push(message),
   });
-  return { calls, drivers, dns, sleeps, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };
+  return { calls, drivers, dns, sleeps, logs, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };
 }
 
 export async function applyAll(config: CloudgearConfig, state: State, aws = fakeAws()) {

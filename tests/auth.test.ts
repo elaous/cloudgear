@@ -35,6 +35,18 @@ describe("jwtAuth", () => {
   const request = (token?: string, scheme = "Bearer") =>
     new Request("http://app/x", { headers: token ? { authorization: `${scheme} ${token}` } : {} });
 
+  test("a custom header carries the bare token", async () => {
+    const authenticate = jwtAuth({ issuer, audience: "app", header: "X-Auth-Token" });
+    expect(authenticate.header).toBe("x-auth-token");
+    expect(jwtAuth({ issuer }).header).toBe("authorization");
+    const token = await sign({});
+    const via = (value: string) => new Request("http://app/x", { headers: { "x-auth-token": value } });
+    expect((await authenticate(via(token)))?.subject).toBe("user-1");
+    expect((await authenticate(via(`Bearer ${token}`)))?.subject).toBe("user-1");
+    expect(await authenticate(request(token))).toBeNull();
+    expect(await authenticate(via("not-a-token"))).toBeNull();
+  });
+
   test("accepts a valid token and exposes subject and claims", async () => {
     const authenticate = jwtAuth({ issuer, audience: "app" });
     const principal = await authenticate(request(await sign({ role: "admin" })));

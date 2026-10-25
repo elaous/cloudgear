@@ -101,6 +101,11 @@ async function main() {
             log: (message) => console.log(`cloudgear: ${message}`),
           });
           console.log(`cloudgear: ${command} complete`);
+          for (const entry of command === "apply" ? Object.values(state.entries) : []) {
+            if (entry.type !== "@aws.CloudFront" || !entry.outputs.domain_name) continue;
+            const status = entry.outputs.status === "Deployed" ? "live" : "still deploying";
+            console.log(`cloudgear: site https://${entry.name} (${status}; distribution ${entry.outputs.id}, ${entry.outputs.domain_name})`);
+          }
         } finally {
           writeEndpoints(config, state, workDir);
         }
@@ -175,8 +180,9 @@ function readConfig(configPath: string): CloudgearConfig {
 
 async function drivers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
   if (config.provider !== "aws") throw new Error(`Provider "${config.provider}" has no deploy drivers yet`);
-  const resolvedRegion = region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
-  if (!resolvedRegion) throw new Error("Set --region or AWS_REGION to deploy");
+  // The router's own `region` option wins, then --region, then the environment.
+  const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+  if (!resolvedRegion) throw new Error("Set the router's region option, --region or AWS_REGION to deploy");
   const configDir = path.dirname(configPath);
   // Credentials (for example GANDI_TOKEN) are read from the environment when the first record is written.
   if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") {

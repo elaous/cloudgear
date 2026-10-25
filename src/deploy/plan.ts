@@ -31,6 +31,7 @@ export interface CdnComparable {
   dns_provider: string;
   dns_zone: string;
   bucket: string;
+  bucket_region: string;
   path: string;
   // Functions served by the CDN; their URLs are read from state when applying.
   behaviors: { path_pattern: string; function: string; methods: string[] }[];
@@ -84,7 +85,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     name: r.name,
     physical_name: physicalOf(r.name),
     dry: r.dry,
-    spec: { physical_name: physicalOf(r.name) },
+    spec: { physical_name: physicalOf(r.name), region: r.region ?? "" },
     source: r,
     deps: [],
   }));
@@ -163,6 +164,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         dns_provider: dns.provider,
         dns_zone: dns.zone,
         bucket: physicalOf(cdn.bucket),
+        bucket_region: (bucket as ResourceSpec).region ?? "",
         path: cdn.path,
         behaviors: cdn.behavior.map((b) => ({
           path_pattern: b.path_pattern,

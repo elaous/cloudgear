@@ -197,6 +197,35 @@ describe("aws drivers", () => {
   });
 });
 
+describe("bucket regions", () => {
+  const withRegion = (region?: string) =>
+    baseConfig({ resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1", region }], function: [] });
+
+  test("a bucket is created in its own region, the deploy region otherwise", async () => {
+    const eu = await applyAll(withRegion("eu-central-1"), emptyState());
+    expect(eu.of("CreateBucketCommand")).toEqual([{ Bucket: "data", CreateBucketConfiguration: { LocationConstraint: "eu-central-1" } }]);
+
+    const home = await applyAll(withRegion(), emptyState());
+    expect(home.of("CreateBucketCommand")).toEqual([{ Bucket: "data", CreateBucketConfiguration: { LocationConstraint: "eu-west-1" } }]);
+
+    const virginia = await applyAll(withRegion("us-east-1"), emptyState());
+    expect(virginia.of("CreateBucketCommand")).toEqual([{ Bucket: "data", CreateBucketConfiguration: undefined }]);
+  });
+
+  test("naming the region the bucket already lives in is not a move", async () => {
+    const state = emptyState();
+    await applyAll(withRegion(), state);
+    await expect(applyAll(withRegion("eu-west-1"), state)).resolves.toBeDefined();
+  });
+
+  test("a bucket cannot be moved to another region", async () => {
+    const state = emptyState();
+    await applyAll(withRegion("eu-central-1"), state);
+    expect(plan(withRegion("us-east-1"), state).find((a) => a.key === "@aws.S3.data")).toMatchObject({ op: "update" });
+    await expect(applyAll(withRegion("us-east-1"), state)).rejects.toThrow(/cannot move from region "eu-central-1" to "us-east-1"/);
+  });
+});
+
 describe("function URL access", () => {
   const ROLE = "arn:aws:iam::123456789012:role/vercel";
 

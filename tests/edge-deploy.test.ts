@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import type { CloudgearConfig } from "../src/config/schema";
@@ -117,6 +118,27 @@ describe("applying the edge", () => {
     expect(state.entries[CDN_KEY]!.deps).toEqual([CERT_KEY, "@aws.S3.data", "@aws.Lambda.foo"]);
   });
 
+  test("each step is reported, in order, as it happens", async () => {
+    const aws = await applyAll(cdnConfig(), emptyState());
+    const steps = [
+      /requested a certificate for cdn\.example\.com/,
+      /waiting for ACM's DNS validation record/,
+      /wrote validation record _v1\.cdn\.example\.com/,
+      /waiting for the certificate to be issued/,
+      /certificate issued/,
+      /creating origin access controls/,
+      /creating the distribution for cdn\.example\.com/,
+      /distribution E1 will be served from d111\.cloudfront\.net/,
+      /allowing the distribution to read data and call 1 function\(s\)/,
+      /pointing cdn\.example\.com at d111\.cloudfront\.net/,
+      /waiting for the distribution to deploy/,
+      /cdn\.example\.com is live/,
+    ];
+    const positions = steps.map((step) => aws.logs.findIndex((line) => step.test(line)));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
   test("the distribution serves the site from the bucket and routes to the function", async () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const config = aws.of("CreateDistributionCommand")[0].DistributionConfig;
@@ -146,13 +168,22 @@ describe("applying the edge", () => {
     ]);
   });
 
+  test("the S3 origin uses the bucket's own region", async () => {
+    const config = cdnConfig({
+      resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1", region: "ap-southeast-2" }, ...baseConfig().resource.slice(1)],
+    });
+    const aws = await applyAll(config, emptyState());
+    const [site] = aws.of("CreateDistributionCommand")[0].DistributionConfig.Origins.Items;
+    expect(site.DomainName).toBe("data.s3.ap-southeast-2.amazonaws.com");
+  });
+
   test("only this distribution may read the site and call the function", async () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const policy = JSON.parse(aws.of("PutBucketPolicyCommand")[0].Policy);
     const condition = { StringEquals: { "AWS:SourceArn": "arn:aws:cloudfront::1:distribution/E1" } };
-    expect(policy.Statement).toMatchObject([
-      { Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*", Condition: condition },
-      { Action: "s3:ListBucket", Resource: "arn:aws:s3:::data", Condition: condition },
+    // reading objects is all the CDN needs, and only under the site's path
+    expect(policy.Statement).toEqual([
+      expect.objectContaining({ Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*", Condition: condition }),
     ]);
 
     const grants = aws.of("AddPermissionCommand").filter((i) => i.Principal === "cloudfront.amazonaws.com");
@@ -174,8 +205,21 @@ describe("applying the edge", () => {
     await applyAll({ ...cdnConfig(), cdn: { ...cdnConfig().cdn!, behavior: [{ path_pattern: "/x/*", function: "foo", method: ["GET"] }] } }, state, aws);
 
     const sids = JSON.parse(stored).Statement.map((s: { Sid: string }) => s.Sid);
-    expect(sids).toHaveLength(3);
+    expect(sids).toHaveLength(2);
     expect(sids[0]).toBe("other");
+  });
+
+  test("a ListBucket statement written by an earlier version is removed on the next apply", async () => {
+    const id = createHash("sha256").update(DOMAIN).digest("hex").slice(0, 12);
+    const old = [
+      { Sid: "other", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/public/*" },
+      { Sid: `cloudgear-cdn-${id}-read`, Effect: "Allow", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*" },
+      { Sid: `cloudgear-cdn-${id}-list`, Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:aws:s3:::data" },
+    ];
+    let stored = JSON.stringify({ Version: "2012-10-17", Statement: old });
+    const aws = fakeAws({ GetBucketPolicyCommand: () => ({ Policy: stored }), PutBucketPolicyCommand: (input) => void (stored = input.Policy) });
+    await applyAll(cdnConfig(), emptyState(), aws);
+    expect(JSON.parse(stored).Statement.map((s: { Sid: string }) => s.Sid)).toEqual(["other", `cloudgear-cdn-${id}-read`]);
   });
 
   test("updating reuses the distribution with its caller reference and etag", async () => {
@@ -594,7 +638,7 @@ describe("CloudFront configuration", () => {
   });
 
   test("a bucket-only distribution has no function origins or behaviors", () => {
-    const spec: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", path: "", behaviors: [] };
+    const spec: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", behaviors: [] };
     const config = buildDistributionConfig(spec, {
       certificateArn: "arn",
       region: "us-east-1",

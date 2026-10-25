@@ -12,6 +12,8 @@ export interface BundleRequest {
   // Whether the function trusts the caller identity in router calls. Off when anyone can reach the
   // function (public URLs, or a CDN that forwards viewers' requests straight to it).
   trustContext: boolean;
+  // Token verification inside the function (see jwtAuth); `anonymous` functions skip it.
+  jwt?: { settings: Record<string, unknown>; anonymous: boolean };
   outDir: string;
 }
 
@@ -36,17 +38,22 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
   const source = path.resolve(req.sourceFile);
   // Resolved from the app so the build dir may live outside its node_modules tree.
   const adapterPath = Bun.resolveSync(adapter, path.dirname(source));
+  const authPath = req.jwt ? Bun.resolveSync("@cloudgear/functions/auth", path.dirname(source)) : "";
+  const handlerOptions = req.jwt
+    ? `{ trustContext: ${req.trustContext}, authenticate: jwtAuth(${JSON.stringify(req.jwt.settings)}), anonymous: ${req.jwt.anonymous} }`
+    : `{ trustContext: ${req.trustContext} }`;
   fs.writeFileSync(
     entry,
     [
       `import { createHandler } from ${JSON.stringify(adapterPath)};`,
+      ...(req.jwt ? [`import { jwtAuth } from ${JSON.stringify(authPath)};`] : []),
       ...(req.member
         ? [
             `import { ${req.exportName} as root } from ${JSON.stringify(source)};`,
             `const fn = root[${JSON.stringify(req.member)}].bind(root);`,
           ]
         : [`import { ${req.exportName} as fn } from ${JSON.stringify(source)};`]),
-      `export const handler = createHandler(fn, ${JSON.stringify(req.routes)}, { trustContext: ${req.trustContext} });`,
+      `export const handler = createHandler(fn, ${JSON.stringify(req.routes)}, ${handlerOptions});`,
       "",
     ].join("\n"),
   );

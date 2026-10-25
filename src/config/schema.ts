@@ -11,6 +11,7 @@ export interface CloudgearConfig {
   dns?: DnsSpec;
   certificate?: CertificateSpec;
   cdn?: CdnSpec;
+  region?: string;
 }
 
 export interface DnsSpec {
@@ -37,6 +38,7 @@ export interface ResourceSpec {
   physical_name: string;
   dry: boolean;
   source: string;
+  region?: string;
 }
 
 export interface FunctionSpec {
@@ -82,6 +84,7 @@ export function decodeConfig(text: string): CloudgearConfig {
     provider: str(raw, "provider"),
     invoker: (raw.invoker ?? []).map(String),
     authenticated: raw.authenticated === "none" ? "none" : "iam",
+    region: raw.region ? String(raw.region) : undefined,
     dns: raw.dns && { provider: str(raw.dns, "provider"), domain: str(raw.dns, "domain"), zone: str(raw.dns, "zone") },
     certificate: raw.certificate && { domain: str(raw.certificate, "domain") },
     cdn: raw.cdn && {
@@ -101,6 +104,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       physical_name: str(r, "physical_name"),
       dry: r.dry === true,
       source: r.source ?? "",
+      region: r.region ? String(r.region) : undefined,
     })),
     function: (raw.function ?? []).map((f: Record<string, any>) => ({
       name: str(f, "name"),

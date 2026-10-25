@@ -138,7 +138,22 @@ describe("analyzeApp", () => {
       ]);
     });
 
+    test("a jwtAuth authenticate is read for the functions to verify tokens themselves", () => {
+      const model = analyzeApp(fixture("cdn/jwt-ok.ts"));
+      expect(model.jwt).toEqual({
+        issuer: "https://login.example.com",
+        audience: ["app", "web"],
+        header: "x-auth-token",
+        clockToleranceSeconds: 5,
+      });
+      expect(Object.fromEntries(model.functions.map((f) => [f.name, f.anonymous]))).toEqual({ health: true, me: false });
+      expect(analyzeApp(fixture("cdn/authenticate-all-public.ts")).jwt).toBeUndefined();
+    });
+
     test.each([
+      ["cdn/jwt-authorization.ts", /jwtAuth needs a header other than "authorization"/],
+      ["cdn/jwt-mixed.ts", /"both" serves both public and protected routes/],
+      ["cdn/jwt-variable.ts", /jwtAuth issuer must be a string literal/],
       ["cdn/method-conflict.ts", /CloudFront cannot route by method: GET \/foo\/\{param\} \(getFoo\) and POST \/foo\/\{param\} \(createFoo\) share the path "\/foo\/\*"/],
       ["cdn/authenticate-bypass.ts", /authenticate hook does not run for "GET \/me"; mark it \{ public: true \} or drop the cdn/],
       ["cdn/authenticated-none.ts", /needs authenticated: "iam"/],
@@ -209,6 +224,13 @@ describe("analyzeApp", () => {
     test("public routes may skip the authenticate hook", () => {
       expect(() => analyzeApp(fixture("cdn/authenticate-all-public.ts"))).not.toThrow();
     });
+  });
+
+  test("regions come from the router's and each store's options", () => {
+    const model = analyzeApp(fixture("regions.ts"));
+    expect(model.region).toBe("us-east-2");
+    expect(Object.fromEntries(model.resources.map((r) => [r.name, r.region]))).toEqual({ "eu-data": "eu-west-1", "home-data": undefined });
+    expect(analyzeApp(path.join(exampleDir, "main.ts")).region).toBeUndefined();
   });
 
   test("a named function expression's own name is the default route name", () => {
@@ -291,6 +313,9 @@ describe("analyzeApp", () => {
     ["store-path-invalid.ts", /Invalid blob path "a\/\.\.\/b"/],
     ["store-path-variable.ts", /BlobStore path must be a string literal/],
     ["computed-key.ts", /computed property keys cannot be analyzed/],
+    ["bad-region.ts", /"Europe" is not an AWS region such as "eu-west-1"/],
+    ["region-variable.ts", /region must be a string literal/],
+    ["region-conflict.ts", /different provider, region or directives/],
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
     ["default-export.ts", /export the router with a name/],
     ["no-routes.ts", /FunctionRouter has no \.url\(\.\.\.\) routes/],
@@ -363,6 +388,22 @@ describe("generate", () => {
     });
   });
 
+  test("with a CDN and jwtAuth the bundles verify tokens, except for public functions", async () => {
+    const buildDir = path.join(dir, "jwt-build");
+    await generate({ entry: fixture("cdn/jwt-ok.ts"), configPath: path.join(dir, "jwt.prototxt"), buildDir, project: "jwt" });
+    const script = `
+      const call = async (name, headers) => {
+        const { handler } = await import(${JSON.stringify(buildDir)} + "/" + name + "/index.mjs");
+        const res = await handler({ rawPath: name === "me" ? "/me" : "/health", requestContext: { http: { method: "GET" } }, headers });
+        return res.statusCode;
+      };
+      console.log(JSON.stringify([await call("me", {}), await call("me", { "x-auth-token": "garbage" }), await call("health", {})]));
+    `;
+    const proc = Bun.spawnSync(["node", "--input-type=module", "-e", script], { cwd: dir });
+    expect(proc.stderr.toString()).toBe("");
+    expect(JSON.parse(proc.stdout.toString())).toEqual([401, 401, 200]);
+  });
+
   test("rejects invalid invokers and reserved concurrency", async () => {
     const base = { entry: path.join(exampleDir, "main.ts"), configPath: path.join(dir, "i.prototxt"), buildDir: path.join(dir, "b") };
     await expect(generate({ ...base, invokers: ["nope"] })).rejects.toThrow(/Invalid invoker "nope"/);
@@ -403,6 +444,16 @@ describe("generate", () => {
     });
     expect(proc.stderr.toString()).toBe("");
     expect(JSON.parse(JSON.parse(proc.stdout.toString()).body)).toEqual({ key: "obj/abc", body: null });
+  });
+
+  test("writes regions into the config and they round-trip", async () => {
+    const configPath = path.join(dir, "regions.prototxt");
+    const { config } = await generate({ entry: fixture("regions.ts"), configPath, buildDir: path.join(dir, "regions-build"), project: "regions" });
+    expect(config.region).toBe("us-east-2");
+    expect(config.resource.map((r) => [r.name, r.region])).toEqual([["eu-data", "eu-west-1"], ["home-data", undefined]]);
+    const text = fs.readFileSync(configPath, "utf8");
+    expect(text).toContain('region: "us-east-2"');
+    expect(decodeConfig(text)).toEqual(config);
   });
 
   test("rejects stores that map to the same env var", async () => {

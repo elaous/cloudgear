@@ -295,11 +295,21 @@ export function policyDocument(spec: FunctionComparable): string {
   const statements = spec.permissions.flatMap((p) => {
     if (p.type !== "@aws.S3") throw new Error(`No IAM mapping for permissions on ${p.type}`);
     const bucketArn = `arn:aws:s3:::${p.physical_name}`;
+    const prefix = p.path ?? "";
     const bucketActions = p.actions.filter((a) => a === "s3:ListBucket");
     const objectActions = p.actions.filter((a) => a !== "s3:ListBucket");
     return [
-      ...(objectActions.length ? [{ Effect: "Allow", Action: objectActions, Resource: `${bucketArn}/*` }] : []),
-      ...(bucketActions.length ? [{ Effect: "Allow", Action: bucketActions, Resource: bucketArn }] : []),
+      ...(objectActions.length ? [{ Effect: "Allow", Action: objectActions, Resource: `${bucketArn}/${prefix}*` }] : []),
+      ...(bucketActions.length
+        ? [
+            {
+              Effect: "Allow",
+              Action: bucketActions,
+              Resource: bucketArn,
+              ...(prefix ? { Condition: { StringLike: { "s3:prefix": [`${prefix}*`] } } } : {}),
+            },
+          ]
+        : []),
     ];
   });
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });

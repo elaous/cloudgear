@@ -66,11 +66,13 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       name: fn.name,
       sourceFile: fn.file,
       exportName: fn.exportName,
+      member: fn.member,
       routes: fn.routes,
       provider: model.provider,
       outDir: options.buildDir,
     });
-    const used = [...fn.uses].filter(([, accesses]) => accesses.size > 0);
+    const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);
+    const usedResources = [...new Set(used.map((use) => use.resource))];
     functions.push({
       name: fn.name,
       type: profile.function.type,
@@ -78,14 +80,15 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       runtime: profile.function.runtime,
       memory_mb: profile.function.memoryMb,
       timeout_s: profile.function.timeoutS,
-      source: { file: fromConfig(fn.file), export: fn.exportName, input_type: fn.inputType },
+      source: { file: fromConfig(fn.file), export: fn.exportName, member: fn.member, input_type: fn.inputType },
       route: fn.routes,
       bundle: { path: fromConfig(bundle.file), sha256: bundle.sha256 },
-      permission: used.map(([resource, accesses]) => ({
-        resource,
-        action: [...new Set([...accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
+      permission: used.map((use) => ({
+        resource: use.resource,
+        path: use.path,
+        action: [...new Set([...use.accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
       })),
-      env: used.map(([resource]) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
+      env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
       reserved_concurrency: reservedConcurrency,
     });
   }

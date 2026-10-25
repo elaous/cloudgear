@@ -7,4 +7,4 @@ export async function read() {
   return store.list();
 }
 
-new FunctionRouter("aws").add("GET", "/things", read);
+new FunctionRouter("aws").url("GET", "/things", read);

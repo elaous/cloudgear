@@ -8,8 +8,8 @@ import { generate } from "../src/generate";
 
 const exampleDir = path.join(import.meta.dir, "..", "examples", "router-app");
 const fixture = (name: string) => path.join(import.meta.dir, "fixtures", "router", name);
-const accesses = (uses: Map<string, Set<string>>) =>
-  Object.fromEntries([...uses].map(([name, set]) => [name, [...set].sort()]));
+const accesses = (uses: Map<string, { resource: string; path: string; accesses: Set<string> }>) =>
+  Object.fromEntries([...uses.values()].map((use) => [use.path ? `${use.resource}:${use.path}` : use.resource, [...use.accesses].sort()]));
 
 describe("analyzeApp", () => {
   test("infers routes, resources, directives and per-function usage for the example app", () => {
@@ -59,7 +59,35 @@ describe("analyzeApp", () => {
     expect(open.functions[0]!.routes).toEqual([{ method: "GET", path: "/open", name: "open" }]);
   });
 
-  test("follows .add chains through intermediate variables", () => {
+  test("routes can be methods of an exported object, and stores can be confined to a path", () => {
+    const model = analyzeApp(fixture("object-exports.ts"));
+    const byName = Object.fromEntries(model.functions.map((f) => [f.name, f]));
+    expect(Object.keys(byName)).toEqual(["getObjects", "put"]);
+    expect(byName.getObjects).toMatchObject({ exportName: "local", member: "getObjects" });
+    expect(byName.put).toMatchObject({ exportName: "local", member: "put" });
+    expect(accesses(byName.getObjects!.uses)).toEqual({ "objects:img-cache/": ["read"] });
+    expect(accesses(byName.put!.uses)).toEqual({ "objects:img-cache/": ["write"] });
+    expect(byName.put!.routes).toEqual([{ method: "PUT", path: "/objects/{param}", name: "putObject" }]);
+    expect(model.resources.map((r) => r.name)).toEqual(["objects"]);
+  });
+
+  test("two stores on one bucket keep separate paths", () => {
+    const model = analyzeApp(fixture("two-paths.ts"));
+    expect(model.resources.map((r) => r.name)).toEqual(["shared"]);
+    const byName = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
+    expect(byName).toEqual({ readImage: { "shared:images/": ["read"] }, writeDoc: { "shared:docs/": ["write"] } });
+  });
+
+  test("grant() narrows a store that is otherwise passed around as a value", () => {
+    const model = analyzeApp(fixture("grant-escape.ts"));
+    const byName = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
+    expect(byName.viaRepo).toEqual({ granted: ["read"] });
+    expect(byName.widened).toEqual({ granted: ["delete", "list", "read", "write"] });
+    expect(model.warnings).toHaveLength(1);
+    expect(model.warnings[0]).toMatch(/passed around as a value; granting every operation on it \(use grant/);
+  });
+
+  test("follows .url chains through intermediate variables", () => {
     const model = analyzeApp(fixture("chained-variables.ts"));
     expect(model.functions.map((f) => f.routes[0]!.path)).toEqual(["/a", "/b", "/c"]);
   });
@@ -95,9 +123,14 @@ describe("analyzeApp", () => {
     ["options-variable.ts", /FunctionRouter options must be an object literal/],
     ["duplicate-route-names.ts", /route name "same" is already used by GET \/a/],
     ["route-name-variable.ts", /route name must be a string literal/],
+    ["unexported-object.ts", /must be exported so it can be bundled on its own \(a named function, or a method of an exported object\)/],
+    ["grant-unknown-access.ts", /unknown access "execute" in grant\(\)/],
+    ["grant-empty.ts", /grant\(store, \.\.\.\) needs at least one access/],
+    ["store-path-invalid.ts", /Invalid blob path "a\/\.\.\/b"/],
+    ["store-path-variable.ts", /BlobStore path must be a string literal/],
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
     ["default-export.ts", /export the router with a name/],
-    ["no-routes.ts", /FunctionRouter has no \.add\(\.\.\.\) routes/],
+    ["no-routes.ts", /FunctionRouter has no \.url\(\.\.\.\) routes/],
     ["unexported.ts", /must be exported/],
     ["inline.ts", /must reference a named function/],
     ["missing-param.ts", /path param\(s\) "other" missing from input type/],
@@ -178,6 +211,35 @@ describe("generate", () => {
     await expect(
       generate({ entry: fixture("name-collision.ts"), configPath: path.join(dir, "z.prototxt"), buildDir: path.join(dir, "b") }),
     ).rejects.toThrow(/both deploy as/);
+  });
+
+  test("a bundled object method keeps its `this` and runs on plain Node", async () => {
+    const configPath = path.join(dir, "members.prototxt");
+    await generate({
+      entry: fixture("object-exports.ts"),
+      configPath,
+      buildDir: path.join(dir, "members-build"),
+      project: "members",
+    });
+    const config = decodeConfig(fs.readFileSync(configPath, "utf8"));
+    const getObjects = config.function.find((f) => f.name === "getObjects")!;
+    expect(getObjects.source).toMatchObject({ export: "local", member: "getObjects" });
+    expect(getObjects.permission).toEqual([{ resource: "objects", path: "img-cache/", action: ["s3:GetObject", "s3:ListBucket"] }]);
+    expect(config.function.find((f) => f.name === "put")!.permission).toEqual([
+      { resource: "objects", path: "img-cache/", action: ["s3:PutObject"] },
+    ]);
+
+    const script = `
+      const { handler } = await import(${JSON.stringify(path.join(dir, "members-build/getObjects/index.mjs"))});
+      const res = await handler({ rawPath: "/objects/abc", requestContext: { http: { method: "GET" } }, headers: {} });
+      console.log(JSON.stringify(res));
+    `;
+    const proc = Bun.spawnSync(["node", "--input-type=module", "-e", script], {
+      env: { ...process.env, CLOUDGEAR_BLOB_DRIVER: "memory" },
+      cwd: dir,
+    });
+    expect(proc.stderr.toString()).toBe("");
+    expect(JSON.parse(JSON.parse(proc.stdout.toString()).body)).toEqual({ key: "obj/abc", body: null });
   });
 
   test("rejects stores that map to the same env var", async () => {

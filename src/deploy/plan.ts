@@ -34,7 +34,7 @@ export interface FunctionComparable {
   reserved_concurrency: number;
   auth: "iam" | "none";
   invokers: string[];
-  permissions: { type: string; physical_name: string; actions: string[] }[];
+  permissions: { type: string; physical_name: string; path: string; actions: string[] }[];
 }
 
 const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
@@ -81,6 +81,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       permissions: fn.permission.map((p) => ({
         type: resources.get(p.resource)?.type ?? "",
         physical_name: physicalOf(p.resource),
+        path: p.path,
         actions: [...p.action].sort(),
       })),
     };

@@ -25,10 +25,10 @@ export interface FunctionSpec {
   runtime: string;
   memory_mb: number;
   timeout_s: number;
-  source: { file: string; export: string; input_type?: string };
+  source: { file: string; export: string; member?: string; input_type?: string };
   route: { method: string; path: string; name: string }[];
   bundle: { path: string; sha256: string };
-  permission: { resource: string; action: string[] }[];
+  permission: { resource: string; path: string; action: string[] }[];
   // value_from names a resource whose physical name becomes the value.
   env: { key: string; value?: string; value_from?: string }[];
   reserved_concurrency: number;
@@ -73,11 +73,17 @@ export function decodeConfig(text: string): CloudgearConfig {
       runtime: str(f, "runtime"),
       memory_mb: Number(f.memory_mb ?? 128),
       timeout_s: Number(f.timeout_s ?? 10),
-      source: { file: str(f.source ?? {}, "file"), export: str(f.source ?? {}, "export"), input_type: f.source?.input_type },
+      source: {
+        file: str(f.source ?? {}, "file"),
+        export: str(f.source ?? {}, "export"),
+        member: f.source?.member,
+        input_type: f.source?.input_type,
+      },
       route: (f.route ?? []).map((r: Record<string, any>) => ({ method: str(r, "method"), path: str(r, "path"), name: String(r.name ?? "") })),
       bundle: { path: str(f.bundle ?? {}, "path"), sha256: str(f.bundle ?? {}, "sha256") },
       permission: (f.permission ?? []).map((p: Record<string, any>) => ({
         resource: str(p, "resource"),
+        path: String(p.path ?? ""),
         action: (p.action ?? []).map(String),
       })),
       env: (f.env ?? []).map((e: Record<string, any>) =>

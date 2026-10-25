@@ -25,8 +25,8 @@ import { FunctionRouter } from "@cloudgear/functions";
 import * as functions from "server/api";
 
 const router = new FunctionRouter("aws", { authenticated: "iam" })
-  .add("POST", "/foo/{param}", functions.foo, { name: "createFoo" })
-  .add("GET", "/foo/{param}", functions.getFoo);
+  .url("POST", "/foo/{param}", functions.foo, { name: "createFoo" })
+  .url("GET", "/foo/{param}", functions.getFoo);
 const urls = router.listen(); // { createFoo: "...", getFoo: "..." }
 ```
 
@@ -55,8 +55,8 @@ value is sent as JSON; return `response(body, { status, headers })` to control
 the status or headers. Thrown errors are logged and answered with a generic
 `500 {"error": "Internal Server Error"}`.
 
-`.add()` type-checks route path params against the function's input type, so
-`.add("GET", "/x/{id}", fn)` fails to compile when `fn`'s input has no `id`.
+`.url()` type-checks route path params against the function's input type, so
+`.url("GET", "/x/{id}", fn)` fails to compile when `fn`'s input has no `id`.
 
 ### Runtime: `FunctionRouter`
 
@@ -65,7 +65,7 @@ the status or headers. Thrown errors are logged and answered with a generic
 `rateLimit` and `mode`. `cloudgear generate` reads `authenticated`, so it MUST
 be a string literal inside an object literal.
 
-`.add(method, path, fn, options?)` takes an optional `{ name }`, the route's
+`.url(method, path, fn, options?)` takes an optional `{ name }`, the route's
 nickname. Without one the name is the function's name (`fn.name`), or
 `"METHOD /path"` for anonymous functions. Names MUST be unique per router, so
 a function mounted on two routes needs `{ name }` on at least one of them.
@@ -188,7 +188,7 @@ from the entry file and following imports:
 
 | In code | Inferred (aws) |
 | --- | --- |
-| `new FunctionRouter("aws").add(method, path, fn)` | one `@aws.Lambda` per distinct `fn`, behind an IAM-protected function URL |
+| `new FunctionRouter("aws").url(method, path, fn)` | one `@aws.Lambda` per distinct `fn`, behind an IAM-protected function URL |
 | `new BlobStore("aws", "://myblob")` | `@aws.S3` bucket `myblob` |
 | `store.get/getText/getJson(...)` inside `fn` | `s3:GetObject`, `s3:ListBucket` (S3 answers 403 instead of "not found" without it) |
 | `store.exists(...)` | `s3:GetObject`, `s3:ListBucket` |
@@ -209,7 +209,7 @@ function, gets no inferred permission and a warning.
 Requirements the analyzer enforces:
 
 - Exactly one `FunctionRouter` per app; provider, method and path MUST be
-  string literals. `.add(...)` calls MUST be on the router variable or a
+  string literals. `.url(...)` calls MUST be on the router variable or a
   chain from it (variables holding a chain result are followed); passing
   the router to a function, or exporting it, is rejected.
 - A routed function MUST be a named, exported function (declaration or

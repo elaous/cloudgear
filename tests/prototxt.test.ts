@@ -17,7 +17,7 @@ const config: CloudgearConfig = {
       source: { file: "server/api.ts", export: "foo", input_type: "types.FooInput" },
       route: [{ method: "POST", path: "/foo/{param}", name: "createFoo" }],
       bundle: { path: ".cloudgear/build/foo/index.mjs", sha256: "abc" },
-      permission: [{ resource: "myblob", action: ["s3:GetObject", "s3:PutObject"] }],
+      permission: [{ resource: "myblob", path: "img-cache/", action: ["s3:GetObject", "s3:PutObject"] }],
       env: [{ key: "CLOUDGEAR_BLOB_MYBLOB", value_from: "myblob" }, { key: "LITERAL", value: 'say "hi"' }],
       reserved_concurrency: 5,
     },

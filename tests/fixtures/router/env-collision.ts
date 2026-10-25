@@ -8,4 +8,4 @@ export async function both() {
   return [await first.list(), await second.list()];
 }
 
-new FunctionRouter("aws").add("GET", "/both", both);
+new FunctionRouter("aws").url("GET", "/both", both);

@@ -80,7 +80,7 @@ export class FunctionRouter {
     private readonly options: FunctionRouterOptions = {},
   ) {}
 
-  add<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
+  url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
     method: Method | Lowercase<Method>,
     path: P,
     fn: Handler<I, O>,
@@ -132,6 +132,8 @@ export class FunctionRouter {
 
   // Starts serving and returns each route's URL by name; see urls().
   listen(port: number = Number(process.env.PORT ?? 3000)): Record<string, string> {
+    // A routed function may share a module with the router; inside Lambda that import must not serve.
+    if (process.env.AWS_LAMBDA_FUNCTION_NAME) return {};
     this.server = Bun.serve({ port, fetch: this.fetch });
     console.log(`cloudgear: ${this.routes.length} route(s) on ${this.server.url} (${this.mode})`);
     return this.urls();

@@ -5,6 +5,8 @@ export interface BundleRequest {
   name: string;
   sourceFile: string;
   exportName: string;
+  // Method name when the routed function lives on the exported object `exportName`.
+  member?: string;
   routes: { method: string; path: string }[];
   provider: string;
   outDir: string;
@@ -35,7 +37,12 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
     entry,
     [
       `import { createHandler } from ${JSON.stringify(adapterPath)};`,
-      `import { ${req.exportName} as fn } from ${JSON.stringify(source)};`,
+      ...(req.member
+        ? [
+            `import { ${req.exportName} as root } from ${JSON.stringify(source)};`,
+            `const fn = root[${JSON.stringify(req.member)}].bind(root);`,
+          ]
+        : [`import { ${req.exportName} as fn } from ${JSON.stringify(source)};`]),
       `export const handler = createHandler(fn, ${JSON.stringify(req.routes)});`,
       "",
     ].join("\n"),

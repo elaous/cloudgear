@@ -5,4 +5,4 @@ export function item(input: { id: string }) {
 }
 
 // @ts-expect-error the route declares {other}, which item's input lacks
-new FunctionRouter("aws").add("GET", "/items/{other}", item);
+new FunctionRouter("aws").url("GET", "/items/{other}", item);

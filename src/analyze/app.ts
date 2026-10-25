@@ -9,7 +9,7 @@ import {
   type Symbol as MorphSymbol,
   type VariableDeclaration,
 } from "ts-morph";
-import { BLOB_OPERATIONS, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
+import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { METHODS } from "@cloudgear/functions";
 
 export interface AnalyzedResource {
@@ -21,14 +21,35 @@ export interface AnalyzedResource {
   line: number;
 }
 
+export interface StoreUse {
+  resource: string;
+  // Key prefix the store is confined to ("" for the whole bucket).
+  path: string;
+  accesses: Set<BlobAccess>;
+}
+
 export interface AnalyzedFunction {
   name: string;
   file: string;
   exportName: string;
+  // Set when the routed function is a method of the exported object `exportName`.
+  member?: string;
   inputType?: string;
   routes: { method: string; path: string; name: string }[];
-  // resource name -> accesses performed on it
-  uses: Map<string, Set<BlobAccess>>;
+  // `${resource}\0${path}` -> accesses performed on that store
+  uses: Map<string, StoreUse>;
+}
+
+interface Store {
+  resource: AnalyzedResource;
+  path: string;
+}
+
+interface Tally {
+  store: Store;
+  ops: Set<BlobAccess>;
+  grants: Set<BlobAccess>;
+  widenedAt?: Node;
 }
 
 export type Authentication = "iam" | "none";
@@ -70,12 +91,13 @@ export function analyzeApp(entryPath: string): AppModel {
   const newExpressions = localFiles.flatMap((file) => file.getDescendantsOfKind(SyntaxKind.NewExpression));
 
   // Resources
-  const resourceByDecl = new Map<Node, AnalyzedResource>();
+  const resourceByDecl = new Map<Node, Store>();
   const resources = new Map<string, AnalyzedResource>();
   for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/blob", "BlobStore"))) {
-    const [providerArg, uriArg] = expr.getArguments();
+    const [providerArg, uriArg, optionsArg] = expr.getArguments();
     const provider = stringLiteral(providerArg, `${where(expr)}: BlobStore provider`);
     const uri = stringLiteral(uriArg, `${where(expr)}: BlobStore URI`);
+    const storePath = readStorePath(optionsArg, where(expr));
     const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
     if (!decl || decl.getInitializer() !== expr) {
       throw new Error(`${where(expr)}: assign new BlobStore(...) to a variable so its usage can be traced`);
@@ -95,7 +117,7 @@ export function analyzeApp(entryPath: string): AppModel {
       );
     }
     resources.set(resource.name, existing ?? resource);
-    resourceByDecl.set(decl, existing ?? resource);
+    resourceByDecl.set(decl, { resource: existing ?? resource, path: storePath });
   }
 
   // Router
@@ -112,7 +134,7 @@ export function analyzeApp(entryPath: string): AppModel {
 
   const functions = new Map<Node, AnalyzedFunction>();
   const addCalls = collectAddCalls(router, where);
-  if (addCalls.length === 0) throw new Error(`${where(router)}: FunctionRouter has no .add(...) routes`);
+  if (addCalls.length === 0) throw new Error(`${where(router)}: FunctionRouter has no .url(...) routes`);
   for (const call of addCalls) {
     const [methodArg, pathArg, fnArg] = call.getArguments();
     const method = stringLiteral(methodArg, `${where(call)}: route method`).toUpperCase();
@@ -127,18 +149,36 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     let fn = functions.get(decl);
     if (!fn) {
-      const exportName = exportNameOf(decl);
-      if (!exportName) throw new Error(`${where(decl)}: "${fnArg.getText()}" must be exported so it can be bundled on its own`);
+      const target = exportTargetOf(decl);
+      if (!target) {
+        throw new Error(
+          `${where(decl)}: "${fnArg.getText()}" must be exported so it can be bundled on its own (a named function, or a method of an exported object)`,
+        );
+      }
       const param = fnNode.getParameters()[0];
       fn = {
-        name: exportName === "default" ? path.basename(decl.getSourceFile().getFilePath(), ".ts") : exportName,
+        name:
+          target.member ??
+          (target.exportName === "default" ? path.basename(decl.getSourceFile().getFilePath(), ".ts") : target.exportName),
         file: relative(decl.getSourceFile().getFilePath()),
-        exportName,
+        exportName: target.exportName,
+        member: target.member,
         inputType: param?.getTypeNode()?.getText(),
         routes: [],
         uses: new Map(),
       };
-      collectUsage(fnNode, fn.uses, new Set());
+      const tallies = new Map<string, Tally>();
+      collectUsage(fnNode, tallies, new Set());
+      for (const [key, tally] of tallies) {
+        let accesses = new Set([...tally.ops, ...tally.grants]);
+        if (tally.widenedAt && tally.grants.size === 0) {
+          accesses = new Set(ALL_ACCESS);
+          warnings.push(
+            `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value; granting every operation on it (use grant(store, ...) to narrow)`,
+          );
+        }
+        fn.uses.set(key, { resource: tally.store.resource.name, path: tally.store.path, accesses });
+      }
       functions.set(decl, fn);
     }
     checkPathParams(routePath, fnNode, where(call));
@@ -170,20 +210,24 @@ export function analyzeApp(entryPath: string): AppModel {
     warnings,
   };
 
-  function collectUsage(root: Node, uses: Map<string, Set<BlobAccess>>, visited: Set<Node>) {
+  function collectUsage(root: Node, tallies: Map<string, Tally>, visited: Set<Node>) {
     visited.add(root);
     const trace = (target: Node) => {
-      if (!visited.has(target)) collectUsage(target, uses, visited);
+      if (!visited.has(target)) collectUsage(target, tallies, visited);
     };
     const visit = (node: Node) => {
       if (!Node.isIdentifier(node)) return;
       for (const decl of resolveSymbol(node.getSymbol())?.getDeclarations() ?? []) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
-        const resource = resourceByDecl.get(decl);
-        if (resource) {
-          const accesses = uses.get(resource.name) ?? new Set();
-          for (const access of accessesAt(node, resource)) accesses.add(access);
-          uses.set(resource.name, accesses);
+        const store = resourceByDecl.get(decl);
+        if (store) {
+          const key = `${store.resource.name}\0${store.path}`;
+          const tally = tallies.get(key) ?? { store, ops: new Set<BlobAccess>(), grants: new Set<BlobAccess>() };
+          tallies.set(key, tally);
+          const found = accessesAt(node);
+          for (const access of found.ops ?? []) tally.ops.add(access);
+          for (const access of found.grants ?? []) tally.grants.add(access);
+          if (found.widened) tally.widenedAt ??= node;
           continue;
         }
         if (!isLocal(decl)) continue;
@@ -216,24 +260,42 @@ export function analyzeApp(entryPath: string): AppModel {
           Object.hasOwn(BLOB_OPERATIONS, parent.getName());
         if (isOperation && !ref.getFirstAncestor((a) => Node.isFunctionLikeDeclaration(a) || Node.isClassDeclaration(a))) {
           warnings.push(
-            `${where(ref)}: BlobStore "${resourceByDecl.get(decl)!.name}" is used outside any function; no permission is inferred for it`,
+            `${where(ref)}: BlobStore "${resourceByDecl.get(decl)!.resource.name}" is used outside any function; no permission is inferred for it`,
           );
         }
       }
     }
   }
 
-  function accessesAt(node: Node, resource: AnalyzedResource): BlobAccess[] {
+  function accessesAt(node: Node): { ops?: BlobAccess[]; grants?: BlobAccess[]; widened?: true } {
     const parent = node.getParent();
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === node) {
       const member = parent.getName();
-      if (Object.hasOwn(BLOB_OPERATIONS, member)) return [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]];
-      return [];
+      if (Object.hasOwn(BLOB_OPERATIONS, member)) return { ops: [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]] };
+      return {};
     }
-    warnings.push(
-      `${where(node)}: BlobStore "${resource.name}" is passed around as a value; granting every operation on it`,
-    );
-    return ALL_ACCESS;
+    if (Node.isCallExpression(parent) && parent.getArguments()[0] === node && isGrantCall(parent)) {
+      return { grants: readGrant(parent) };
+    }
+    return { widened: true };
+  }
+
+  function isGrantCall(call: CallExpression): boolean {
+    const callee = call.getExpression();
+    if (!Node.isIdentifier(callee)) return false;
+    const decl = resolveSymbol(callee.getSymbol())?.getDeclarations()[0];
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "grant" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob";
+  }
+
+  function readGrant(call: CallExpression): BlobAccess[] {
+    const accesses = call.getArguments().slice(1).map((arg) => stringLiteral(arg, `${where(call)}: grant access`));
+    if (accesses.length === 0) throw new Error(`${where(call)}: grant(store, ...) needs at least one access`);
+    for (const access of accesses) {
+      if (!ALL_ACCESS.includes(access as BlobAccess)) {
+        throw new Error(`${where(call)}: unknown access "${access}" in grant(); expected ${ALL_ACCESS.map((a) => `"${a}"`).join(", ")}`);
+      }
+    }
+    return accesses as BlobAccess[];
   }
 }
 
@@ -273,7 +335,7 @@ function readRouteName(options: Node | undefined, at: string): string | undefine
 
 const ROUTER_MEMBERS = new Set(["listen", "fetch", "provider", "mode"]);
 
-// Follows .add chains through variables; throws if the router flows anywhere untraceable.
+// Follows .url chains through variables; throws if the router flows anywhere untraceable.
 function collectAddCalls(router: NewExpression, where: (node: Node) => string): CallExpression[] {
   const calls: CallExpression[] = [];
   const followed = new Set<Node>();
@@ -304,7 +366,7 @@ function collectAddCalls(router: NewExpression, where: (node: Node) => string): 
     }
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === top && ROUTER_MEMBERS.has(parent.getName())) return;
     throw new Error(
-      `${where(top)}: the router is used in a way cloudgear cannot trace ("${parent?.getText().slice(0, 60)}"); keep .add(...) calls on the router variable`,
+      `${where(top)}: the router is used in a way cloudgear cannot trace ("${parent?.getText().slice(0, 60)}"); keep .url(...) calls on the router variable`,
     );
   };
 
@@ -324,7 +386,7 @@ function walkChain(start: Node, calls: CallExpression[]): Node {
     if (
       Node.isPropertyAccessExpression(parent) &&
       parent.getExpression() === node &&
-      parent.getName() === "add" &&
+      parent.getName() === "url" &&
       Node.isCallExpression(call) &&
       call.getExpression() === parent
     ) {
@@ -334,6 +396,38 @@ function walkChain(start: Node, calls: CallExpression[]): Node {
     }
     return node;
   }
+}
+
+function readStorePath(options: Node | undefined, at: string): string {
+  if (!options) return "";
+  if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: BlobStore options must be an object literal`);
+  for (const prop of options.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in BlobStore options cannot be analyzed`);
+    if (Node.isShorthandPropertyAssignment(prop) && prop.getName() === "path") {
+      throw new Error(`${at}: BlobStore path must be a string literal`);
+    }
+    if (Node.isPropertyAssignment(prop) && prop.getName() === "path") {
+      try {
+        return normalizeBlobPath(stringLiteral(prop.getInitializer(), `${at}: BlobStore path`));
+      } catch (err) {
+        throw new Error(`${at}: ${(err as Error).message}`);
+      }
+    }
+  }
+  return "";
+}
+
+// A routed function is bundled through a named export, or as a method of an exported object.
+function exportTargetOf(decl: Node): { exportName: string; member?: string } | undefined {
+  const direct = exportNameOf(decl);
+  if (direct) return { exportName: direct };
+  if (!Node.isMethodDeclaration(decl) && !Node.isPropertyAssignment(decl)) return undefined;
+  const object = decl.getParent();
+  const variable = Node.isObjectLiteralExpression(object) ? object.getParentIfKind(SyntaxKind.VariableDeclaration) : undefined;
+  const exportName = variable && variable.getInitializer() === object ? exportNameOf(variable) : undefined;
+  const member = decl.getName();
+  if (!exportName || !/^[A-Za-z_$][\w$]*$/.test(member)) return undefined;
+  return { exportName, member };
 }
 
 function functionNode(decl: Node) {

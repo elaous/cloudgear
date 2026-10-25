@@ -20,7 +20,7 @@ const fn = (overrides: Partial<FunctionSpec> = {}): FunctionSpec => ({
   source: { file: "server/api.ts", export: "foo" },
   route: [{ method: "POST", path: "/foo/{param}", name: "foo" }],
   bundle: { path: "build/foo/index.mjs", sha256: "v1" },
-  permission: [{ resource: "data", action: ["s3:PutObject", "s3:ListBucket"] }],
+  permission: [{ resource: "data", path: "", action: ["s3:PutObject", "s3:ListBucket"] }],
   env: [{ key: "CLOUDGEAR_BLOB_DATA", value_from: "data" }],
   reserved_concurrency: 0,
   ...overrides,
@@ -136,7 +136,7 @@ describe("plan", () => {
     expect(actions[0]).toMatchObject({ op: "noop", key: "@aws.S3.data" });
     const spec = actions[2]!.desired!.spec as unknown as FunctionComparable;
     expect(spec.env).toEqual({ CLOUDGEAR_BLOB_DATA: "existing-bucket" });
-    expect(spec.permissions).toEqual([{ type: "@aws.S3", physical_name: "existing-bucket", actions: ["s3:ListBucket", "s3:PutObject"] }]);
+    expect(spec.permissions).toEqual([{ type: "@aws.S3", physical_name: "existing-bucket", path: "", actions: ["s3:ListBucket", "s3:PutObject"] }]);
   });
 });
 
@@ -231,6 +231,27 @@ describe("aws drivers", () => {
     });
     await expect(apply(plan(baseConfig(), state), state, aws.drivers, { save: () => {} })).rejects.toThrow("AccessDenied");
     expect(Object.keys(state.entries)).toEqual(["@aws.S3.data"]);
+  });
+
+  test("policyDocument scopes object access and listing to a store's path", () => {
+    const doc = JSON.parse(
+      policyDocument({
+        permissions: [
+          { type: "@aws.S3", physical_name: "shared", path: "img-cache/", actions: ["s3:GetObject", "s3:ListBucket"] },
+          { type: "@aws.S3", physical_name: "shared", path: "", actions: ["s3:PutObject"] },
+        ],
+      } as unknown as FunctionComparable),
+    );
+    expect(doc.Statement).toEqual([
+      { Effect: "Allow", Action: ["s3:GetObject"], Resource: "arn:aws:s3:::shared/img-cache/*" },
+      {
+        Effect: "Allow",
+        Action: ["s3:ListBucket"],
+        Resource: "arn:aws:s3:::shared",
+        Condition: { StringLike: { "s3:prefix": ["img-cache/*"] } },
+      },
+      { Effect: "Allow", Action: ["s3:PutObject"], Resource: "arn:aws:s3:::shared/*" },
+    ]);
   });
 
   test("policyDocument refuses resource types it has no mapping for", () => {

@@ -35,7 +35,7 @@ export async function inherited() {
 }
 
 new FunctionRouter("aws")
-  .add("POST", "/class", viaClass)
-  .add("POST", "/object", viaObject)
-  .add("GET", "/alias", viaAlias)
-  .add("GET", "/inherited", inherited);
+  .url("POST", "/class", viaClass)
+  .url("POST", "/object", viaObject)
+  .url("GET", "/alias", viaAlias)
+  .url("GET", "/inherited", inherited);

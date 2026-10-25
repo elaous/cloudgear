@@ -48,6 +48,8 @@ message Source {
   string file = 1;
   string export = 2;
   string input_type = 3;
+  // Set when the function is a method of the exported object `export`.
+  string member = 4;
 }
 
 message Route {
@@ -67,6 +69,8 @@ message Permission {
   // Logical name of a Resource.
   string resource = 1;
   repeated string action = 2;
+  // Key prefix the access is confined to; empty means the whole bucket.
+  string path = 3;
 }
 
 message Env {

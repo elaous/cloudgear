@@ -161,7 +161,7 @@ export class FunctionRouter {
       } catch {
         return Response.json({ error: "Malformed request body" }, { status: 400 });
       }
-      return this.dispatch(route, input, context);
+      return this.dispatch(route, input, context, req);
     }
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
@@ -221,7 +221,7 @@ export class FunctionRouter {
     return Response.json({ error: "Too many requests" }, { status: 429, headers: { "retry-after": String(retryAfter) } });
   }
 
-  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext): Promise<Response> {
+  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request): Promise<Response> {
     if (this.mode === "local") {
       const result = await invoke(route.fn, input, context);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
@@ -233,9 +233,13 @@ export class FunctionRouter {
     }
     let upstream: Response;
     try {
+      const header = (this.options.authenticate as { header?: string } | undefined)?.header;
+      // `authorization` is taken by the SigV4 signature; only a dedicated header can carry the token.
+      const token = header && header !== "authorization" && !route.public ? req.headers.get(header) : null;
       upstream = await request(url, input, {
         route: route.key,
         context,
+        headers: token && header ? { [header]: token } : undefined,
         sign: this.authMode(endpoints) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
       });
     } catch (err) {

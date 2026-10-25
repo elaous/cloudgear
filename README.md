@@ -162,7 +162,8 @@ export function me(input: unknown, context: RequestContext) {
 }
 ```
 
-`jwtAuth` verifies `Authorization: Bearer <jwt>` against the issuer's JWKS
+`jwtAuth` verifies `Authorization: Bearer <jwt>` (or the bare token in
+`header`, see Identity behind a CDN) against the issuer's JWKS
 (`<issuer>/.well-known/jwks.json`, or `jwksUri`), accepts only asymmetric
 algorithms, and checks issuer, expiry and, when given, audience. Always set
 `audience`: without it any token from the issuer is accepted. Missing or
@@ -253,8 +254,10 @@ Rules the analyzer enforces:
   different ones; give them different paths. Path params become `*`.
 - Requests through the CDN reach functions directly, so the router's
   `authenticate` hook and `rateLimit` do not run for them. `generate` refuses
-  a router that has `authenticate` unless every route is `{ public: true }`,
-  and warns about `rateLimit`.
+  a router that has a custom `authenticate` unless every route is
+  `{ public: true }`, and warns about `rateLimit`. With
+  `authenticate: jwtAuth({...})` the functions verify tokens themselves
+  (see Identity behind a CDN).
 - A `dry` bucket is not created or deleted, but the CDN still adds one
   statement to its bucket policy (and removes it again), which `generate`
   warns about. The CDN's bucket policy statement only allows `s3:GetObject`
@@ -274,7 +277,28 @@ Rules the analyzer enforces:
 - Anyone can reach functions through the CDN with their own requests, so
   functions behind it never trust a caller identity (`context.auth` is not
   populated), and the router's invoke protocol still ignores method and path
-  matching there. This is why `authenticate` needs every route to be public.
+  matching there. This is why a custom `authenticate` needs every route to be
+  public.
+
+#### Identity behind a CDN
+
+With a CDN and `authenticate: jwtAuth({...})`, `generate` reads the literal
+settings (`issuer`, `audience`, `jwksUri`, `clockToleranceSeconds`, `header`)
+and bakes the same verification into each function's bundle. Every request,
+whether from a viewer or from the router, then carries a token that the
+function checks, and `context.auth` is the verified principal. Rules:
+
+- `header` MUST be set to something other than `authorization` (for example
+  `{ header: "x-auth-token" }`): CloudFront's origin access control signs
+  requests to functions with `Authorization`, so it may replace the viewer's.
+  The header holds the bare token (a `Bearer ` prefix is tolerated). The
+  frontend MUST send it; the router forwards it on remote calls.
+- Options MUST be string, string-array or number literals.
+- A function whose routes are all `{ public: true }` skips verification. A
+  function with both public and protected routes is refused: give each its own
+  function.
+- A bad token gets 401, a JWKS outage 503. Functions still never trust a
+  `context` sent in the request.
 - HEAD requests are served by the GET route, without a body.
 
 cloudgear never overwrites a DNS record it does not own: if the domain

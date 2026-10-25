@@ -244,6 +244,40 @@ describe("FunctionRouter authenticate", () => {
   });
 });
 
+describe("FunctionRouter forwards a dedicated token header", () => {
+  const sentHeaders = async (header: string, route: { public?: boolean } = {}) => {
+    const original = globalThis.fetch;
+    const sent: Headers[] = [];
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      sent.push(new Headers(init.headers));
+      return new Response("{}");
+    }) as typeof fetch;
+    try {
+      const authenticate = Object.assign(async () => ({ subject: "u", claims: {} }), { header });
+      const router = new FunctionRouter("aws", {
+        endpoints: { "GET /me": "https://a.lambda-url.us-east-1.on.aws/" },
+        authenticate,
+        credentials: async () => ({ accessKeyId: "AKID", secretAccessKey: "secret" }),
+      }).url("GET", "/me", () => ({}), route);
+      await router.fetch(new Request("http://app/me", { headers: { [header]: "tok", authorization: "Bearer other" } }));
+    } finally {
+      globalThis.fetch = original;
+    }
+    return sent[0]!;
+  };
+
+  test("the token goes to the function in its own header and is signed", async () => {
+    const headers = await sentHeaders("x-auth-token");
+    expect(headers.get("x-auth-token")).toBe("tok");
+    expect(headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 .*x-auth-token/);
+  });
+
+  test("the authorization header is never forwarded, nor is a token for a public route", async () => {
+    expect((await sentHeaders("authorization")).get("authorization")).toMatch(/^AWS4-HMAC-SHA256/);
+    expect((await sentHeaders("x-auth-token", { public: true })).get("x-auth-token")).toBeNull();
+  });
+});
+
 describe("FunctionRouter rate limit", () => {
   const limited = (windowMs = 1000) =>
     new FunctionRouter("aws", { mode: "local", rateLimit: { limit: 2, windowMs, key: (req) => req.headers.get("x-client") ?? "anon" } }).url(
@@ -565,6 +599,64 @@ describe("FunctionRouter (remote mode)", () => {
 
   test("defaults to local mode without an endpoints file", () => {
     expect(new FunctionRouter("aws", { endpointsFile: "/nonexistent/endpoints.json" }).mode).toBe("local");
+  });
+});
+
+describe("aws createHandler token verification", () => {
+  const principal = { subject: "u1", claims: {} };
+  const authenticate = async (req: Request) => (req.headers.get("x-auth-token") === "good" ? principal : null);
+  const event = (headers: Record<string, string | undefined>, method = "GET"): FunctionUrlEvent => ({
+    rawPath: "/items/7",
+    headers,
+    requestContext: { http: { method } },
+  });
+  const whoami = async (_input: unknown, context: { auth?: unknown }) => ({ auth: context.auth ?? null });
+  const routes: RouteSpec[] = [{ method: "GET", path: "/items/{id}" }];
+
+  test("a valid token reaches the function as context.auth, an invalid or missing one is 401", async () => {
+    const handler = createHandler(whoami, routes, { authenticate });
+    const ok = await handler(event({ "X-Auth-Token": "good" }));
+    expect(ok.statusCode).toBe(200);
+    expect(JSON.parse(ok.body)).toEqual({ auth: principal });
+    for (const headers of [{}, { "x-auth-token": "bad" }]) {
+      const denied = await handler(event(headers));
+      expect(denied.statusCode).toBe(401);
+      expect(denied.headers["www-authenticate"]).toBe("Bearer");
+    }
+  });
+
+  test("a failing verifier is 503, and unknown paths never reach it", async () => {
+    const calls: string[] = [];
+    const handler = createHandler(whoami, routes, {
+      authenticate: async () => {
+        calls.push("x");
+        throw new Error("jwks down");
+      },
+    });
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      expect((await handler(event({ "x-auth-token": "good" }))).statusCode).toBe(503);
+      expect((await handler({ ...event({}), rawPath: "/nope" })).statusCode).toBe(404);
+    } finally {
+      console.error = originalError;
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the invoke protocol is verified too, and its context is never trusted", async () => {
+    const handler = createHandler(whoami, routes, { trustContext: false, authenticate });
+    const body = JSON.stringify({ input: {}, context: { auth: { subject: "forged" } } });
+    const invoke = (token: string) => ({ ...event({ "content-type": "application/vnd.cloudgear.invoke+json", "x-auth-token": token }, "POST"), body });
+    expect((await handler(invoke("bad"))).statusCode).toBe(401);
+    expect(JSON.parse((await handler(invoke("good"))).body)).toEqual({ auth: principal });
+  });
+
+  test("anonymous functions skip verification", async () => {
+    const handler = createHandler(whoami, routes, { authenticate, anonymous: true });
+    const res = await handler(event({}));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ auth: null });
   });
 });
 

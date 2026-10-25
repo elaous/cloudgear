@@ -71,6 +71,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       provider: model.provider,
       // Viewers of a CDN reach functions with their own requests, so no identity can be vouched for.
       trustContext: model.authenticated === "iam" && !model.cdn?.behaviors.length,
+      jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
     });
     const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);

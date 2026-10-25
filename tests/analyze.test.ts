@@ -138,7 +138,22 @@ describe("analyzeApp", () => {
       ]);
     });
 
+    test("a jwtAuth authenticate is read for the functions to verify tokens themselves", () => {
+      const model = analyzeApp(fixture("cdn/jwt-ok.ts"));
+      expect(model.jwt).toEqual({
+        issuer: "https://login.example.com",
+        audience: ["app", "web"],
+        header: "x-auth-token",
+        clockToleranceSeconds: 5,
+      });
+      expect(Object.fromEntries(model.functions.map((f) => [f.name, f.anonymous]))).toEqual({ health: true, me: false });
+      expect(analyzeApp(fixture("cdn/authenticate-all-public.ts")).jwt).toBeUndefined();
+    });
+
     test.each([
+      ["cdn/jwt-authorization.ts", /jwtAuth needs a header other than "authorization"/],
+      ["cdn/jwt-mixed.ts", /"both" serves both public and protected routes/],
+      ["cdn/jwt-variable.ts", /jwtAuth issuer must be a string literal/],
       ["cdn/method-conflict.ts", /CloudFront cannot route by method: GET \/foo\/\{param\} \(getFoo\) and POST \/foo\/\{param\} \(createFoo\) share the path "\/foo\/\*"/],
       ["cdn/authenticate-bypass.ts", /authenticate hook does not run for "GET \/me"; mark it \{ public: true \} or drop the cdn/],
       ["cdn/authenticated-none.ts", /needs authenticated: "iam"/],
@@ -371,6 +386,22 @@ describe("generate", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ error: "not found" }),
     });
+  });
+
+  test("with a CDN and jwtAuth the bundles verify tokens, except for public functions", async () => {
+    const buildDir = path.join(dir, "jwt-build");
+    await generate({ entry: fixture("cdn/jwt-ok.ts"), configPath: path.join(dir, "jwt.prototxt"), buildDir, project: "jwt" });
+    const script = `
+      const call = async (name, headers) => {
+        const { handler } = await import(${JSON.stringify(buildDir)} + "/" + name + "/index.mjs");
+        const res = await handler({ rawPath: name === "me" ? "/me" : "/health", requestContext: { http: { method: "GET" } }, headers });
+        return res.statusCode;
+      };
+      console.log(JSON.stringify([await call("me", {}), await call("me", { "x-auth-token": "garbage" }), await call("health", {})]));
+    `;
+    const proc = Bun.spawnSync(["node", "--input-type=module", "-e", script], { cwd: dir });
+    expect(proc.stderr.toString()).toBe("");
+    expect(JSON.parse(proc.stdout.toString())).toEqual([401, 401, 200]);
   });
 
   test("rejects invalid invokers and reserved concurrency", async () => {

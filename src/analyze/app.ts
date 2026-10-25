@@ -43,6 +43,17 @@ export interface AnalyzedFunction {
   routes: { method: string; path: string; name: string }[];
   // `${resource}\0${path}` -> accesses performed on that store
   uses: Map<string, StoreUse>;
+  // Every route is `public`, so the function skips token verification.
+  anonymous?: boolean;
+}
+
+// Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
+export interface JwtSettings {
+  issuer: string;
+  audience?: string | string[];
+  jwksUri?: string;
+  clockToleranceSeconds?: number;
+  header: string;
 }
 
 interface Store {
@@ -77,6 +88,8 @@ export interface AppModel extends EdgeModel {
   // Region of the functions, from the router's options; undefined means the deploy default.
   region?: string;
   authenticated: Authentication;
+  // Set with a CDN, where viewers reach functions directly and each function verifies the token.
+  jwt?: JwtSettings;
   entry: string;
   resources: AnalyzedResource[];
   functions: AnalyzedFunction[];
@@ -158,6 +171,7 @@ export function analyzeApp(entryPath: string): AppModel {
       `${where(router)}: authenticate is set but authenticated is "none"; deployed functions will not receive the caller's identity`,
     );
   }
+  const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
 
@@ -235,9 +249,22 @@ export function analyzeApp(entryPath: string): AppModel {
 
   warnModuleLevelUse();
   const edge = analyzeEdge();
+  const verifying = !!jwtSettings && !!edge.cdn?.behaviors.length;
+  if (verifying) {
+    for (const fn of functions.values()) {
+      const flags = fn.routes.map((r) => publicRoutes.get(`${r.method} ${r.path}`) ?? false);
+      if (flags.some(Boolean) && !flags.every(Boolean)) {
+        throw new Error(
+          `${fn.file}: "${fn.name}" serves both public and protected routes; with a cdn a function verifies tokens as a whole, so give each its own function`,
+        );
+      }
+      fn.anonymous = flags.every(Boolean);
+    }
+  }
 
   return {
     ...edge,
+    jwt: verifying ? jwtSettings : undefined,
     provider,
     region: routerRegion,
     authenticated,
@@ -286,6 +313,42 @@ export function analyzeApp(entryPath: string): AppModel {
     };
     visit(root);
     root.forEachDescendant((node) => void visit(node));
+  }
+
+  function readJwtAuth(options: Node | undefined, at: string): JwtSettings | undefined {
+    if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
+    const prop = options.getProperties().find((p) => propName(p) === "authenticate");
+    const init = prop && Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    if (!init || !Node.isCallExpression(init)) return undefined;
+    const decl = resolveSymbol(init.getExpression().getSymbol())?.getDeclarations()[0];
+    const isJwtAuth =
+      !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "jwtAuth" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+    if (!isJwtAuth) return undefined;
+    const arg = init.getArguments()[0];
+    const what = `${at}: jwtAuth`;
+    if (!arg || !Node.isObjectLiteralExpression(arg)) throw new Error(`${what} options must be an object literal so cloudgear can read them`);
+    const settings: JwtSettings = { issuer: "", header: "authorization" };
+    for (const p of arg.getProperties()) {
+      if (Node.isSpreadAssignment(p)) throw new Error(`${what}: spread in options cannot be analyzed`);
+      const key = propName(p);
+      const value = Node.isPropertyAssignment(p) ? p.getInitializer() : undefined;
+      if (key === "issuer") settings.issuer = stringLiteral(value, `${what} issuer`);
+      else if (key === "jwksUri") settings.jwksUri = stringLiteral(value, `${what} jwksUri`);
+      else if (key === "header") settings.header = stringLiteral(value, `${what} header`).toLowerCase();
+      else if (key === "audience") {
+        settings.audience =
+          value && Node.isArrayLiteralExpression(value)
+            ? value.getElements().map((e) => stringLiteral(e, `${what} audience`))
+            : stringLiteral(value, `${what} audience`);
+      } else if (key === "clockToleranceSeconds") {
+        if (!value || !Node.isNumericLiteral(value)) throw new Error(`${what} clockToleranceSeconds must be a number literal`);
+        settings.clockToleranceSeconds = Number(value.getLiteralText());
+      } else if (key !== undefined) {
+        throw new Error(`${what}: unknown option "${key}"`);
+      }
+    }
+    if (!settings.issuer) throw new Error(`${what} needs an issuer`);
+    return settings;
   }
 
   function analyzeEdge(): EdgeModel {
@@ -384,7 +447,13 @@ export function analyzeApp(entryPath: string): AppModel {
           throw new Error(`${where(router)}: a CDN reaches functions through CloudFront, which needs authenticated: "iam"`);
         }
         const options = router.getArguments()[1];
-        if (hasOption(options, "authenticate")) {
+        if (hasOption(options, "authenticate") && jwtSettings) {
+          if (jwtSettings.header === "authorization") {
+            throw new Error(
+              `${where(router)}: with a cdn, jwtAuth needs a header other than "authorization" (for example { header: "x-auth-token" }); CloudFront origin access control signs requests to functions with that header`,
+            );
+          }
+        } else if (hasOption(options, "authenticate")) {
           const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
           if (open) {
             throw new Error(

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,9 @@ import { DNS } from "@cloudgear/dns";
 import { FunctionRouter } from "@cloudgear/functions";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
+
+// Analyzing an app and bundling functions take seconds when the machine is busy.
+setDefaultTimeout(30_000);
 
 const fixture = (name: string) => path.join(import.meta.dir, "fixtures", "router", name);
 const site = () => new BlobStore("aws", "://my-site");

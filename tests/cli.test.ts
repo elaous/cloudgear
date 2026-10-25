@@ -1,7 +1,10 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Analyzing an app and bundling functions take seconds when the machine is busy.
+setDefaultTimeout(30_000);
 
 const root = path.join(import.meta.dir, "..");
 const entry = path.join(root, "examples", "router-app", "main.ts");

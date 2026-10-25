@@ -35,6 +35,8 @@ export function normalizeBlobPath(path: string): string {
   if (trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new Error(`Invalid blob path "${path}": empty, "." and ".." segments are not allowed`);
   }
+  // These would widen the generated IAM resource ("a*") or be expanded by it ("${aws:username}").
+  if (/[*?$]/.test(trimmed)) throw new Error(`Invalid blob path "${path}": "*", "?" and "$" are not allowed`);
   return `${trimmed}/`;
 }
 

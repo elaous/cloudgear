@@ -21,7 +21,8 @@ Commands:
 Options:
   --config <file>    Config file (default: cloudgear.prototxt)
   --project <name>   Project name used to prefix function names (generate only)
-  --invoker <arn>    IAM role/user ARN or account id allowed to call the functions (generate only, repeatable)
+  --invoker <arn>    IAM role/user ARN or account id allowed to call the functions; trusted to assert
+                     caller identities, not just to call (generate only, repeatable)
   --reserved-concurrency <n>  Cap each function's concurrent executions (generate only)
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
 `;

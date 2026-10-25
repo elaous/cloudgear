@@ -347,6 +347,25 @@ describe("function URL access", () => {
     expect(closed.calls.filter((c) => c.name === "AddPermissionCommand").every((c) => c.input.Principal === ROLE)).toBe(true);
   });
 
+  test("retrying after a partial permission update tolerates statements that already exist", async () => {
+    const aws = fakeAws({
+      AddPermissionCommand: () => {
+        throw Object.assign(new Error("exists"), { name: "ResourceConflictException" });
+      },
+    });
+    await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).resolves.toBeDefined();
+    expect(aws.names().filter((n) => n === "AddPermissionCommand")).toHaveLength(2);
+  });
+
+  test("other permission errors still fail", async () => {
+    const aws = fakeAws({
+      AddPermissionCommand: () => {
+        throw Object.assign(new Error("denied"), { name: "AccessDeniedException" });
+      },
+    });
+    await expect(applyAll(baseConfig({ invoker: [ROLE] }), emptyState(), aws)).rejects.toThrow("denied");
+  });
+
   test("endpoints record the authentication mode", async () => {
     const state = emptyState();
     await applyAll(baseConfig({ authenticated: "none" }), state);

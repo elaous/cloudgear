@@ -127,6 +127,9 @@ describe("BlobStore path prefix", () => {
     expect(normalizeBlobPath("/")).toBe("");
     expect(normalizeBlobPath("")).toBe("");
     for (const bad of ["a//b", "../x", "a/./b", "a/../b"]) expect(() => normalizeBlobPath(bad)).toThrow(/Invalid blob path/);
+    for (const bad of ["a*", "a?b", "${aws:username}", "x/$y"]) {
+      expect(() => normalizeBlobPath(bad)).toThrow(/"\*", "\?" and "\$" are not allowed/);
+    }
   });
 
   test("keys are stored under the prefix and list() strips it again", async () => {
@@ -168,6 +171,12 @@ describe("S3BlobDriver", () => {
     const denied = new S3BlobDriver("b", client(() => { throw notFound("AccessDenied"); }));
     await expect(denied.get("k")).rejects.toThrow("AccessDenied");
     await expect(denied.exists("k")).rejects.toThrow("AccessDenied");
+  });
+
+  test("explains that AccessDenied can mean a missing key", async () => {
+    const driver = new S3BlobDriver("b", client(() => { throw notFound("AccessDenied"); }));
+    await expect(driver.get("k")).rejects.toThrow(/AccessDenied.*missing key when the caller cannot list the whole bucket/);
+    await expect(driver.exists("k")).rejects.toThrow(/missing key/);
   });
 
   test("sends bucket, key and content type, and pages through list results", async () => {

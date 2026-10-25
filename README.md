@@ -73,8 +73,10 @@ a function mounted on two routes needs `{ name }` on at least one of them.
 `router.listen(port)` serves the routes with `Bun.serve` (`router.fetch` is
 exposed to mount elsewhere) and returns each route's URL by name. `urls()`
 returns the same map later, and `stop()` shuts the server down. In remote mode
-the URLs are the deployed function URLs plus the route path; in local mode
-they are this server's. Path params stay as `{placeholders}`. For each
+the URLs are the deployed function URLs plus the route path (with `"iam"`
+only signed calls can use them, so they are not links to hand to browsers); in
+local mode they are this server's. Remote mode without deployed endpoints
+throws. Path params stay as `{placeholders}`. For each
 request the router either:
 
 - **remote**: POSTs the input object to the route's deployed function URL
@@ -186,9 +188,13 @@ new FunctionRouter("aws", {
 
 Requests over the limit get `429` with `Retry-After`. Counters live in each
 process's memory, so a serverless app with many instances enforces the limit
-per instance; use it as a coarse guard, not as a quota. The default key is
-the first `X-Forwarded-For` address, which only means something behind a
-proxy that sets it.
+per instance; use it as a coarse guard, not as a quota. At most 10,000
+clients are tracked and the oldest counters are dropped first, so flooding
+with fake identities cannot exhaust memory (it can make a limited client's
+counter reset). You MUST give a `key(req)` function or set `trustProxy: true`,
+which takes the first `X-Forwarded-For` address; enable that only behind a
+proxy that sets or overwrites the header, because otherwise clients choose
+their own identity.
 
 ### Runtime: `BlobStore`
 

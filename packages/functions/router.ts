@@ -38,8 +38,11 @@ export interface EndpointsFile {
 export interface RateLimit {
   limit: number;
   windowMs: number;
-  // Client identity; defaults to the first X-Forwarded-For address.
+  // Client identity. Required unless `trustProxy` is set.
   key?: (req: Request) => string;
+  // Take the client from the first X-Forwarded-For address. Only enable behind a proxy that
+  // sets or overwrites that header; otherwise clients can pick their own identity.
+  trustProxy?: boolean;
 }
 
 export interface FunctionRouterOptions {
@@ -75,6 +78,7 @@ interface Endpoints {
 }
 
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
+// Oldest counters are dropped past this, so memory stays bounded under key-flooding.
 const MAX_TRACKED_CLIENTS = 10_000;
 
 export class FunctionRouter {
@@ -86,7 +90,12 @@ export class FunctionRouter {
   constructor(
     readonly provider: Provider,
     private readonly options: FunctionRouterOptions = {},
-  ) {}
+  ) {
+    const limit = options.rateLimit;
+    if (limit && !limit.key && !limit.trustProxy) {
+      throw new Error("rateLimit needs a key(req) function, or trustProxy: true to use X-Forwarded-For");
+    }
+  }
 
   url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
     method: Method | Lowercase<Method>,
@@ -156,6 +165,9 @@ export class FunctionRouter {
   listen(port: number = Number(process.env.PORT ?? 3000)): Record<string, string> {
     // A routed function may share a module with the router; inside Lambda that import must not serve.
     if (process.env.AWS_LAMBDA_FUNCTION_NAME) return {};
+    if (this.mode === "remote" && !this.loadEndpoints()) {
+      throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
+    }
     this.server = Bun.serve({ port, fetch: this.fetch });
     console.log(`cloudgear: ${this.routes.length} route(s) on ${this.server.url} (${this.mode})`);
     return this.urls();
@@ -166,10 +178,13 @@ export class FunctionRouter {
     this.server = undefined;
   }
 
-  // Route name to URL: the deployed function URL in remote mode, else this server's.
+  // Route name to URL: the deployed function URL in remote mode (with "iam" only signed calls
+  // can use it), else this server's.
   // Path params stay as {placeholders}.
   urls(): Record<string, string> {
-    const endpoints = this.mode === "remote" ? this.loadEndpoints() : null;
+    const remote = this.mode === "remote";
+    const endpoints = remote ? this.loadEndpoints() : null;
+    if (remote && !endpoints) throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
     const local = this.server?.url.origin;
     if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
     const urls: Record<string, string> = {};
@@ -183,13 +198,14 @@ export class FunctionRouter {
   private checkRateLimit(req: Request): Response | null {
     const limit = this.options.rateLimit;
     if (!limit) return null;
-    const key = limit.key?.(req) ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "global";
+    const key = limit.key ? limit.key(req) : (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown");
     const now = Date.now();
-    if (this.windows.size >= MAX_TRACKED_CLIENTS) {
-      for (const [client, window] of this.windows) if (now - window.start >= limit.windowMs) this.windows.delete(client);
-    }
     let window = this.windows.get(key);
     if (!window || now - window.start >= limit.windowMs) {
+      if (!window && this.windows.size >= MAX_TRACKED_CLIENTS) {
+        this.windows.delete(this.windows.keys().next().value!);
+      }
+      this.windows.delete(key);
       window = { start: now, count: 0 };
       this.windows.set(key, window);
     }
@@ -255,7 +271,8 @@ export async function request(
     ...init.headers,
   };
   const finalHeaders = init.sign ? await signFunctionUrlRequest(url, body, headers, init.sign) : headers;
-  return fetch(url, { method: "POST", headers: finalHeaders, body });
+  // Redirects belong to the client; following one here would resend a stale signature.
+  return fetch(url, { method: "POST", headers: finalHeaders, body, redirect: "manual" });
 }
 
 function readEndpoints(provider: string, file?: string): Endpoints | null {

@@ -62,13 +62,41 @@ describe("analyzeApp", () => {
   test("routes can be methods of an exported object, and stores can be confined to a path", () => {
     const model = analyzeApp(fixture("object-exports.ts"));
     const byName = Object.fromEntries(model.functions.map((f) => [f.name, f]));
-    expect(Object.keys(byName)).toEqual(["getObjects", "put"]);
-    expect(byName.getObjects).toMatchObject({ exportName: "local", member: "getObjects" });
-    expect(byName.put).toMatchObject({ exportName: "local", member: "put" });
-    expect(accesses(byName.getObjects!.uses)).toEqual({ "objects:img-cache/": ["read"] });
-    expect(accesses(byName.put!.uses)).toEqual({ "objects:img-cache/": ["write"] });
-    expect(byName.put!.routes).toEqual([{ method: "PUT", path: "/objects/{param}", name: "putObject" }]);
+    expect(Object.keys(byName)).toEqual(["local-getObjects", "local-put"]);
+    expect(byName["local-getObjects"]).toMatchObject({ exportName: "local", member: "getObjects" });
+    expect(byName["local-getObjects"]!.routes[0]!.name).toBe("getObjects");
+    expect(byName["local-put"]).toMatchObject({ exportName: "local", member: "put" });
+    expect(accesses(byName["local-getObjects"]!.uses)).toEqual({ "objects:img-cache/": ["read"] });
+    expect(accesses(byName["local-put"]!.uses)).toEqual({ "objects:img-cache/": ["write"] });
+    expect(byName["local-put"]!.routes).toEqual([{ method: "PUT", path: "/objects/{param}", name: "putObject" }]);
     expect(model.resources.map((r) => r.name)).toEqual(["objects"]);
+  });
+
+  test("a store reached through an object property is still traced", () => {
+    const model = analyzeApp(fixture("object-property-store.ts"));
+    const byName = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
+    expect(byName["svc-viaThis"]).toEqual({ props: ["read"] });
+    // svc's initializer hands the store around as a value, so every access is granted
+    expect(byName["svc-viaName"]).toEqual({ props: ["delete", "list", "read", "write"] });
+    expect(model.warnings).toEqual([expect.stringMatching(/"props" is passed around as a value/)]);
+  });
+
+  test("quoted property keys are read like plain ones", () => {
+    const model = analyzeApp(fixture("quoted-options.ts"));
+    expect(model.authenticated).toBe("none");
+    expect(accesses(model.functions[0]!.uses)).toEqual({ "quoted:secret/": ["list"] });
+    expect(model.functions[0]!.routes[0]!.name).toBe("listF");
+  });
+
+  test("members of different objects may share a method name", () => {
+    const model = analyzeApp(fixture("same-method-name.ts"));
+    expect(model.functions.map((f) => f.name)).toEqual(["users-get", "orders-get"]);
+  });
+
+  test("the default route name is the function's own name, like fn.name at runtime", () => {
+    const model = analyzeApp(fixture("export-alias.ts"));
+    expect(model.functions[0]).toMatchObject({ name: "handler", declaredName: "impl" });
+    expect(model.functions[0]!.routes[0]!.name).toBe("impl");
   });
 
   test("two stores on one bucket keep separate paths", () => {
@@ -136,6 +164,7 @@ describe("analyzeApp", () => {
     ["grant-empty.ts", /grant\(store, \.\.\.\) needs at least one access/],
     ["store-path-invalid.ts", /Invalid blob path "a\/\.\.\/b"/],
     ["store-path-variable.ts", /BlobStore path must be a string literal/],
+    ["computed-key.ts", /computed property keys cannot be analyzed/],
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
     ["default-export.ts", /export the router with a name/],
     ["no-routes.ts", /FunctionRouter has no \.url\(\.\.\.\) routes/],
@@ -230,15 +259,15 @@ describe("generate", () => {
       project: "members",
     });
     const config = decodeConfig(fs.readFileSync(configPath, "utf8"));
-    const getObjects = config.function.find((f) => f.name === "getObjects")!;
+    const getObjects = config.function.find((f) => f.name === "local-getObjects")!;
     expect(getObjects.source).toMatchObject({ export: "local", member: "getObjects" });
     expect(getObjects.permission).toEqual([{ resource: "objects", path: "img-cache/", action: ["s3:GetObject", "s3:ListBucket"] }]);
-    expect(config.function.find((f) => f.name === "put")!.permission).toEqual([
+    expect(config.function.find((f) => f.name === "local-put")!.permission).toEqual([
       { resource: "objects", path: "img-cache/", action: ["s3:PutObject"] },
     ]);
 
     const script = `
-      const { handler } = await import(${JSON.stringify(path.join(dir, "members-build/getObjects/index.mjs"))});
+      const { handler } = await import(${JSON.stringify(path.join(dir, "members-build/local-getObjects/index.mjs"))});
       const res = await handler({ rawPath: "/objects/abc", requestContext: { http: { method: "GET" } }, headers: {} });
       console.log(JSON.stringify(res));
     `;

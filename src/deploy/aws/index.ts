@@ -79,26 +79,26 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const statementId = (kind: string, principal: string) =>
     `cloudgear-${kind}-${createHash("sha256").update(principal).digest("hex").slice(0, 12)}`;
 
+  // A retry after a partial failure meets statements that already exist; that is fine.
+  const addPermission = (input: ConstructorParameters<typeof AddPermissionCommand>[0]) =>
+    ignore(lambda.send(new AddPermissionCommand(input)), "ResourceConflictException");
+
   async function addInvokers(functionName: string, principals: string[]) {
     for (const principal of principals) {
-      await lambda.send(
-        new AddPermissionCommand({
-          FunctionName: functionName,
-          StatementId: statementId("url", principal),
-          Action: "lambda:InvokeFunctionUrl",
-          Principal: principal,
-          FunctionUrlAuthType: "AWS_IAM",
-        }),
-      );
-      await lambda.send(
-        new AddPermissionCommand({
-          FunctionName: functionName,
-          StatementId: statementId("invoke", principal),
-          Action: "lambda:InvokeFunction",
-          Principal: principal,
-          InvokedViaFunctionUrl: true,
-        }),
-      );
+      await addPermission({
+        FunctionName: functionName,
+        StatementId: statementId("url", principal),
+        Action: "lambda:InvokeFunctionUrl",
+        Principal: principal,
+        FunctionUrlAuthType: "AWS_IAM",
+      });
+      await addPermission({
+        FunctionName: functionName,
+        StatementId: statementId("invoke", principal),
+        Action: "lambda:InvokeFunction",
+        Principal: principal,
+        InvokedViaFunctionUrl: true,
+      });
     }
   }
 
@@ -116,24 +116,20 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const PUBLIC_STATEMENTS = ["cloudgear-public-url", "cloudgear-public-invoke"];
 
   async function addPublic(functionName: string) {
-    await lambda.send(
-      new AddPermissionCommand({
-        FunctionName: functionName,
-        StatementId: PUBLIC_STATEMENTS[0],
-        Action: "lambda:InvokeFunctionUrl",
-        Principal: "*",
-        FunctionUrlAuthType: "NONE",
-      }),
-    );
-    await lambda.send(
-      new AddPermissionCommand({
-        FunctionName: functionName,
-        StatementId: PUBLIC_STATEMENTS[1],
-        Action: "lambda:InvokeFunction",
-        Principal: "*",
-        InvokedViaFunctionUrl: true,
-      }),
-    );
+    await addPermission({
+      FunctionName: functionName,
+      StatementId: PUBLIC_STATEMENTS[0],
+      Action: "lambda:InvokeFunctionUrl",
+      Principal: "*",
+      FunctionUrlAuthType: "NONE",
+    });
+    await addPermission({
+      FunctionName: functionName,
+      StatementId: PUBLIC_STATEMENTS[1],
+      Action: "lambda:InvokeFunction",
+      Principal: "*",
+      InvokedViaFunctionUrl: true,
+    });
   }
 
   async function removePublic(functionName: string) {

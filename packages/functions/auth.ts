@@ -15,8 +15,19 @@ export interface JwtAuthOptions {
 // Asymmetric algorithms only, so a token can never be validated against a shared secret.
 const ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"];
 
+// Only these mean "this token is bad"; anything else (JWKS outage, bad JWKS body) is an infrastructure failure.
+const INVALID_TOKEN = [
+  errors.JWTExpired,
+  errors.JWTClaimValidationFailed,
+  errors.JWTInvalid,
+  errors.JWSInvalid,
+  errors.JWSSignatureVerificationFailed,
+  errors.JOSEAlgNotAllowed,
+  errors.JWKSNoMatchingKey,
+];
+
 // Verifies `Authorization: Bearer <jwt>` against the issuer's JWKS. Invalid tokens yield null (401);
-// an unreachable JWKS endpoint throws (the router answers 503).
+// a JWKS endpoint that is unreachable or returns garbage throws (the router answers 503).
 export function jwtAuth(options: JwtAuthOptions): Authenticator {
   const jwksUri = options.jwksUri ?? `${options.issuer.replace(/\/$/, "")}/.well-known/jwks.json`;
   const keys = createRemoteJWKSet(new URL(jwksUri));
@@ -34,7 +45,7 @@ export function jwtAuth(options: JwtAuthOptions): Authenticator {
       if (typeof payload.sub !== "string" || !payload.sub) return null;
       return { subject: payload.sub, claims: payload as Record<string, unknown> };
     } catch (err) {
-      if (err instanceof errors.JOSEError && !(err instanceof errors.JWKSTimeout)) return null;
+      if (INVALID_TOKEN.some((invalid) => err instanceof invalid)) return null;
       throw err;
     }
   };

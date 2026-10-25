@@ -148,6 +148,12 @@ describe("FunctionRouter route names and urls", () => {
     }
   });
 
+  test("urls() in remote mode without endpoints is an error, not the local server", () => {
+    const router = new FunctionRouter("aws", { mode: "remote", endpointsFile: "/nonexistent/endpoints.json" }).url("GET", "/x", echo);
+    expect(() => router.listen(0)).toThrow(/Remote mode needs deployed endpoints/);
+    expect(() => router.urls()).toThrow(/Remote mode needs deployed endpoints/);
+  });
+
   test("in remote mode urls() are the deployed function URLs plus the route path", () => {
     const router = new FunctionRouter("aws", {
       endpoints: { "GET /objects/{param}": "https://abc.lambda-url.us-east-1.on.aws/" },
@@ -267,8 +273,25 @@ describe("FunctionRouter rate limit", () => {
     expect((await call(router, "a")).status).toBe(200);
   });
 
-  test("defaults the client to the first X-Forwarded-For address", async () => {
-    const router = new FunctionRouter("aws", { mode: "local", rateLimit: { limit: 1, windowMs: 1000 } }).url("GET", "/x", () => ({}));
+  test("needs a key function or an explicit trustProxy", () => {
+    expect(() => new FunctionRouter("aws", { rateLimit: { limit: 1, windowMs: 1000 } })).toThrow(/needs a key\(req\) function, or trustProxy: true/);
+  });
+
+  test("memory stays bounded when clients are flooded with distinct keys", async () => {
+    const router = new FunctionRouter("aws", { mode: "local", rateLimit: { limit: 1, windowMs: 60_000, key: (req) => req.headers.get("x-client") ?? "" } }).url(
+      "GET",
+      "/x",
+      () => ({}),
+    );
+    for (let i = 0; i < 12_000; i++) await router.fetch(new Request("http://app/x", { headers: { "x-client": `c${i}` } }));
+    expect((router as unknown as { windows: Map<string, unknown> }).windows.size).toBe(10_000);
+    // the oldest counters were dropped, the newest are kept
+    expect((await router.fetch(new Request("http://app/x", { headers: { "x-client": "c0" } }))).status).toBe(200);
+    expect((await router.fetch(new Request("http://app/x", { headers: { "x-client": "c11999" } }))).status).toBe(429);
+  });
+
+  test("with trustProxy the client is the first X-Forwarded-For address", async () => {
+    const router = new FunctionRouter("aws", { mode: "local", rateLimit: { limit: 1, windowMs: 1000, trustProxy: true } }).url("GET", "/x", () => ({}));
     const get = (ip: string) => router.fetch(new Request("http://app/x", { headers: { "x-forwarded-for": `${ip}, 10.0.0.1` } }));
     expect((await get("1.1.1.1")).status).toBe(200);
     expect((await get("1.1.1.1")).status).toBe(429);
@@ -317,6 +340,21 @@ describe("FunctionRouter (remote mode)", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ name: "n", q: "x", param: "9" });
+  });
+
+  test("redirects from the function reach the client untouched", async () => {
+    const upstream = Bun.serve({
+      port: 0,
+      fetch: (req) =>
+        new URL(req.url).pathname === "/final"
+          ? new Response("final page")
+          : new Response(null, { status: 302, headers: { location: "/final" } }),
+    });
+    servers.push(upstream);
+    const router = new FunctionRouter("aws", { endpoints: { "POST /go": upstream.url.href }, authenticated: "none" }).url("POST", "/go", echo);
+    const res = await router.fetch(new Request("http://app/go", { method: "POST", body: "{}", headers: { "content-type": "application/json" } }));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/final");
   });
 
   test("502 when a route has no deployed endpoint", async () => {
@@ -431,6 +469,7 @@ describe("FunctionRouter (remote mode)", () => {
 
     test("regionFromUrl reads function URL hosts only", () => {
       expect(regionFromUrl("https://x.lambda-url.us-west-2.on.aws/")).toBe("us-west-2");
+      expect(regionFromUrl("https://x.lambda-url.cn-north-1.on.aws.cn/")).toBe("cn-north-1");
       expect(regionFromUrl("https://fn.example.com/")).toBeUndefined();
     });
   });

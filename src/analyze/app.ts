@@ -34,6 +34,8 @@ export interface AnalyzedFunction {
   exportName: string;
   // Set when the routed function is a method of the exported object `exportName`.
   member?: string;
+  // Name the function has at runtime (`fn.name`); the default route name. Empty when anonymous.
+  declaredName: string;
   inputType?: string;
   routes: { method: string; path: string; name: string }[];
   // `${resource}\0${path}` -> accesses performed on that store
@@ -162,9 +164,12 @@ export function analyzeApp(entryPath: string): AppModel {
       }
       const param = fnNode.getParameters()[0];
       fn = {
-        name:
-          target.member ??
-          (target.exportName === "default" ? path.basename(decl.getSourceFile().getFilePath(), ".ts") : target.exportName),
+        name: target.member
+          ? `${target.exportName}-${target.member}`
+          : target.exportName === "default"
+            ? path.basename(decl.getSourceFile().getFilePath(), ".ts")
+            : target.exportName,
+        declaredName: declaredNameOf(decl),
         file: relative(decl.getSourceFile().getFilePath()),
         exportName: target.exportName,
         member: target.member,
@@ -190,7 +195,7 @@ export function analyzeApp(entryPath: string): AppModel {
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
-    const routeName = readRouteName(call.getArguments()[3], where(call)) ?? fn.name;
+    const routeName = readRouteName(call.getArguments()[3], where(call)) ?? (fn.declaredName || `${method} ${routePath}`);
     const clashing = routeNames.get(routeName);
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
@@ -222,7 +227,7 @@ export function analyzeApp(entryPath: string): AppModel {
     };
     const visit = (node: Node) => {
       if (!Node.isIdentifier(node)) return;
-      for (const decl of resolveSymbol(node.getSymbol())?.getDeclarations() ?? []) {
+      for (const decl of declarationsOf(node)) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
         const store = resourceByDecl.get(decl);
         if (store) {
@@ -244,13 +249,26 @@ export function analyzeApp(entryPath: string): AppModel {
             if (Node.isConstructorDeclaration(member)) trace(member);
             else if (Node.isPropertyDeclaration(member) && member.getInitializer()) trace(member.getInitializerOrThrow());
           }
-        } else if (Node.isVariableDeclaration(decl) && decl.getInitializer()) {
+        } else if (
+          (Node.isVariableDeclaration(decl) || Node.isPropertyAssignment(decl) || Node.isPropertyDeclaration(decl)) &&
+          decl.getInitializer()
+        ) {
           trace(decl.getInitializerOrThrow());
         }
       }
     };
     visit(root);
     root.forEachDescendant((node) => void visit(node));
+  }
+
+  // Declarations an identifier refers to; `{ store }` and `obj.store` lead back to the variable.
+  function declarationsOf(node: Node): Node[] {
+    const parent = node.getParent();
+    const symbol =
+      Node.isShorthandPropertyAssignment(parent) && parent.getNameNode() === node ? parent.getValueSymbol() : node.getSymbol();
+    return (resolveSymbol(symbol)?.getDeclarations() ?? []).flatMap((decl) =>
+      Node.isShorthandPropertyAssignment(decl) ? (resolveSymbol(decl.getValueSymbol())?.getDeclarations() ?? []) : [decl],
+    );
   }
 
   function warnModuleLevelUse() {
@@ -272,7 +290,10 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   }
 
-  function accessesAt(node: Node): { ops?: BlobAccess[]; grants?: BlobAccess[]; widened?: true } {
+  function accessesAt(start: Node): { ops?: BlobAccess[]; grants?: BlobAccess[]; widened?: true } {
+    // `this.store` and `svc.store` name the store as a property; judge the use of that whole expression.
+    const owner = start.getParent();
+    const node = Node.isPropertyAccessExpression(owner) && owner.getNameNode() === start ? owner : start;
     const parent = node.getParent();
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === node) {
       const member = parent.getName();
@@ -304,6 +325,15 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 }
 
+// Property key text, accepting identifiers and string literals ("path": ...); computed keys cannot be analyzed.
+function propName(prop: Node): string | undefined {
+  if (!Node.isPropertyAssignment(prop) && !Node.isShorthandPropertyAssignment(prop) && !Node.isMethodDeclaration(prop)) return undefined;
+  const key = prop.getNameNode();
+  if (Node.isIdentifier(key)) return key.getText();
+  if (Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key)) return key.getLiteralValue();
+  throw new Error(`${relative(prop.getSourceFile().getFilePath())}:${prop.getStartLineNumber()}: computed property keys cannot be analyzed`);
+}
+
 function readAuthenticated(options: Node | undefined, at: string): Authentication {
   if (!options) return "iam";
   if (!Node.isObjectLiteralExpression(options)) {
@@ -312,7 +342,7 @@ function readAuthenticated(options: Node | undefined, at: string): Authenticatio
   let authenticated: Authentication = "iam";
   for (const prop of options.getProperties()) {
     if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in FunctionRouter options cannot be analyzed`);
-    const name = Node.isShorthandPropertyAssignment(prop) || Node.isPropertyAssignment(prop) ? prop.getName() : undefined;
+    const name = propName(prop);
     if (name !== "authenticated") continue;
     const value = Node.isPropertyAssignment(prop) ? stringLiteral(prop.getInitializer(), `${at}: authenticated`) : undefined;
     if (value !== "iam" && value !== "none") throw new Error(`${at}: authenticated must be the literal "iam" or "none"`);
@@ -325,7 +355,7 @@ function hasOption(options: Node | undefined, name: string): boolean {
   return (
     !!options &&
     Node.isObjectLiteralExpression(options) &&
-    options.getProperties().some((prop) => (Node.isPropertyAssignment(prop) || Node.isShorthandPropertyAssignment(prop) || Node.isMethodDeclaration(prop)) && prop.getName() === name)
+    options.getProperties().some((prop) => propName(prop) === name)
   );
 }
 
@@ -334,12 +364,12 @@ function readRouteName(options: Node | undefined, at: string): string | undefine
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: route options must be an object literal`);
   for (const prop of options.getProperties()) {
     if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in route options cannot be analyzed`);
-    if (Node.isPropertyAssignment(prop) && prop.getName() === "name") {
+    if (Node.isPropertyAssignment(prop) && propName(prop) === "name") {
       const name = stringLiteral(prop.getInitializer(), `${at}: route name`);
       if (!name) throw new Error(`${at}: route name must not be empty`);
       return name;
     }
-    if (Node.isShorthandPropertyAssignment(prop) && prop.getName() === "name") {
+    if (Node.isShorthandPropertyAssignment(prop) && propName(prop) === "name") {
       throw new Error(`${at}: route name must be a string literal`);
     }
   }
@@ -416,10 +446,10 @@ function readStorePath(options: Node | undefined, at: string): string {
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: BlobStore options must be an object literal`);
   for (const prop of options.getProperties()) {
     if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in BlobStore options cannot be analyzed`);
-    if (Node.isShorthandPropertyAssignment(prop) && prop.getName() === "path") {
+    if (Node.isShorthandPropertyAssignment(prop) && propName(prop) === "path") {
       throw new Error(`${at}: BlobStore path must be a string literal`);
     }
-    if (Node.isPropertyAssignment(prop) && prop.getName() === "path") {
+    if (Node.isPropertyAssignment(prop) && propName(prop) === "path") {
       try {
         return normalizeBlobPath(stringLiteral(prop.getInitializer(), `${at}: BlobStore path`));
       } catch (err) {
@@ -431,6 +461,13 @@ function readStorePath(options: Node | undefined, at: string): string {
 }
 
 // A routed function is bundled through a named export, or as a method of an exported object.
+function declaredNameOf(decl: Node): string {
+  if (Node.isFunctionDeclaration(decl)) return decl.getName() ?? "";
+  if (Node.isVariableDeclaration(decl)) return decl.getName();
+  if (Node.isMethodDeclaration(decl) || Node.isPropertyAssignment(decl)) return propName(decl) ?? "";
+  return "";
+}
+
 function exportTargetOf(decl: Node): { exportName: string; member?: string } | undefined {
   const direct = exportNameOf(decl);
   if (direct) return { exportName: direct };

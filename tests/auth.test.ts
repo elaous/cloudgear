@@ -69,6 +69,23 @@ describe("jwtAuth", () => {
     expect(await jwtAuth({ issuer, audience: "app" })(request(token))).toBeNull();
   });
 
+  test("a JWKS endpoint that fails or returns garbage throws, so the router answers 503 not 401", async () => {
+    const broken = Bun.serve({
+      port: 0,
+      fetch: (req) =>
+        new URL(req.url).pathname === "/error" ? new Response("boom", { status: 500 }) : new Response("this is not json", { status: 200 }),
+    });
+    try {
+      const token = await sign({});
+      for (const path of ["/error", "/garbage"]) {
+        const authenticate = jwtAuth({ issuer, audience: "app", jwksUri: new URL(path, broken.url).href });
+        await expect(authenticate(request(token))).rejects.toThrow();
+      }
+    } finally {
+      broken.stop(true);
+    }
+  });
+
   test("an unreachable JWKS endpoint throws instead of denying", async () => {
     const authenticate = jwtAuth({ issuer, audience: "app", jwksUri: "http://127.0.0.1:1/jwks.json" });
     await expect(authenticate(request(await sign({})))).rejects.toThrow();

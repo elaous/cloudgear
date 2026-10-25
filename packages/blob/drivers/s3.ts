@@ -20,7 +20,7 @@ export class S3BlobDriver implements BlobDriver {
       return res.Body ? await res.Body.transformToByteArray() : new Uint8Array();
     } catch (err) {
       if (isNotFound(err)) return null;
-      throw err;
+      throw withAccessHint(err);
     }
   }
 
@@ -51,9 +51,18 @@ export class S3BlobDriver implements BlobDriver {
       return true;
     } catch (err) {
       if (isNotFound(err)) return false;
-      throw err;
+      throw withAccessHint(err);
     }
   }
+}
+
+// S3 answers AccessDenied for a missing key when the caller cannot list the whole bucket.
+function withAccessHint(err: unknown): unknown {
+  if ((err as { name?: string })?.name !== "AccessDenied") return err;
+  return new Error(
+    `${(err as Error).message} (AccessDenied; S3 also returns this for a missing key when the caller cannot list the whole bucket, as with a prefix-scoped store)`,
+    { cause: err },
+  );
 }
 
 export const createS3Driver = (bucket: string): BlobDriver => new S3BlobDriver(bucket);

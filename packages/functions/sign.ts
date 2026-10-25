@@ -6,7 +6,9 @@ export interface AwsCredentials {
 
 export type AwsCredentialsProvider = () => Promise<AwsCredentials>;
 
-const FUNCTION_URL_HOST = /\.lambda-url\.([a-z0-9-]+)\.on\.aws$/;
+const FUNCTION_URL_HOST = /\.lambda-url\.([a-z0-9-]+)\.on\.aws(?:\.cn)?$/;
+
+let defaultCredentials: AwsCredentialsProvider | undefined;
 
 export function regionFromUrl(url: string): string | undefined {
   return FUNCTION_URL_HOST.exec(new URL(url).hostname)?.[1];
@@ -27,8 +29,9 @@ export async function signFunctionUrlRequest(
     import("@smithy/protocol-http"),
     import("@aws-crypto/sha256-js"),
   ]);
-  const credentials =
-    options.credentials ?? (await import("@aws-sdk/credential-provider-node")).defaultProvider();
+  // Built once: the default chain caches resolved credentials until they expire.
+  defaultCredentials ??= options.credentials ? undefined : (await import("@aws-sdk/credential-provider-node")).defaultProvider();
+  const credentials = options.credentials ?? defaultCredentials!;
 
   const target = new URL(url);
   const signer = new SignatureV4({ credentials, region, service: "lambda", sha256: Sha256 });

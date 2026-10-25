@@ -21,7 +21,17 @@ export interface CloudgearResponse<T = unknown> {
 }
 
 // O may include CloudgearResponse values to set status or headers.
-export type Handler<I = any, O = unknown> = (input: I) => O | Promise<O>;
+export type Handler<I = any, O = unknown> = (input: I, context: RequestContext) => O | Promise<O>;
+
+// Who is calling, as established by the router's `authenticate` hook.
+export interface Principal {
+  subject: string;
+  claims: Record<string, unknown>;
+}
+
+export interface RequestContext {
+  auth?: Principal;
+}
 
 export interface RouteSpec {
   method: Method;
@@ -115,9 +125,9 @@ export function parseBody(text: string, contentType: string | null): unknown {
   return text;
 }
 
-export async function invoke(fn: Handler, input: unknown): Promise<HttpResult> {
+export async function invoke(fn: Handler, input: unknown, context: RequestContext = {}): Promise<HttpResult> {
   try {
-    return toHttpResult(await fn(input));
+    return toHttpResult(await fn(input, context));
   } catch (err) {
     console.error(err);
     return toHttpResult(response({ error: "Internal Server Error" }, { status: 500 }));

@@ -130,6 +130,11 @@ export function analyzeApp(entryPath: string): AppModel {
   if (authenticated === "none") {
     warnings.push(`${where(router)}: authenticated is "none"; deployed functions can be invoked by anyone with their URL`);
   }
+  if (authenticated === "none" && hasOption(router.getArguments()[1], "authenticate")) {
+    warnings.push(
+      `${where(router)}: authenticate is set but authenticated is "none"; deployed functions will not receive the caller's identity`,
+    );
+  }
   const routeNames = new Map<string, string>();
 
   const functions = new Map<Node, AnalyzedFunction>();
@@ -314,6 +319,14 @@ function readAuthenticated(options: Node | undefined, at: string): Authenticatio
     authenticated = value;
   }
   return authenticated;
+}
+
+function hasOption(options: Node | undefined, name: string): boolean {
+  return (
+    !!options &&
+    Node.isObjectLiteralExpression(options) &&
+    options.getProperties().some((prop) => (Node.isPropertyAssignment(prop) || Node.isShorthandPropertyAssignment(prop) || Node.isMethodDeclaration(prop)) && prop.getName() === name)
+  );
 }
 
 function readRouteName(options: Node | undefined, at: string): string | undefined {

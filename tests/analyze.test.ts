@@ -87,6 +87,14 @@ describe("analyzeApp", () => {
     expect(model.warnings[0]).toMatch(/passed around as a value; granting every operation on it \(use grant/);
   });
 
+  test("warns when authenticate cannot reach functions because URLs are public", () => {
+    const model = analyzeApp(fixture("none-with-authenticate.ts"));
+    expect(model.warnings).toEqual([
+      expect.stringMatching(/authenticated is "none"/),
+      expect.stringMatching(/authenticate is set but authenticated is "none"; deployed functions will not receive the caller's identity/),
+    ]);
+  });
+
   test("follows .url chains through intermediate variables", () => {
     const model = analyzeApp(fixture("chained-variables.ts"));
     expect(model.functions.map((f) => f.routes[0]!.path)).toEqual(["/a", "/b", "/c"]);

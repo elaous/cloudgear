@@ -6,6 +6,7 @@ import {
   matchPath,
   parseBody,
   type Handler,
+  type RequestContext,
   type HttpResult,
   type RouteSpec,
 } from "../http";
@@ -26,7 +27,12 @@ export interface FunctionUrlResult {
   body: string;
 }
 
-export function createHandler(fn: Handler, routes: RouteSpec[]) {
+export interface HandlerOptions {
+  // Honour the router's `context` (the caller's identity). Safe only when callers are IAM-authenticated.
+  trustContext?: boolean;
+}
+
+export function createHandler(fn: Handler, routes: RouteSpec[], options: HandlerOptions = {}) {
   const compiled = routes.map((route) => ({ ...route, matcher: compilePath(route.path) }));
 
   return async (event: FunctionUrlEvent): Promise<FunctionUrlResult> => {
@@ -38,17 +44,22 @@ export function createHandler(fn: Handler, routes: RouteSpec[]) {
       : "";
     const contentType = headers["content-type"] ?? null;
 
-    let input: unknown;
+    let resolved: Resolved | undefined;
     try {
-      input = resolveInput(compiled, event, text, contentType);
+      resolved = resolveInput(compiled, event, text, contentType, options.trustContext ?? false);
     } catch (err) {
       return toLambda({ status: 400, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: (err as Error).message }) });
     }
-    if (input === undefined) {
+    if (!resolved) {
       return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
     }
-    return toLambda(await invoke(fn, input));
+    return toLambda(await invoke(fn, resolved.input, resolved.context));
   };
+}
+
+interface Resolved {
+  input: unknown;
+  context: RequestContext;
 }
 
 function resolveInput(
@@ -56,15 +67,23 @@ function resolveInput(
   event: FunctionUrlEvent,
   text: string,
   contentType: string | null,
-): unknown {
-  if (contentType?.startsWith(INVOKE_CONTENT_TYPE)) return text ? JSON.parse(text) : {};
+  trustContext: boolean,
+): Resolved | undefined {
+  if (contentType?.startsWith(INVOKE_CONTENT_TYPE)) {
+    const payload = text ? JSON.parse(text) : {};
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload) || typeof payload.input !== "object" || payload.input === null) {
+      throw new Error("Malformed invoke payload: expected { input, context }");
+    }
+    const context = trustContext && typeof payload.context === "object" && payload.context !== null ? payload.context : {};
+    return { input: payload.input, context };
+  }
 
   const method = event.requestContext.http.method.toUpperCase();
   for (const route of routes) {
     if (route.method !== method) continue;
     const params = matchPath(route.matcher, event.rawPath);
     if (!params) continue;
-    return buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params);
+    return { input: buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params), context: {} };
   }
   return undefined;
 }

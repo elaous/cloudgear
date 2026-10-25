@@ -168,6 +168,76 @@ describe("FunctionRouter route names and urls", () => {
   });
 });
 
+describe("FunctionRouter authenticate", () => {
+  const whoami = (_input: unknown, context: { auth?: { subject: string } }) => ({ subject: context.auth?.subject ?? null });
+  const bearer = (req: Request) => {
+    const token = req.headers.get("authorization")?.replace(/^Bearer /, "");
+    return token === "good" ? { subject: "user-1", claims: { role: "admin" } } : null;
+  };
+  const get = (router: FunctionRouter, path: string, token?: string) =>
+    router.fetch(new Request(`http://app${path}`, { headers: token ? { authorization: `Bearer ${token}` } : {} }));
+
+  test("rejects unauthenticated calls with 401 and hands the principal to the function", async () => {
+    const router = new FunctionRouter("aws", { mode: "local", authenticate: bearer }).url("GET", "/me", whoami);
+    const denied = await get(router, "/me");
+    expect(denied.status).toBe(401);
+    expect(denied.headers.get("www-authenticate")).toBe("Bearer");
+    expect((await get(router, "/me", "bad")).status).toBe(401);
+
+    const ok = await get(router, "/me", "good");
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ subject: "user-1" });
+  });
+
+  test("public routes skip the hook", async () => {
+    const router = new FunctionRouter("aws", { mode: "local", authenticate: bearer }).url("GET", "/health", () => ({ ok: true }), { public: true });
+    expect((await get(router, "/health")).status).toBe(200);
+  });
+
+  test("unknown paths are still 404 and wrong methods 405, not 401", async () => {
+    const router = new FunctionRouter("aws", { mode: "local", authenticate: bearer }).url("GET", "/me", whoami);
+    expect((await get(router, "/nope")).status).toBe(404);
+    expect((await router.fetch(new Request("http://app/me", { method: "POST" }))).status).toBe(405);
+  });
+
+  test("an authenticator that throws gives 503, not 401", async () => {
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const router = new FunctionRouter("aws", {
+        mode: "local",
+        authenticate: () => {
+          throw new Error("jwks down");
+        },
+      }).url("GET", "/me", whoami);
+      const res = await get(router, "/me", "good");
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "Authentication unavailable" });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  test("remote calls carry the principal in the signed payload", async () => {
+    const original = globalThis.fetch;
+    const sent: { input: unknown; context: unknown }[] = [];
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response("{}");
+    }) as typeof fetch;
+    try {
+      const router = new FunctionRouter("aws", {
+        endpoints: { "GET /me": "https://a.lambda-url.us-east-1.on.aws/" },
+        authenticate: bearer,
+        credentials: async () => ({ accessKeyId: "AKID", secretAccessKey: "secret" }),
+      }).url("GET", "/me", whoami);
+      await get(router, "/me", "good");
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(sent).toEqual([{ input: {}, context: { auth: { subject: "user-1", claims: { role: "admin" } } } }]);
+  });
+});
+
 describe("FunctionRouter rate limit", () => {
   const limited = (windowMs = 1000) =>
     new FunctionRouter("aws", { mode: "local", rateLimit: { limit: 2, windowMs, key: (req) => req.headers.get("x-client") ?? "anon" } }).url(
@@ -293,7 +363,7 @@ describe("FunctionRouter (remote mode)", () => {
       );
       expect(headers.get("x-amz-date")).toMatch(/^\d{8}T\d{6}Z$/);
       expect(headers.get("content-type")).toBe(INVOKE_CONTENT_TYPE);
-      expect(JSON.parse(seen[0]!.body)).toEqual({ a: "1" });
+      expect(JSON.parse(seen[0]!.body)).toEqual({ input: { a: "1" }, context: {} });
     });
 
     test("the signature matches an independent computation over the same request", async () => {
@@ -461,7 +531,7 @@ describe("aws createHandler", () => {
 
   test("uses the router's invoke body as the input verbatim", async () => {
     const res = await handler(
-      event({ headers: { "Content-Type": INVOKE_CONTENT_TYPE }, body: JSON.stringify({ id: "1", extra: true }) }),
+      event({ headers: { "Content-Type": INVOKE_CONTENT_TYPE }, body: JSON.stringify({ input: { id: "1", extra: true } }) }),
     );
     expect(JSON.parse(res.body)).toEqual({ id: "1", extra: true });
   });
@@ -474,11 +544,29 @@ describe("aws createHandler", () => {
     expect(JSON.parse(res.body)).toEqual({ verbose: "1", id: "5" });
   });
 
+  test("rejects invoke payloads that are not { input }", async () => {
+    for (const body of ["[]", "null", '{"id":"1"}', '{"input":"x"}']) {
+      const res = await handler(event({ headers: { "content-type": INVOKE_CONTENT_TYPE }, body }));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toMatch(/Malformed invoke payload/);
+    }
+  });
+
+  test("passes the router's context only when it is trusted", async () => {
+    const whoami = (_input: unknown, context: { auth?: { subject: string } }) => ({ subject: context.auth?.subject ?? null });
+    const body = JSON.stringify({ input: {}, context: { auth: { subject: "user-1", claims: {} } } });
+    const call = (trust: boolean) =>
+      createHandler(whoami, [], { trustContext: trust })(event({ headers: { "content-type": INVOKE_CONTENT_TYPE }, body }));
+
+    expect(JSON.parse((await call(true)).body)).toEqual({ subject: "user-1" });
+    expect(JSON.parse((await call(false)).body)).toEqual({ subject: null });
+  });
+
   test("decodes base64 bodies", async () => {
     const res = await handler(
       event({
         headers: { "content-type": INVOKE_CONTENT_TYPE },
-        body: Buffer.from(JSON.stringify({ id: "b64" })).toString("base64"),
+        body: Buffer.from(JSON.stringify({ input: { id: "b64" } })).toString("base64"),
         isBase64Encoded: true,
       }),
     );

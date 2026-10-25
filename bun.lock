@@ -17,6 +17,7 @@
         "@smithy/protocol-http": "^5.6.2",
         "@smithy/signature-v4": "^5.7.4",
         "@types/bun": "latest",
+        "jose": "^6.2.13",
         "typescript": "^5.7.0",
       },
     },
@@ -38,6 +39,7 @@
         "@aws-sdk/credential-provider-node": "^3.972.88",
         "@smithy/protocol-http": "^5.6.2",
         "@smithy/signature-v4": "^5.7.4",
+        "jose": "^6.2.13",
       },
     },
   },
@@ -127,6 +129,8 @@
     "code-block-writer": ["code-block-writer@13.0.3", "", {}, "sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg=="],
 
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
+
+    "jose": ["jose@6.2.13", "", {}, "sha512-7TIg10ZE1x82YediN+lcrPNvGMKge9yFHQD+Qho/b8y2adfugU3AsvvHfxV0fzyFllT6l9xCjf4RWY9g/Z9PJQ=="],
 
     "minimatch": ["minimatch@9.0.9", "", { "dependencies": { "brace-expansion": "^2.0.2" } }, "sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg=="],
 

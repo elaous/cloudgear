@@ -11,10 +11,12 @@ import {
   parseBody,
   routeKey,
   type Handler,
+  type RequestContext,
   type Method,
   type PathParams,
   type Provider,
 } from "./http";
+import type { Authenticator } from "./auth";
 import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
 
 export type Authentication = "iam" | "none";
@@ -23,6 +25,8 @@ export type EndpointAuth = Authentication;
 export interface RouteOptions {
   // Nickname for this route in listen()/urls() results; defaults to the function's name.
   name?: string;
+  // Skip the router's `authenticate` hook for this route (for example a health check).
+  public?: boolean;
 }
 
 export interface EndpointsFile {
@@ -48,6 +52,9 @@ export interface FunctionRouterOptions {
   authenticated?: Authentication;
   credentials?: AwsCredentialsProvider;
   region?: string;
+  // Establishes who is calling. Return null for 401; every route requires it unless `public`.
+  // The result reaches functions as `context.auth`, and only when `authenticated` is "iam".
+  authenticate?: Authenticator;
   // Per-process counters: instances of a serverless app do not share them.
   rateLimit?: RateLimit;
 }
@@ -57,6 +64,7 @@ interface CompiledRoute {
   path: string;
   key: string;
   name: string;
+  public: boolean;
   matcher: ReturnType<typeof compilePath>;
   fn: Handler;
 }
@@ -94,7 +102,7 @@ export class FunctionRouter {
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
-    this.routes.push({ ...route, key, name, matcher: compilePath(path), fn: fn as Handler });
+    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn: fn as Handler });
     return this;
   }
 
@@ -119,13 +127,27 @@ export class FunctionRouter {
       if (!params) continue;
       pathMatched = true;
       if (route.method !== req.method) continue;
+      let context: RequestContext = {};
+      if (this.options.authenticate && !route.public) {
+        let principal: Awaited<ReturnType<Authenticator>>;
+        try {
+          principal = await this.options.authenticate(req);
+        } catch (err) {
+          console.error(err);
+          return Response.json({ error: "Authentication unavailable" }, { status: 503 });
+        }
+        if (!principal) {
+          return Response.json({ error: "Unauthorized" }, { status: 401, headers: { "www-authenticate": "Bearer" } });
+        }
+        context = { auth: principal };
+      }
       let input: Record<string, unknown>;
       try {
         input = buildInput(parseBody(await req.text(), req.headers.get("content-type")), url.searchParams, params);
       } catch {
         return Response.json({ error: "Malformed request body" }, { status: 400 });
       }
-      return this.dispatch(route, input);
+      return this.dispatch(route, input, context);
     }
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
@@ -176,9 +198,9 @@ export class FunctionRouter {
     return Response.json({ error: "Too many requests" }, { status: 429, headers: { "retry-after": String(retryAfter) } });
   }
 
-  private async dispatch(route: CompiledRoute, input: Record<string, unknown>): Promise<Response> {
+  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext): Promise<Response> {
     if (this.mode === "local") {
-      const result = await invoke(route.fn, input);
+      const result = await invoke(route.fn, input, context);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
     }
     const endpoints = this.loadEndpoints();
@@ -190,6 +212,7 @@ export class FunctionRouter {
     try {
       upstream = await request(url, input, {
         route: route.key,
+        context,
         sign: this.authMode(endpoints) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
       });
     } catch (err) {
@@ -220,11 +243,12 @@ export async function request(
   input: unknown,
   init: {
     route?: string;
+    context?: RequestContext;
     headers?: Record<string, string>;
     sign?: { credentials?: AwsCredentialsProvider; region?: string };
   } = {},
 ): Promise<Response> {
-  const body = JSON.stringify(input);
+  const body = JSON.stringify({ input, context: init.context ?? {} });
   const headers: Record<string, string> = {
     "content-type": INVOKE_CONTENT_TYPE,
     ...(init.route ? { [ROUTE_HEADER]: init.route } : {}),

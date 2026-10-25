@@ -136,6 +136,43 @@ Where the router runs:
   CloudFront is possible later with an origin access control for Lambda URLs;
   that comes with the CDN support, not with this release.
 
+#### End-user authentication
+
+IAM authenticates the router to the functions; to know which *user* is
+calling the router, give it an `authenticate` hook. Every route requires it
+unless the route is `{ public: true }`:
+
+```ts
+import { FunctionRouter, jwtAuth } from "@cloudgear/functions";
+
+const router = new FunctionRouter("aws", {
+  authenticate: jwtAuth({
+    issuer: "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_abc123", // or Clerk, Auth0, ...
+    audience: "my-app-client-id",
+  }),
+})
+  .url("GET", "/me", functions.me)
+  .url("GET", "/health", functions.health, { public: true });
+
+export function me(input: unknown, context: RequestContext) {
+  return { user: context.auth?.subject };
+}
+```
+
+`jwtAuth` verifies `Authorization: Bearer <jwt>` against the issuer's JWKS
+(`<issuer>/.well-known/jwks.json`, or `jwksUri`), accepts only asymmetric
+algorithms, and checks issuer, expiry and, when given, audience. Always set
+`audience`: without it any token from the issuer is accepted. Missing or
+invalid tokens get `401`; an unreachable JWKS endpoint gets `503`. Write your
+own with `authenticate: (req) => Principal | null`, where a `Principal` is
+`{ subject, claims }`.
+
+Functions receive the result as the second argument, `context.auth`. The
+router sends it inside the SigV4-signed call, and a function trusts it only
+when `authenticated` is `"iam"`: with public URLs anyone could forge it, so
+the adapter ignores it and `generate` warns if `authenticate` is set.
+Everything you name with `--invoker` is trusted to assert identities.
+
 Limits: `--reserved-concurrency <n>` caps each function's concurrent
 executions (applied to every function; `0`/omitted leaves it unreserved).
 Use it with care on new AWS accounts, whose total concurrency limit can be
@@ -168,6 +205,16 @@ interface BlobDriver {
   exists(key): Promise<boolean>;
 }
 ```
+
+`new BlobStore(provider, uri, { path })` confines a store to a key prefix
+(`path: "/img-cache/"`): every key is stored under `img-cache/`, `list()`
+strips it again, and `cloudgear generate` scopes the function's IAM policy to
+that prefix (object access to `bucket/img-cache/*`, listing with an
+`s3:prefix` condition). Two stores may share a bucket with different paths.
+`path` MUST be a string literal. On AWS, a missing key in a prefix-scoped
+store may surface as `AccessDenied` instead of `null`, because S3 only
+answers "not found" to callers that can list the whole bucket; this has not
+been checked against a real bucket.
 
 Drivers live in `packages/blob/drivers/` and load on first use, so an app
 only imports the SDK of the provider it uses. `aws` (`drivers/s3.ts`, needs
@@ -206,6 +253,21 @@ passed around as a value (an argument, an alias) gets every operation
 granted, with a warning. A store used at module level, outside any
 function, gets no inferred permission and a warning.
 
+For access the analyzer cannot trace, declare it inside the function:
+
+```ts
+import { BlobStore, grant } from "@cloudgear/blob";
+
+export async function viaRepo() {
+  grant(store, "read"); // "read" | "write" | "delete" | "list"; a no-op at runtime
+  return repo.read(); // store reaches repo through a constructor
+}
+```
+
+When a function calls `grant(store, ...)`, that store is no longer widened
+to every operation for being passed around; the granted accesses (plus any
+direct calls) are used instead.
+
 Requirements the analyzer enforces:
 
 - Exactly one `FunctionRouter` per app; provider, method and path MUST be
@@ -213,9 +275,13 @@ Requirements the analyzer enforces:
   chain from it (variables holding a chain result are followed); passing
   the router to a function, or exporting it, is rejected.
 - A routed function MUST be a named, exported function (declaration or
-  `const` arrow) in your project, so it can be bundled on its own.
-- `new BlobStore(...)` MUST be assigned to a variable, with literal arguments,
-  and use the router's provider.
+  `const` arrow) in your project, or a method of an exported object
+  (`export const local = { getObjects(input) { ... } }`), so it can be
+  bundled on its own. Methods are bundled bound to their object, so `this`
+  works. The routed function may share a module with the router: inside
+  Lambda `listen()` does nothing.
+- `new BlobStore(...)` MUST be assigned to a variable, with literal arguments
+  (including the options' `path`), and use the router's provider.
 
 Directives go in a comment on the declaration line or the line above it:
 
@@ -303,6 +369,8 @@ Where each moving part lives, since several are called across packages:
 | `response`, input assembly (`buildInput`, `compilePath`) | `packages/functions/http.ts` | router and Lambda adapter |
 | `createHandler` | `packages/functions/drivers/aws.ts` | bundle entry generated in `src/build/bundle.ts` |
 | `signFunctionUrlRequest` | `packages/functions/sign.ts` | `FunctionRouter` remote calls |
+| `jwtAuth`, `Authenticator` | `packages/functions/auth.ts` | apps (`authenticate` option) |
+| `grant`, `normalizeBlobPath` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
 | `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |

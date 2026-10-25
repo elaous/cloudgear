@@ -69,6 +69,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       member: fn.member,
       routes: fn.routes,
       provider: model.provider,
+      authenticated: model.authenticated,
       outDir: options.buildDir,
     });
     const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);

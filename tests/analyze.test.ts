@@ -211,6 +211,13 @@ describe("analyzeApp", () => {
     });
   });
 
+  test("regions come from the router's and each store's options", () => {
+    const model = analyzeApp(fixture("regions.ts"));
+    expect(model.region).toBe("us-east-2");
+    expect(Object.fromEntries(model.resources.map((r) => [r.name, r.region]))).toEqual({ "eu-data": "eu-west-1", "home-data": undefined });
+    expect(analyzeApp(path.join(exampleDir, "main.ts")).region).toBeUndefined();
+  });
+
   test("a named function expression's own name is the default route name", () => {
     const model = analyzeApp(fixture("named-function-expression.ts"));
     expect(model.functions[0]!.routes[0]!.name).toBe("inner");
@@ -291,6 +298,9 @@ describe("analyzeApp", () => {
     ["store-path-invalid.ts", /Invalid blob path "a\/\.\.\/b"/],
     ["store-path-variable.ts", /BlobStore path must be a string literal/],
     ["computed-key.ts", /computed property keys cannot be analyzed/],
+    ["bad-region.ts", /"Europe" is not an AWS region such as "eu-west-1"/],
+    ["region-variable.ts", /region must be a string literal/],
+    ["region-conflict.ts", /different provider, region or directives/],
     ["router-escapes.ts", /router is used in a way cloudgear cannot trace/],
     ["default-export.ts", /export the router with a name/],
     ["no-routes.ts", /FunctionRouter has no \.url\(\.\.\.\) routes/],
@@ -403,6 +413,16 @@ describe("generate", () => {
     });
     expect(proc.stderr.toString()).toBe("");
     expect(JSON.parse(JSON.parse(proc.stdout.toString()).body)).toEqual({ key: "obj/abc", body: null });
+  });
+
+  test("writes regions into the config and they round-trip", async () => {
+    const configPath = path.join(dir, "regions.prototxt");
+    const { config } = await generate({ entry: fixture("regions.ts"), configPath, buildDir: path.join(dir, "regions-build"), project: "regions" });
+    expect(config.region).toBe("us-east-2");
+    expect(config.resource.map((r) => [r.name, r.region])).toEqual([["eu-data", "eu-west-1"], ["home-data", undefined]]);
+    const text = fs.readFileSync(configPath, "utf8");
+    expect(text).toContain('region: "us-east-2"');
+    expect(decodeConfig(text)).toEqual(config);
   });
 
   test("rejects stores that map to the same env var", async () => {

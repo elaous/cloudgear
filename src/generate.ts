@@ -104,10 +104,12 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       physical_name: r.name,
       dry: r.dry,
       source: `${fromConfig(r.file)}:${r.line}`,
+      region: r.region,
     })),
     function: functions,
     invoker: invokers,
     authenticated: model.authenticated,
+    region: model.region,
     dns: model.dns,
     certificate: model.certificate,
     cdn: model.cdn && {

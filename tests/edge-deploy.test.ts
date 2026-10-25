@@ -168,6 +168,15 @@ describe("applying the edge", () => {
     ]);
   });
 
+  test("the S3 origin uses the bucket's own region", async () => {
+    const config = cdnConfig({
+      resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1", region: "ap-southeast-2" }, ...baseConfig().resource.slice(1)],
+    });
+    const aws = await applyAll(config, emptyState());
+    const [site] = aws.of("CreateDistributionCommand")[0].DistributionConfig.Origins.Items;
+    expect(site.DomainName).toBe("data.s3.ap-southeast-2.amazonaws.com");
+  });
+
   test("only this distribution may read the site and call the function", async () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const policy = JSON.parse(aws.of("PutBucketPolicyCommand")[0].Policy);
@@ -629,7 +638,7 @@ describe("CloudFront configuration", () => {
   });
 
   test("a bucket-only distribution has no function origins or behaviors", () => {
-    const spec: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", path: "", behaviors: [] };
+    const spec: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", behaviors: [] };
     const config = buildDistributionConfig(spec, {
       certificateArn: "arn",
       region: "us-east-1",

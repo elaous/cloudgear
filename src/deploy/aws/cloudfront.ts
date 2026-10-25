@@ -24,7 +24,7 @@ import type { SendClient } from "./index";
 
 export interface CloudFrontDeps {
   cloudfront: SendClient;
-  s3: SendClient;
+  s3: (region?: string) => SendClient;
   lambda: SendClient;
   dns: (provider: string, zone: string) => Promise<DnsDriver>;
   region: string;
@@ -94,7 +94,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 
   async function putBucketStatements(spec: CdnComparable, distributionArn: string) {
-    const policy = await readBucketPolicy(spec.bucket);
+    const policy = await readBucketPolicy(spec.bucket, spec.bucket_region);
     const id = tag(spec.domain);
     const objectArn = `arn:aws:s3:::${spec.bucket}/${spec.path}*`;
     const condition = { StringEquals: { "AWS:SourceArn": distributionArn } };
@@ -108,21 +108,21 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       Resource: objectArn,
       Condition: condition,
     });
-    await deps.s3.send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: statements }) }));
+    await deps.s3(spec.bucket_region).send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: statements }) }));
   }
 
   async function removeBucketStatements(spec: CdnComparable) {
-    const policy = await readBucketPolicy(spec.bucket);
+    const policy = await readBucketPolicy(spec.bucket, spec.bucket_region);
     const id = `cloudgear-cdn-${tag(spec.domain)}`;
     const kept = policy.Statement.filter((s: { Sid?: string }) => !s.Sid?.startsWith(id));
     if (kept.length === policy.Statement.length) return;
-    if (kept.length === 0) await deps.s3.send(new DeleteBucketPolicyCommand({ Bucket: spec.bucket }));
-    else await deps.s3.send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: kept }) }));
+    if (kept.length === 0) await deps.s3(spec.bucket_region).send(new DeleteBucketPolicyCommand({ Bucket: spec.bucket }));
+    else await deps.s3(spec.bucket_region).send(new PutBucketPolicyCommand({ Bucket: spec.bucket, Policy: JSON.stringify({ ...policy, Statement: kept }) }));
   }
 
-  async function readBucketPolicy(bucket: string): Promise<{ Version: string; Statement: any[]; [key: string]: unknown }> {
+  async function readBucketPolicy(bucket: string, region?: string): Promise<{ Version: string; Statement: any[]; [key: string]: unknown }> {
     try {
-      const res = await deps.s3.send(new GetBucketPolicyCommand({ Bucket: bucket }));
+      const res = await deps.s3(region).send(new GetBucketPolicyCommand({ Bucket: bucket }));
       const policy = JSON.parse(res.Policy);
       return { ...policy, Statement: Array.isArray(policy.Statement) ? policy.Statement : [policy.Statement] };
     } catch (err) {
@@ -195,7 +195,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     if (origins.size) outputs.oac_lambda = await ensureOac(`cloudgear-${spec.domain}-lambda`, "lambda", outputs.oac_lambda);
 
     const config = (reference: string, enabled = true) =>
-      buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: deps.region, oacS3: outputs.oac_s3!, oacLambda: outputs.oac_lambda, origins, reference, enabled });
+      buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: spec.bucket_region || deps.region, oacS3: outputs.oac_s3!, oacLambda: outputs.oac_lambda, origins, reference, enabled });
 
     if (!outputs.id) {
       deps.log(`creating the distribution for ${spec.domain}`);

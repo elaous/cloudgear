@@ -58,7 +58,14 @@ const LAMBDA_TRUST_POLICY = JSON.stringify({
 });
 
 export function awsDrivers(options: AwsDriverOptions): Drivers {
-  const s3 = options.clients?.s3 ?? new S3Client({ region: options.region });
+  // Buckets may live in other regions than the functions; one client per region.
+  const s3Clients = new Map<string, SendClient>();
+  const s3For = (region?: string): SendClient => {
+    const wanted = region || options.region;
+    if (options.clients?.s3) return options.clients.s3;
+    if (!s3Clients.has(wanted)) s3Clients.set(wanted, new S3Client({ region: wanted }));
+    return s3Clients.get(wanted)!;
+  };
   const lambda = options.clients?.lambda ?? new LambdaClient({ region: options.region });
   const iam = options.clients?.iam ?? new IAMClient({ region: options.region });
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
@@ -183,26 +190,33 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
 
   return {
     "@aws.Certificate": certificateDriver({ acm, dns: requireDns, sleep, log }),
-    "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3, lambda, dns: requireDns, region: options.region, sleep, log }),
+    "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
     "@aws.S3": {
       async create(entry) {
-        await s3.send(
+        const region = (entry.spec.region as string | undefined) || options.region;
+        await s3For(region).send(
           new CreateBucketCommand({
             Bucket: entry.physical_name,
             CreateBucketConfiguration:
-              options.region === "us-east-1"
-                ? undefined
-                : { LocationConstraint: options.region as BucketLocationConstraint },
+              region === "us-east-1" ? undefined : { LocationConstraint: region as BucketLocationConstraint },
           }),
         );
-        return { arn: `arn:aws:s3:::${entry.physical_name}` };
+        return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },
-      async update() {
+      async update(entry, current) {
+        const before = (current.spec.region as string | undefined) ?? "";
+        const after = (entry.spec.region as string | undefined) ?? "";
+        if (before !== after) {
+          throw new Error(
+            `Bucket "${entry.physical_name}" cannot move from region "${before || "default"}" to "${after || "default"}"; destroy it (after emptying it) and apply again`,
+          );
+        }
         return {};
       },
       async delete(current) {
+        const region = (current.spec.region as string | undefined) || current.outputs.region;
         try {
-          await s3.send(new DeleteBucketCommand({ Bucket: current.physical_name }));
+          await s3For(region).send(new DeleteBucketCommand({ Bucket: current.physical_name }));
         } catch (err) {
           const name = (err as { name?: string }).name;
           if (name === "NoSuchBucket") return;

@@ -84,7 +84,19 @@ describe("BlobStore", () => {
       expect(created).toEqual(["real-bucket"]);
     });
 
-    test("fails clearly for a provider with no driver, and retries after a failure", async () => {
+    test("passes the store's region to its driver", async () => {
+    const seen: (string | undefined)[] = [];
+    registerBlobDriver("gcp", (_location, options) => {
+      seen.push(options.region);
+      return new MemoryBlobDriver();
+    });
+    await new BlobStore("gcp", "gs://regional", { region: "eu-west-1" }).exists("k");
+    await new BlobStore("gcp", "gs://plain").exists("k");
+    expect(seen).toEqual(["eu-west-1", undefined]);
+    expect(new BlobStore("aws", "://r", { region: "eu-west-1" }).region).toBe("eu-west-1");
+  });
+
+  test("fails clearly for a provider with no driver, and retries after a failure", async () => {
       const store = new BlobStore("azure", "az://nowhere");
       await expect(store.get("k")).rejects.toThrow(/No blob driver for provider "azure"/);
 

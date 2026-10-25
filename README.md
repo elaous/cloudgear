@@ -292,8 +292,8 @@ documents that a POST or PUT through CloudFront to a Lambda function URL needs
 the client to send `x-amz-content-sha256` (the SHA-256 of the body), and an
 origin access control may replace the `Authorization` header with its own
 signature; check both before relying on this for write routes or per-user
-tokens. The S3 origin uses the regional bucket domain in the deploy region, so
-the bucket MUST live there.
+tokens. The S3 origin uses the regional bucket domain of the bucket's own
+`region` (see Regions).
 
 ### Runtime: `BlobStore`
 
@@ -450,9 +450,17 @@ message instead of emptying it.
 
 On AWS each function gets an IAM role (`AWSLambdaBasicExecutionRole` plus an
 inline policy with the inferred S3 permissions), a Lambda function and a
-function URL with `AuthType: AWS_IAM`. Region comes from `--region`,
-`$AWS_REGION` or `$AWS_DEFAULT_REGION`; credentials from the standard AWS SDK
-chain.
+function URL with `AuthType: AWS_IAM`. Credentials come from the standard AWS
+SDK chain.
+
+#### Regions
+
+The deploy region is the router's `region` option, else `--region`, else
+`$AWS_REGION` or `$AWS_DEFAULT_REGION`. A `BlobStore` can pass its own
+`region` (`new BlobStore("aws", "://data", { region: "eu-west-1" })`) to live
+elsewhere; the CDN then reads it from that region. Both options MUST be string
+literals, since `cloudgear generate` reads them. A bucket cannot move between
+regions: changing `region` on an existing bucket fails the apply.
 
 ## `cloudgear import`
 

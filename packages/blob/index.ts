@@ -7,7 +7,7 @@ import {
 } from "./driver";
 
 export { registerBlobDriver, parseBlobUri, URI_SCHEMES } from "./driver";
-export type { BlobData, BlobDriver, BlobDriverFactory, BlobProvider } from "./driver";
+export type { BlobData, BlobDriver, BlobDriverFactory, BlobDriverOptions, BlobProvider } from "./driver";
 
 export type BlobAccess = "read" | "write" | "delete" | "list";
 
@@ -25,6 +25,9 @@ export const BLOB_OPERATIONS = {
 export interface BlobStoreOptions {
   // Confines the store to keys under this prefix; `cloudgear generate` scopes its permissions to it.
   path?: string;
+  // AWS region of the bucket; defaults to the region the app is deployed to. `cloudgear generate`
+  // creates the bucket there, so it MUST be a string literal.
+  region?: string;
   driver?: BlobDriver;
 }
 
@@ -47,6 +50,7 @@ export function grant(_store: BlobStore, ..._accesses: BlobAccess[]): void {}
 export class BlobStore {
   readonly name: string;
   readonly path: string;
+  readonly region: string | undefined;
   private driverPromise?: Promise<BlobDriver>;
 
   constructor(
@@ -56,6 +60,7 @@ export class BlobStore {
   ) {
     this.name = parseBlobUri(provider, uri);
     this.path = normalizeBlobPath(options.path ?? "");
+    this.region = options.region;
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }
 
@@ -109,7 +114,7 @@ export class BlobStore {
   }
 
   private driver(): Promise<BlobDriver> {
-    this.driverPromise ??= createBlobDriver(this.provider, this.location).catch((err) => {
+    this.driverPromise ??= createBlobDriver(this.provider, this.location, { region: this.region }).catch((err) => {
       this.driverPromise = undefined;
       throw err;
     });

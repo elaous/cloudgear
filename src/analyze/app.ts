@@ -17,6 +17,8 @@ export interface AnalyzedResource {
   kind: "BlobStore";
   name: string;
   provider: string;
+  // Declared region; undefined means the region the app is deployed to.
+  region?: string;
   dry: boolean;
   file: string;
   line: number;
@@ -72,6 +74,8 @@ export interface EdgeModel {
 
 export interface AppModel extends EdgeModel {
   provider: string;
+  // Region of the functions, from the router's options; undefined means the deploy default.
+  region?: string;
   authenticated: Authentication;
   entry: string;
   resources: AnalyzedResource[];
@@ -114,6 +118,7 @@ export function analyzeApp(entryPath: string): AppModel {
     const provider = stringLiteral(providerArg, `${where(expr)}: BlobStore provider`);
     const uri = stringLiteral(uriArg, `${where(expr)}: BlobStore URI`);
     const storePath = readStorePath(optionsArg, where(expr));
+    const storeRegion = readRegion(optionsArg, `${where(expr)}: BlobStore`);
     const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
     if (!decl || decl.getInitializer() !== expr) {
       throw new Error(`${where(expr)}: assign new BlobStore(...) to a variable so its usage can be traced`);
@@ -122,14 +127,15 @@ export function analyzeApp(entryPath: string): AppModel {
       kind: "BlobStore",
       name: parseBlobUri(provider as BlobProvider, uri),
       provider,
+      region: storeRegion,
       dry: readDirectives(decl, where(expr)).has("dry"),
       file: relative(expr.getSourceFile().getFilePath()),
       line: expr.getStartLineNumber(),
     };
     const existing = resources.get(resource.name);
-    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider)) {
+    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region)) {
       throw new Error(
-        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider or directives`,
+        `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region or directives`,
       );
     }
     resources.set(resource.name, existing ?? resource);
@@ -143,6 +149,7 @@ export function analyzeApp(entryPath: string): AppModel {
   const router = routers[0]!;
   const provider = stringLiteral(router.getArguments()[0], `${where(router)}: FunctionRouter provider`);
   const authenticated = readAuthenticated(router.getArguments()[1], where(router));
+  const routerRegion = readRegion(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   if (authenticated === "none") {
     warnings.push(`${where(router)}: authenticated is "none"; deployed functions can be invoked by anyone with their URL`);
   }
@@ -232,6 +239,7 @@ export function analyzeApp(entryPath: string): AppModel {
   return {
     ...edge,
     provider,
+    region: routerRegion,
     authenticated,
     entry: relative(entry),
     resources: [...resources.values()],
@@ -559,6 +567,15 @@ function readRouteOptions(options: Node | undefined, at: string): { name?: strin
     }
   }
   return result;
+}
+
+// "eu-west-1", "us-gov-east-1", "cn-north-1"
+const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
+function readRegion(options: Node | undefined, at: string): string | undefined {
+  const region = readStringOption(options, "region", `${at} options`);
+  if (region !== undefined && !REGION.test(region)) throw new Error(`${at}: "${region}" is not an AWS region such as "eu-west-1"`);
+  return region;
 }
 
 function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {

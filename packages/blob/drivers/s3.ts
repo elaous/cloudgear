@@ -65,7 +65,8 @@ function withAccessHint(err: unknown): unknown {
   );
 }
 
-export const createS3Driver = (bucket: string): BlobDriver => new S3BlobDriver(bucket);
+export const createS3Driver = (bucket: string, options: { region?: string } = {}): BlobDriver =>
+  new S3BlobDriver(bucket, new S3Client(options.region ? { region: options.region } : {}));
 
 function isNotFound(err: unknown): boolean {
   const name = (err as { name?: string })?.name;

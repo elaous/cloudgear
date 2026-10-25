@@ -17,6 +17,8 @@ message Config {
   Dns dns = 7;
   Certificate certificate = 8;
   Cdn cdn = 9;
+  // Region of the functions; empty means the region the deployer chooses (--region or AWS_REGION).
+  string region = 10;
 }
 
 message Dns {
@@ -58,6 +60,8 @@ message Resource {
   bool dry = 4;
   // "<file>:<line>" of the client construction.
   string source = 5;
+  // Region the resource lives in; empty means the region the app is deployed to.
+  string region = 6;
 }
 
 message Function {

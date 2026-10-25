@@ -54,6 +54,8 @@ export interface FunctionRouterOptions {
   // Read by `cloudgear generate` (so MUST be a string literal); defaults to "iam".
   authenticated?: Authentication;
   credentials?: AwsCredentialsProvider;
+  // AWS region of the deployed functions (and the signing region for URLs that do not name one).
+  // `cloudgear generate` reads it, so it MUST be a string literal; defaults to --region or AWS_REGION.
   region?: string;
   // Establishes who is calling. Return null for 401; every route requires it unless `public`.
   // The result reaches functions as `context.auth`, and only when `authenticated` is "iam".

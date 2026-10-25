@@ -265,12 +265,20 @@ describe("FunctionRouter rate limit", () => {
   });
 
   test("counts requests to unknown paths too, and starts a new window after windowMs", async () => {
-    const router = limited(40);
-    await router.fetch(new Request("http://app/nope", { headers: { "x-client": "a" } }));
-    await call(router, "a");
-    expect((await call(router, "a")).status).toBe(429);
-    await Bun.sleep(60);
-    expect((await call(router, "a")).status).toBe(200);
+    let now = 1_000_000;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const router = limited(1000);
+      await router.fetch(new Request("http://app/nope", { headers: { "x-client": "a" } }));
+      await call(router, "a");
+      expect((await call(router, "a")).status).toBe(429);
+      now += 999;
+      expect((await call(router, "a")).status).toBe(429);
+      now += 1;
+      expect((await call(router, "a")).status).toBe(200);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   test("needs a key function or an explicit trustProxy", () => {

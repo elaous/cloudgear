@@ -163,11 +163,22 @@ describe("analyzeApp", () => {
       expect(orderBySpecificity(["/x*x*", "/x*"])).toEqual(["/x*x*", "/x*"]);
     });
 
-    test("orderBySpecificity stays fast for a couple of hundred patterns", () => {
+    test("orderBySpecificity compiles each pattern once instead of in its inner loop", () => {
       const patterns = Array.from({ length: 200 }, (_, i) => `/api/v${i}/*/items/*`);
-      const started = performance.now();
-      expect(orderBySpecificity(patterns)).toHaveLength(200);
-      expect(performance.now() - started).toBeLessThan(500);
+      const NativeRegExp = RegExp;
+      let compiled = 0;
+      globalThis.RegExp = new Proxy(NativeRegExp, {
+        construct(target, args, newTarget) {
+          compiled++;
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+      try {
+        expect(orderBySpecificity(patterns)).toHaveLength(200);
+      } finally {
+        globalThis.RegExp = NativeRegExp;
+      }
+      expect(compiled).toBe(200);
     });
 
     test("two-parameter routes would capture asset paths and are rejected", () => {

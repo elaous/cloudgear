@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { blobEnvVar } from "@cloudgear/blob";
+import { BlobStore } from "@cloudgear/blob";
 import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
@@ -53,7 +53,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         resource,
         action: [...new Set([...accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
       })),
-      env: used.map(([resource]) => ({ key: blobEnvVar(resource), value_from: resource })),
+      env: used.map(([resource]) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
     });
   }
 

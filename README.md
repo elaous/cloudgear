@@ -77,12 +77,31 @@ same input object.
 
 ### Runtime: `BlobStore`
 
-`new BlobStore(provider, uri)` is a lazily connected client. `uri` is
-`"://name"` or `"<scheme>://name"` (the scheme MUST match the provider, `s3`
-for `aws`). Methods: `get`, `getText`, `getJson`, `exists`, `put`, `delete`,
-`list`. Deployed functions receive the physical bucket name through
-`CLOUDGEAR_BLOB_<NAME>`. Set `CLOUDGEAR_BLOB_DRIVER=memory` to run against an
-in-memory store locally.
+`BlobStore` is a provider-neutral wrapper. It parses the URI, resolves the
+physical location and implements the common methods (`get`, `getText`,
+`getJson`, `exists`, `put`, `delete`, `list`) on top of a `BlobDriver`:
+
+```ts
+interface BlobDriver {
+  get(key): Promise<Uint8Array | null>;
+  put(key, data, contentType?): Promise<void>;
+  delete(key): Promise<void>;
+  list(prefix): Promise<string[]>;
+  exists(key): Promise<boolean>;
+}
+```
+
+Drivers live in `packages/blob/drivers/` and load on first use, so an app
+only imports the SDK of the provider it uses. `aws` (`drivers/s3.ts`, needs
+`@aws-sdk/client-s3`) is built in; add another with
+`registerBlobDriver("gcp", (location) => new MyGcsDriver(location))`.
+`uri` is `"://name"` or `"<scheme>://name"` (the scheme MUST match the
+provider: `s3`, `gs`, `az`). `CLOUDGEAR_BLOB_DRIVER=memory` swaps in an
+in-memory driver for local runs and tests.
+
+Deployed functions find the physical store through the env var
+`BlobStore.envVarFor(name)` (`CLOUDGEAR_BLOB_<NAME>`), which `cloudgear
+generate` writes into the config and `BlobStore.location` reads.
 
 ## `cloudgear generate`
 
@@ -98,6 +117,10 @@ from the entry file and following imports:
 | `store.put(...)` | `s3:PutObject` |
 | `store.delete(...)` | `s3:DeleteObject` |
 | `store.list(...)` | `s3:ListBucket` |
+
+`BlobStore` methods map to provider-neutral accesses (`read`, `write`,
+`delete`, `list`) in `BLOB_OPERATIONS`; `src/providers.ts` maps those to each
+provider's permissions.
 
 Permissions are traced per function through every local helper it calls,
 across files. A store passed around as a value (for example as an argument)
@@ -181,6 +204,23 @@ already existing under the given physical name (default: its configured
 name). Imported resources are never created or deleted (`destroy` only
 forgets them), and functions that use them get that physical name in their
 env and IAM policy.
+
+## Code map
+
+Where each moving part lives, since several are called across packages:
+
+| Name | Defined in | Used by |
+| --- | --- | --- |
+| `BlobStore`, `BLOB_OPERATIONS`, `BlobStore.envVarFor` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` (method to access); `src/generate.ts` (env var) |
+| `registerBlobDriver`, `parseBlobUri` | `packages/blob/driver.ts` | `BlobStore`; custom drivers |
+| `FunctionRouter`, `request` | `packages/functions/router.ts` | apps |
+| `response`, input assembly (`buildInput`, `compilePath`) | `packages/functions/http.ts` | router and Lambda adapter |
+| `createHandler` | `packages/functions/aws.ts` | bundle entry generated in `src/build/bundle.ts` |
+| `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
+| `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
+| `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
+| `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
+| `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
 
 ## Status
 

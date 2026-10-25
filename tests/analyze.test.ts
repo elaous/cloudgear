@@ -41,8 +41,8 @@ describe("analyzeApp", () => {
 
     expect(model.resources).toMatchObject([{ name: "shared", dry: true }]);
     const byName = Object.fromEntries(model.functions.map((f) => [f.name, f]));
-    expect(accesses(byName.listAll!.uses)).toEqual({ shared: ["delete", "list", "probe", "read", "write"] });
-    expect(accesses(byName.check!.uses)).toEqual({ shared: ["probe"] });
+    expect(accesses(byName.listAll!.uses)).toEqual({ shared: ["delete", "list", "read", "write"] });
+    expect(accesses(byName.check!.uses)).toEqual({ shared: ["list", "read"] });
     expect(byName.check!.routes).toEqual([
       { method: "GET", path: "/check/{key}" },
       { method: "HEAD", path: "/check/{key}" },

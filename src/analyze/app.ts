@@ -41,7 +41,7 @@ export interface AppModel {
 
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
 const KNOWN_DIRECTIVES = new Set(["dry"]);
-const ALL_ACCESS = [...new Set(Object.values(BLOB_OPERATIONS))];
+const ALL_ACCESS = [...new Set(Object.values(BLOB_OPERATIONS).flat())] as BlobAccess[];
 
 export function analyzeApp(entryPath: string): AppModel {
   const entry = path.resolve(entryPath);
@@ -176,7 +176,7 @@ export function analyzeApp(entryPath: string): AppModel {
     const parent = node.getParent();
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === node) {
       const member = parent.getName();
-      if (member in BLOB_OPERATIONS) return [BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]];
+      if (member in BLOB_OPERATIONS) return [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]];
       return [];
     }
     warnings.push(

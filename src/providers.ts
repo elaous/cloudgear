@@ -14,8 +14,6 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       type: "@aws.S3",
       actions: {
         read: ["s3:GetObject"],
-        // HeadObject on a missing key returns 403 instead of 404 without ListBucket.
-        probe: ["s3:GetObject", "s3:ListBucket"],
         write: ["s3:PutObject"],
         delete: ["s3:DeleteObject"],
         list: ["s3:ListBucket"],

@@ -52,6 +52,23 @@ describe("@policy on a static method of an exported class", () => {
     expect([...model.functions[0]!.uses.values()][0]!.accesses).toEqual(new Set(["read", "delete"]));
   });
 
+  test("a store passed to a helper cannot be guarded by a policy, unless grant() states what it does", () => {
+    expect(() => analyzeApp(fixture("widened.ts"))).toThrow(/passed around as a value, so the @policy of "Api-run" cannot guard it/);
+    const model = analyzeApp(fixture("grant-inside.ts"));
+    expect([...model.functions[0]!.uses.values()][0]!.accesses).toEqual(new Set(["read", "list"]));
+  });
+
+  test("other decorators do not hide a use of a store: it is passed as a value and widened", () => {
+    const model = analyzeApp(fixture("other-decorator.ts"));
+    expect([...model.functions[0]!.uses.values()][0]!.accesses).toEqual(new Set(["read", "write", "delete", "list"]));
+    expect(model.warnings).toEqual([expect.stringMatching(/BlobStore "data" is passed around as a value/)]);
+  });
+
+  test("each policy applies to its own store path", () => {
+    const uses = [...analyzeApp(fixture("two-paths.ts")).functions[0]!.uses.values()];
+    expect(uses.map((u) => [u.path, [...u.accesses]])).toEqual([["images/", ["read"]], ["docs/", ["write"]]]);
+  });
+
   test.each([
     ["bad-permission.ts", /@policy permissions must be permissions\.Get\/Put\/Delete\/List/],
     ["empty.ts", /lists no permissions/],

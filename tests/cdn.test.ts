@@ -26,7 +26,6 @@ describe("Cert and CDN", () => {
     const cdn = new CDN("aws", dns, { cert, bucket: site() });
     expect(cert.domain).toBe("cdn.example.com");
     expect(cdn.domain).toBe("cdn.example.com");
-    expect(cdn.domain).toBe("cdn.example.com");
   });
 
   test("reject a certificate for another domain, another provider and a foreign bucket", () => {
@@ -65,28 +64,22 @@ describe("Cert drivers", () => {
     }
   });
 
-  test("the ACM driver picks the newest certificate for exactly that domain", async () => {
-    const sent: unknown[] = [];
+  test("the ACM driver prefers an issued certificate, then the newest, for exactly that domain", async () => {
+    const inputs: unknown[] = [];
+    const summary = (arn: string, status: string, at: number, domain = "cdn.example.com") => ({ DomainName: domain, CertificateArn: arn, Status: status, CreatedAt: new Date(at) });
     const client = {
-      send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
-        sent.push([command.constructor.name, command.input]);
-        if (command.constructor.name === "ListCertificatesCommand") {
-          return command.input.NextToken
-            ? { CertificateSummaryList: [{ DomainName: "cdn.example.com", CertificateArn: "arn:new", CreatedAt: new Date(2000) }] }
-            : {
-                NextToken: "t",
-                CertificateSummaryList: [
-                  { DomainName: "cdn.example.com", CertificateArn: "arn:old", CreatedAt: new Date(1000) },
-                  { DomainName: "other.example.com", CertificateArn: "arn:other", CreatedAt: new Date(3000) },
-                ],
-              };
-        }
-        return { Certificate: { Status: "PENDING_VALIDATION" } };
+      send: async (command: { input: Record<string, unknown> }) => {
+        inputs.push(command.input);
+        return command.input.NextToken
+          ? { CertificateSummaryList: [summary("arn:newer-failed", "FAILED", 4000), summary("arn:pending", "PENDING_VALIDATION", 3000)] }
+          : { NextToken: "t", CertificateSummaryList: [summary("arn:issued", "ISSUED", 1000), summary("arn:other", "ISSUED", 5000, "other.example.com")] };
       },
     };
     const driver = new AcmCertDriver(client as never);
-    expect(await driver.describe("cdn.example.com")).toEqual({ state: "pending", id: "arn:new" });
-    expect(sent.at(-1)).toEqual(["DescribeCertificateCommand", { CertificateArn: "arn:new" }]);
+    expect(await driver.describe("cdn.example.com")).toEqual({ state: "issued", id: "arn:issued" });
+    expect((inputs[0] as { CertificateStatuses: string[] }).CertificateStatuses).toContain("PENDING_VALIDATION");
+    const pendingOnly = { send: async () => ({ CertificateSummaryList: [summary("arn:p", "PENDING_VALIDATION", 1), summary("arn:f", "FAILED", 2)] }) };
+    expect(await new AcmCertDriver(pendingOnly as never).describe("cdn.example.com")).toEqual({ state: "pending", id: "arn:p" });
     expect(await new AcmCertDriver({ send: async () => ({}) } as never).describe("x.example.com")).toEqual({ state: "none" });
   });
 });

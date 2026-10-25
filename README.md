@@ -261,6 +261,9 @@ Rules the analyzer enforces:
   writes into `.cloudgear/endpoints.json` and otherwise asks the provider
   (`CloudFront` by alias), and throws until the CDN is deployed. Register
   drivers with `registerCdnDriver()`, or use `CLOUDGEAR_CDN_DRIVER=memory`.
+  `status()` and `url()` are for the app that deploys or serves from the router
+  (a local process or Vercel). Inside a Lambda there is no endpoints file and
+  its role cannot list distributions, so pass the URL in as configuration there.
 - `examples/cdn-app` is a complete app: DNS, certificate, CDN and a routed
   function with a `@policy`.
 - The router's `cdn` MUST be that `CDN`, and CloudFront reaches functions
@@ -433,7 +436,9 @@ router.url("GET", "/objects/{param}", Local.getObjects);
 
 The policy is the guard: those are exactly the function's permissions on that
 store (even if unused), and `generate` fails if the function's code needs more
-(for example calls `put` without `permissions.Put`). `permissions` are
+(for example calls `put` without `permissions.Put`), or passes the store to a
+helper, which it cannot follow (declare `grant(store, ...)` inside to say what
+the helper does). `permissions` are
 `Get`, `Put`, `Delete` and `List` (`exists` needs `Get` and `List`); the store
 and the list MUST be literal. It is a no-op at runtime.
 

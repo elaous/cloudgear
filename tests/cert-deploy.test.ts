@@ -67,10 +67,7 @@ describe("deploying an app with a Cert and no CDN", () => {
   test("Cert.status() reads the deployed certificate back through the ACM driver", async () => {
     const cert = new Cert("aws", new DNS("aws", "example.com"), {
       driver: new AcmCertDriver({
-        send: async (command: { constructor: { name: string } }) =>
-          command.constructor.name === "ListCertificatesCommand"
-            ? { CertificateSummaryList: [{ DomainName: "example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c1", CreatedAt: new Date() }] }
-            : { Certificate: { Status: "ISSUED" } },
+        send: async () => ({ CertificateSummaryList: [{ DomainName: "example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c1", Status: "ISSUED", CreatedAt: new Date() }] }),
       } as never),
     });
     expect(await cert.status()).toEqual({ state: "issued", id: "arn:aws:acm:us-east-1:1:certificate/c1" });

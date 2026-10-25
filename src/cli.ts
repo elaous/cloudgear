@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
-import { apply, endpointsFrom, type Drivers } from "./deploy/apply";
+import { apply, endpointsFrom, hasEndpoints, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan } from "./deploy/plan";
@@ -161,7 +161,7 @@ async function main() {
 function writeEndpoints(config: CloudgearConfig, state: State, workDir: string): void {
   const endpointsPath = path.join(workDir, "endpoints.json");
   const endpoints = endpointsFrom(config, state);
-  if (Object.keys(endpoints.routes).length) {
+  if (hasEndpoints(endpoints)) {
     fs.mkdirSync(workDir, { recursive: true });
     fs.writeFileSync(endpointsPath, JSON.stringify(endpoints, null, 2) + "\n");
     console.log(`cloudgear: endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);

@@ -221,6 +221,11 @@ export function analyzeApp(entryPath: string): AppModel {
       for (const [key, allowed] of policies) {
         const tally = tallies.get(key);
         const extra = [...(tally ? [...tally.ops, ...tally.grants] : [])].filter((access) => !allowed.has(access));
+        if (tally?.widenedAt && tally.grants.size === 0) {
+          throw new Error(
+            `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value, so the @policy of "${fn.name}" cannot guard it; call it directly or declare grant(store, ...)`,
+          );
+        }
         if (tally && extra.length) {
           throw new Error(
             `${where(decl)}: "${fn.name}" needs ${[...new Set(extra)].map((a) => permissionName(a)).join(", ")} on "${tally.store.resource.name}", which its @policy does not allow`,
@@ -302,7 +307,8 @@ export function analyzeApp(entryPath: string): AppModel {
       for (const decl of declarationsOf(node)) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
         // `@policy(store, ...)` is read separately, and is not a use of the store.
-        if (node.getFirstAncestorByKind(SyntaxKind.Decorator)) continue;
+        const decorator = node.getFirstAncestorByKind(SyntaxKind.Decorator);
+        if (decorator && isPolicyDecorator(decorator)) continue;
         const store = resourceByDecl.get(decl);
         if (store) {
           const key = `${store.resource.name}\0${store.path}`;
@@ -567,17 +573,20 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   }
 
+  function isPolicyDecorator(decorator: Node): boolean {
+    if (!Node.isDecorator(decorator)) return false;
+    const callee = decorator.getCallExpression()?.getExpression();
+    const decl = callee && Node.isIdentifier(callee) ? resolveSymbol(callee.getSymbol())?.getDeclarations()[0] : undefined;
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "policy" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob";
+  }
+
   // Permissions a routed method declares with `@policy(store, { permissions: [...] })`, by store key.
   function readPolicies(fnNode: Node, fnName: string): Map<string, Set<BlobAccess>> {
     const result = new Map<string, Set<BlobAccess>>();
     if (!Node.isMethodDeclaration(fnNode)) return result;
     for (const decorator of fnNode.getDecorators()) {
       const call = decorator.getCallExpression();
-      const callee = call?.getExpression();
-      const decl = callee && Node.isIdentifier(callee) ? resolveSymbol(callee.getSymbol())?.getDeclarations()[0] : undefined;
-      const isPolicy =
-        !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "policy" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob";
-      if (!call || !isPolicy) continue;
+      if (!call || !isPolicyDecorator(decorator)) continue;
       const at = where(decorator);
       const [storeArg, optionsArg] = call.getArguments();
       const storeDecl = storeArg && Node.isIdentifier(storeArg) ? resolveSymbol(storeArg.getSymbol())?.getDeclarations()[0] : undefined;

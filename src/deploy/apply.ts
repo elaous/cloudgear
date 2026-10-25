@@ -129,6 +129,11 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
   }
 }
 
+// Whether there is anything worth writing to the endpoints file.
+export function hasEndpoints(endpoints: EndpointsFile): boolean {
+  return Object.keys(endpoints.routes).length > 0 || !!endpoints.cdn;
+}
+
 export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsFile {
   const routes: Record<string, string> = {};
   for (const fn of config.function) {

@@ -107,7 +107,17 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     function: functions,
     invoker: invokers,
     authenticated: model.authenticated,
+    dns: model.dns,
+    certificate: model.certificate,
+    cdn: model.cdn && {
+      provider: model.cdn.provider,
+      domain: model.cdn.domain,
+      bucket: model.cdn.bucket,
+      path: model.cdn.path,
+      behavior: model.cdn.behaviors.map((b) => ({ path_pattern: b.pathPattern, function: b.function, method: b.methods })),
+    },
   };
+  if (config.cdn) providerProfile(config.cdn.provider);
 
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));

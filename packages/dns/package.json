@@ -1,0 +1,18 @@
+{
+  "name": "@cloudgear/dns",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./drivers/gandi": "./drivers/gandi.ts",
+    "./drivers/route53": "./drivers/route53.ts",
+    "./drivers/memory": "./drivers/memory.ts"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-route-53": "^3.700.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-route-53": { "optional": true }
+  }
+}

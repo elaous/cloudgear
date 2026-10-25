@@ -2,9 +2,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
+import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
+import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan } from "./deploy/plan";
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { generate } from "./generate";
@@ -16,6 +19,7 @@ Commands:
   plan                         Show what apply would change
   apply [--auto-approve]       Create, update and delete cloud resources to match the config
   import <name> [physical-id]  Adopt an existing resource into state instead of creating it
+  invalidate [path...]         Clear the CDN's cache (default: everything)
   destroy [--auto-approve]     Delete every managed resource (imported ones are only forgotten)
 
 Options:
@@ -78,7 +82,10 @@ async function main() {
     case "destroy": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
-      const target = command === "destroy" ? { ...config, resource: [], function: [] } : config;
+      const target =
+        command === "destroy"
+          ? { ...config, resource: [], function: [], dns: undefined, certificate: undefined, cdn: undefined }
+          : config;
       const actions = plan(target, state);
       console.log(formatPlan(actions));
       if (!hasChanges(actions)) {
@@ -89,7 +96,7 @@ async function main() {
           return;
         }
         try {
-          await apply(actions, state, drivers(config, configPath, values.region), {
+          await apply(actions, state, await drivers(config, configPath, values.region), {
             save: (s) => saveState(statePath, s),
             log: (message) => console.log(`cloudgear: ${message}`),
           });
@@ -100,6 +107,17 @@ async function main() {
         return;
       }
       writeEndpoints(config, state, workDir);
+      return;
+    }
+    case "invalidate": {
+      const config = readConfig(configPath);
+      const state = loadState(statePath, config.project, config.provider);
+      const distribution = Object.values(state.entries).find((entry) => entry.type === "@aws.CloudFront");
+      if (!distribution?.outputs.id) throw new Error("No CDN has been deployed; run `cloudgear apply` first");
+      const paths = args.length ? args : ["/*"];
+      for (const p of paths) if (!p.startsWith("/")) throw new Error(`Invalidation path "${p}" must start with "/"`);
+      const id = await invalidateDistribution(new CloudFrontClient({ region: "us-east-1" }), distribution.outputs.id, paths);
+      console.log(`cloudgear: invalidation ${id} started for ${paths.join(", ")}`);
       return;
     }
     case "import": {
@@ -155,13 +173,17 @@ function readConfig(configPath: string): CloudgearConfig {
   return decodeConfig(fs.readFileSync(configPath, "utf8"));
 }
 
-function drivers(config: CloudgearConfig, configPath: string, region: string | undefined): Drivers {
+async function drivers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
   if (config.provider !== "aws") throw new Error(`Provider "${config.provider}" has no deploy drivers yet`);
   const resolvedRegion = region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
   if (!resolvedRegion) throw new Error("Set --region or AWS_REGION to deploy");
   const configDir = path.dirname(configPath);
+  // Credentials (for example GANDI_TOKEN) are read from the environment when the first record is written.
+  const dns = config.dns ? await createDnsDriver(config.dns.provider as DnsProvider, config.dns.zone) : undefined;
   return awsDrivers({
     region: resolvedRegion,
+    dns,
+    log: (message) => console.log(`cloudgear: ${message}`),
     readBundle: (fn) => {
       const file = path.resolve(configDir, fn.bundle.path);
       const data = fs.readFileSync(file);

@@ -8,6 +8,27 @@ export interface CloudgearConfig {
   function: FunctionSpec[];
   invoker: string[];
   authenticated: "iam" | "none";
+  dns?: DnsSpec;
+  certificate?: CertificateSpec;
+  cdn?: CdnSpec;
+}
+
+export interface DnsSpec {
+  provider: string;
+  domain: string;
+  zone: string;
+}
+
+export interface CertificateSpec {
+  domain: string;
+}
+
+export interface CdnSpec {
+  provider: string;
+  domain: string;
+  bucket: string;
+  path: string;
+  behavior: { path_pattern: string; function: string; method: string[] }[];
 }
 
 export interface ResourceSpec {
@@ -42,6 +63,8 @@ const REPEATED = new Set([
   "function.permission.action",
   "function.env",
   "invoker",
+  "cdn.behavior",
+  "cdn.behavior.method",
 ]);
 
 export function encodeConfig(config: CloudgearConfig): string {
@@ -59,6 +82,19 @@ export function decodeConfig(text: string): CloudgearConfig {
     provider: str(raw, "provider"),
     invoker: (raw.invoker ?? []).map(String),
     authenticated: raw.authenticated === "none" ? "none" : "iam",
+    dns: raw.dns && { provider: str(raw.dns, "provider"), domain: str(raw.dns, "domain"), zone: str(raw.dns, "zone") },
+    certificate: raw.certificate && { domain: str(raw.certificate, "domain") },
+    cdn: raw.cdn && {
+      provider: str(raw.cdn, "provider"),
+      domain: str(raw.cdn, "domain"),
+      bucket: str(raw.cdn, "bucket"),
+      path: String(raw.cdn.path ?? ""),
+      behavior: (raw.cdn.behavior ?? []).map((b: Record<string, any>) => ({
+        path_pattern: str(b, "path_pattern"),
+        function: str(b, "function"),
+        method: (b.method ?? []).map(String),
+      })),
+    },
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
       type: str(r, "type"),

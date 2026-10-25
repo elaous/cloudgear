@@ -22,6 +22,9 @@ import {
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda";
 import { createHash } from "node:crypto";
+import { ACMClient } from "@aws-sdk/client-acm";
+import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
+import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
@@ -29,6 +32,8 @@ import type { StateEntry } from "../state";
 import type { FunctionSpec } from "../../config/schema";
 import { zip } from "../../build/zip";
 import { fitName } from "../../names";
+import { certificateDriver } from "./certificate";
+import { cloudFrontDriver } from "./cloudfront";
 
 export interface SendClient {
   send(command: any): Promise<any>;
@@ -37,7 +42,10 @@ export interface SendClient {
 export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
-  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient };
+  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient };
+  // Writes the certificate-validation and CDN records; required only when the app declares a CDN.
+  dns?: DnsDriver;
+  log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -53,6 +61,14 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const lambda = options.clients?.lambda ?? new LambdaClient({ region: options.region });
   const iam = options.clients?.iam ?? new IAMClient({ region: options.region });
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
+  // CloudFront only accepts certificates from us-east-1, and its API is global.
+  const acm = options.clients?.acm ?? new ACMClient({ region: "us-east-1" });
+  const cloudfront = options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" });
+  const requireDns = (): DnsDriver => {
+    if (!options.dns) throw new Error("A DNS driver is required for the certificate and CDN, but none was configured");
+    return options.dns;
+  };
+  const log = options.log ?? (() => {});
 
   async function waitForFunction(name: string) {
     for (let attempt = 0; attempt < 60; attempt++) {
@@ -162,6 +178,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   return {
+    "@aws.Certificate": certificateDriver({ acm, dns: requireDns, sleep, log }),
+    "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3, lambda, dns: requireDns, region: options.region, sleep, log }),
     "@aws.S3": {
       async create(entry) {
         await s3.send(

@@ -4,13 +4,31 @@ import type { DesiredEntry, PlannedAction } from "./plan";
 import type { State, StateEntry } from "./state";
 import { stateKey } from "./state";
 
+// What a driver can look up while applying: the state of entries applied earlier in this run.
+export interface DriverContext {
+  entry(key: string): StateEntry | undefined;
+}
+
 export interface Driver {
-  create(entry: DesiredEntry): Promise<Record<string, string>>;
-  update(entry: DesiredEntry, current: StateEntry, changes: string[]): Promise<Record<string, string>>;
-  delete(current: StateEntry): Promise<void>;
+  create(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string>>;
+  update(entry: DesiredEntry, current: StateEntry, changes: string[], context: DriverContext): Promise<Record<string, string>>;
+  delete(current: StateEntry, context: DriverContext): Promise<void>;
 }
 
 export type Drivers = Record<string, Driver>;
+
+// Thrown by a driver whose create failed part-way. `outputs` are what it already made; apply keeps
+// them in state (marked incomplete) so the next apply resumes through update() instead of creating again.
+export class PartialApplyError extends Error {
+  constructor(
+    readonly original: unknown,
+    readonly outputs: Record<string, string>,
+  ) {
+    super(original instanceof Error ? original.message : String(original));
+  }
+}
+
+export const INCOMPLETE_SPEC = { incomplete: true };
 
 export interface ApplyOptions {
   save: (state: State) => void;
@@ -25,6 +43,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
     if (!driver) throw new Error(`No driver for resource type "${type}"`);
     return driver;
   };
+  const context: DriverContext = { entry: (key) => state.entries[key] };
   const record = (entry: DesiredEntry, outputs: Record<string, string>, previous?: StateEntry) => {
     state.entries[stateKey(entry)] = {
       kind: entry.kind,
@@ -33,8 +52,31 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
       physical_name: entry.physical_name,
       spec: entry.spec,
       outputs: { ...previous?.outputs, ...outputs },
+      deps: entry.deps,
     };
     options.save(state);
+  };
+
+  const create = async (action: PlannedAction) => {
+    const desired = action.desired!;
+    try {
+      record(desired, await driverFor(action.type).create(desired, context));
+    } catch (err) {
+      if (err instanceof PartialApplyError) {
+        state.entries[stateKey(desired)] = {
+          kind: desired.kind,
+          type: desired.type,
+          name: desired.name,
+          physical_name: desired.physical_name,
+          spec: INCOMPLETE_SPEC,
+          outputs: err.outputs,
+          deps: desired.deps,
+        };
+        options.save(state);
+        throw err.original;
+      }
+      throw err;
+    }
   };
 
   for (const action of actions) {
@@ -42,22 +84,22 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
     switch (action.op) {
       case "create":
         log(`creating ${action.type} ${action.name}`);
-        record(desired!, await driverFor(action.type).create(desired!));
+        await create(action);
         break;
       case "update":
         log(`updating ${action.type} ${action.name} (${action.changes.join(", ")})`);
-        record(desired!, await driverFor(action.type).update(desired!, current!, action.changes), current);
+        record(desired!, await driverFor(action.type).update(desired!, current!, action.changes, context), current);
         break;
       case "replace":
         log(`replacing ${action.type} ${action.name}`);
-        await driverFor(action.type).delete(current!);
+        await driverFor(action.type).delete(current!, context);
         delete state.entries[action.key];
         options.save(state);
-        record(desired!, await driverFor(action.type).create(desired!));
+        await create(action);
         break;
       case "delete":
         log(`deleting ${action.type} ${action.name}`);
-        await driverFor(action.type).delete(current!);
+        await driverFor(action.type).delete(current!, context);
         delete state.entries[action.key];
         options.save(state);
         break;

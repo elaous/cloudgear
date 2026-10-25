@@ -1,4 +1,5 @@
-import type { CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
+import type { CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
+import { providerProfile } from "../providers";
 import { stateKey, type State, type StateEntry } from "./state";
 
 export type Op = "create" | "update" | "replace" | "delete" | "forget" | "noop" | "dry";
@@ -10,7 +11,27 @@ export interface DesiredEntry {
   physical_name: string;
   dry: boolean;
   spec: Record<string, unknown>;
-  source: ResourceSpec | FunctionSpec;
+  source: ResourceSpec | FunctionSpec | CertificateSpec | CdnSpec;
+  // State keys that must exist (and be applied) first.
+  deps: string[];
+  // Re-applied whenever a dependency is created or replaced, because it embeds their outputs.
+  refresh?: boolean;
+}
+
+export interface CertificateComparable {
+  domain: string;
+  dns_provider: string;
+  dns_zone: string;
+}
+
+export interface CdnComparable {
+  domain: string;
+  dns_provider: string;
+  dns_zone: string;
+  bucket: string;
+  path: string;
+  // Functions served by the CDN; their URLs are read from state when applying.
+  behaviors: { path_pattern: string; function: string; methods: string[] }[];
 }
 
 export interface PlannedAction {
@@ -63,6 +84,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     dry: r.dry,
     spec: { physical_name: physicalOf(r.name) },
     source: r,
+    deps: [],
   }));
 
   for (const fn of config.function) {
@@ -93,18 +115,101 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       dry: false,
       spec: spec as unknown as Record<string, unknown>,
       source: fn,
+      deps: [...new Set(fn.permission.map((p) => p.resource))].flatMap((name) => {
+        const resource = resources.get(name);
+        return resource ? [stateKey(resource)] : [];
+      }),
+    });
+  }
+
+  if (config.certificate) {
+    if (!config.dns) throw new Error("cloudgear config: certificate needs dns");
+    const profile = providerProfile(config.provider).cdn;
+    entries.push({
+      kind: "resource",
+      type: profile.certificate,
+      name: config.certificate.domain,
+      physical_name: config.certificate.domain,
+      dry: false,
+      spec: {
+        domain: config.certificate.domain,
+        dns_provider: config.dns.provider,
+        dns_zone: config.dns.zone,
+      } satisfies CertificateComparable,
+      source: config.certificate,
+      deps: [],
+    });
+  }
+
+  if (config.cdn) {
+    const { cdn, dns } = config;
+    if (!dns || !config.certificate) throw new Error("cloudgear config: cdn needs dns and certificate");
+    const profile = providerProfile(cdn.provider).cdn;
+    const bucket = resources.get(cdn.bucket);
+    if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
+    const functions = new Map(config.function.map((fn) => [fn.name, fn]));
+    const certificateKey = stateKey({ type: profile.certificate, name: config.certificate.domain });
+    entries.push({
+      kind: "resource",
+      type: profile.type,
+      name: cdn.domain,
+      physical_name: cdn.domain,
+      dry: false,
+      spec: {
+        domain: cdn.domain,
+        dns_provider: dns.provider,
+        dns_zone: dns.zone,
+        bucket: physicalOf(cdn.bucket),
+        path: cdn.path,
+        behaviors: cdn.behavior.map((b) => ({
+          path_pattern: b.path_pattern,
+          function: functions.get(b.function)?.physical_name ?? b.function,
+          methods: [...b.method].sort(),
+        })),
+      } satisfies CdnComparable,
+      source: cdn,
+      deps: [
+        certificateKey,
+        stateKey(bucket),
+        ...cdn.behavior.flatMap((b) => {
+          const fn = functions.get(b.function);
+          return fn ? [stateKey(fn)] : [];
+        }),
+      ],
+      refresh: true,
     });
   }
   return entries;
 }
 
+// Stable topological order: dependencies first, ties keep their original order.
+function orderByDependencies<T extends { key: string; deps: string[] }>(items: T[]): T[] {
+  const byKey = new Map(items.map((item) => [item.key, item]));
+  const ordered: T[] = [];
+  const state = new Map<string, "visiting" | "done">();
+  const visit = (item: T) => {
+    if (state.get(item.key) === "done") return;
+    if (state.get(item.key) === "visiting") throw new Error(`Dependency cycle through ${item.key}`);
+    state.set(item.key, "visiting");
+    for (const dep of item.deps) {
+      const target = byKey.get(dep);
+      if (target) visit(target);
+    }
+    state.set(item.key, "done");
+    ordered.push(item);
+  };
+  items.forEach(visit);
+  return ordered;
+}
+
 export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
-  const desired = desiredEntries(config, state);
-  const desiredKeys = new Set(desired.map(stateKey));
+  const desired = orderByDependencies(desiredEntries(config, state).map((entry) => ({ ...entry, key: stateKey(entry) })));
+  const desiredKeys = new Set(desired.map((entry) => entry.key));
   const actions: PlannedAction[] = [];
+  const churned = new Set<string>();
 
   for (const entry of desired) {
-    const key = stateKey(entry);
+    const key = entry.key;
     const current = state.entries[key];
     const base = { key, kind: entry.kind, type: entry.type, name: entry.name, desired: entry, current };
     if (entry.dry) {
@@ -117,14 +222,17 @@ export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
       actions.push({ ...base, op: "replace", changes: ["physical_name"] });
     } else {
       const changes = entry.kind === "function" ? functionChanges(current.spec, entry.spec) : specChanged(current.spec, entry.spec) ? ["spec"] : [];
+      if (!changes.length && entry.refresh && entry.deps.some((dep) => churned.has(dep))) changes.push("dependencies");
       actions.push({ ...base, op: changes.length ? "update" : "noop", changes });
     }
+    const last = actions[actions.length - 1]!;
+    if (last.op === "create" || last.op === "replace") churned.add(key);
   }
 
   const removed = Object.entries(state.entries)
     .filter(([key]) => !desiredKeys.has(key))
-    .sort(([, a], [, b]) => (a.kind === b.kind ? 0 : a.kind === "function" ? -1 : 1));
-  for (const [key, current] of removed) {
+    .map(([key, current]) => ({ key, current }));
+  for (const { key, current } of orderForDeletion(removed)) {
     actions.push({
       op: current.imported ? "forget" : "delete",
       key,
@@ -136,6 +244,26 @@ export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
     });
   }
   return actions;
+}
+
+// Dependents go before what they depend on; entries without recorded deps keep functions before resources.
+function orderForDeletion<T extends { key: string; current: StateEntry }>(items: T[]): T[] {
+  const removing = new Set(items.map((item) => item.key));
+  const remaining = new Set(items.map((item) => item.key));
+  const byKey = new Map(items.map((item) => [item.key, item]));
+  const dependsOn = (item: T, key: string) => (item.current.deps ?? []).includes(key);
+  const ordered: T[] = [];
+  while (remaining.size) {
+    const ready = [...remaining]
+      .map((key) => byKey.get(key)!)
+      .filter((item) => ![...remaining].some((other) => other !== item.key && dependsOn(byKey.get(other)!, item.key)))
+      .sort((a, b) => (a.current.kind === b.current.kind ? 0 : a.current.kind === "function" ? -1 : 1));
+    const next = ready[0];
+    if (!next) throw new Error(`Dependency cycle among ${[...remaining].filter((key) => removing.has(key)).join(", ")}`);
+    ordered.push(next);
+    remaining.delete(next.key);
+  }
+  return ordered;
 }
 
 function functionChanges(current: Record<string, unknown>, desired: Record<string, unknown>): string[] {

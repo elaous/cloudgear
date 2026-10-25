@@ -13,6 +13,39 @@ message Config {
   repeated string invoker = 5;
   // "iam" (callers must sign requests) or "none" (public function URLs).
   string authenticated = 6;
+  // The DNS zone holding this app's records; set when a certificate or CDN is declared.
+  Dns dns = 7;
+  Certificate certificate = 8;
+  Cdn cdn = 9;
+}
+
+message Dns {
+  // "gandi" | "aws"
+  string provider = 1;
+  string domain = 2;
+  string zone = 3;
+}
+
+message Certificate {
+  string domain = 1;
+}
+
+message Cdn {
+  string provider = 1;
+  string domain = 2;
+  // Logical name of the Resource serving the static site.
+  string bucket = 3;
+  // Key prefix of the site within the bucket ("" for the root).
+  string path = 4;
+  repeated Behavior behavior = 5;
+}
+
+// Routes the CDN sends to a function instead of the bucket.
+message Behavior {
+  string path_pattern = 1;
+  // Name of a Function.
+  string function = 2;
+  repeated string method = 3;
 }
 
 message Resource {

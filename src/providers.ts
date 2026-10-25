@@ -5,11 +5,13 @@ import type { BlobAccess } from "@cloudgear/blob";
 export interface ProviderProfile {
   function: { type: string; runtime: string; memoryMb: number; timeoutS: number };
   blobStore: { type: string; actions: Record<BlobAccess, string[]> };
+  cdn: { type: string; certificate: string };
 }
 
 export const PROVIDERS: Record<string, ProviderProfile> = {
   aws: {
     function: { type: "@aws.Lambda", runtime: "nodejs22.x", memoryMb: 256, timeoutS: 10 },
+    cdn: { type: "@aws.CloudFront", certificate: "@aws.Certificate" },
     blobStore: {
       type: "@aws.S3",
       actions: {

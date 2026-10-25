@@ -99,6 +99,59 @@ describe("analyzeApp", () => {
     expect(model.functions[0]!.routes[0]!.name).toBe("impl");
   });
 
+  describe("DNS, certificate and CDN", () => {
+    test("reads the declarations and turns routes into CloudFront behaviors", () => {
+      const model = analyzeApp(fixture("cdn/app.ts"));
+      expect(model.dns).toEqual({ provider: "gandi", domain: "cdn.example.com", zone: "example.com" });
+      expect(model.certificate).toEqual({ domain: "cdn.example.com" });
+      expect(model.cdn).toMatchObject({ provider: "aws", domain: "cdn.example.com", bucket: "my-site", path: "web/" });
+      // fewest wildcards first, then longest; methods merged per path for the same function
+      expect(model.cdn!.behaviors).toEqual([
+        { pathPattern: "/health", function: "health", methods: ["GET"] },
+        { pathPattern: "/users/*/profile", function: "nested", methods: ["GET"] },
+        { pathPattern: "/objects/*", function: "getObject", methods: ["GET", "HEAD", "PUT"] },
+      ]);
+      expect(model.warnings).toEqual([]);
+    });
+
+    test("a CDN that is not handed to the router only serves the bucket", () => {
+      const model = analyzeApp(fixture("cdn/bucket-only.ts"));
+      expect(model.cdn).toMatchObject({ domain: "www.example.org", bucket: "my-site", path: "", behaviors: [] });
+      expect(model.dns).toMatchObject({ provider: "aws", zone: "example.org" });
+    });
+
+    test("apps without any of them have no edge model", () => {
+      const model = analyzeApp(path.join(exampleDir, "main.ts"));
+      expect(model.dns).toBeUndefined();
+      expect(model.cdn).toBeUndefined();
+    });
+
+    test("warns about a dry bucket and about a rate limit the CDN bypasses", () => {
+      expect(analyzeApp(fixture("cdn/dry-bucket.ts")).warnings).toEqual([
+        expect.stringMatching(/bucket "existing-site" is dry, but the CDN adds one statement to its bucket policy/),
+      ]);
+      expect(analyzeApp(fixture("cdn/authenticate-all-public.ts")).warnings).toEqual([
+        expect.stringMatching(/rateLimit does not apply to routes served through the CDN/),
+      ]);
+    });
+
+    test.each([
+      ["cdn/method-conflict.ts", /CloudFront cannot route by method: GET \/foo\/\{param\} \(getFoo\) and POST \/foo\/\{param\} \(createFoo\) share the path "\/foo\/\*"/],
+      ["cdn/authenticate-bypass.ts", /authenticate hook does not run for "GET \/me"; mark it \{ public: true \} or drop the cdn/],
+      ["cdn/authenticated-none.ts", /needs authenticated: "iam"/],
+      ["cdn/apex.ts", /zone apex, which cannot be a CNAME/],
+      ["cdn/other-dns.ts", /Only one DNS per app is supported/],
+      ["cdn/no-cdn-declared.ts", /the router's cdn needs a CDN declared with new CDN/],
+      ["cdn/missing-bucket.ts", /the CDN's bucket must be a BlobStore variable/],
+    ])("rejects %s", (file, error) => {
+      expect(() => analyzeApp(fixture(file))).toThrow(error);
+    });
+
+    test("public routes may skip the authenticate hook", () => {
+      expect(() => analyzeApp(fixture("cdn/authenticate-all-public.ts"))).not.toThrow();
+    });
+  });
+
   test("a named function expression's own name is the default route name", () => {
     const model = analyzeApp(fixture("named-function-expression.ts"));
     expect(model.functions[0]!.routes[0]!.name).toBe("inner");

@@ -5,10 +5,15 @@
     "": {
       "name": "cloudgear",
       "dependencies": {
+        "@aws-sdk/client-acm": "^3.700.0",
+        "@aws-sdk/client-cloudfront": "^3.700.0",
         "@aws-sdk/client-iam": "^3.700.0",
         "@aws-sdk/client-lambda": "^3.700.0",
+        "@aws-sdk/client-route-53": "^3.700.0",
         "@aws-sdk/client-s3": "^3.700.0",
         "@cloudgear/blob": "workspace:*",
+        "@cloudgear/cdn": "workspace:*",
+        "@cloudgear/dns": "workspace:*",
         "@cloudgear/functions": "workspace:*",
         "ts-morph": "^24.0.0",
       },
@@ -31,6 +36,24 @@
         "@aws-sdk/client-s3",
       ],
     },
+    "packages/cdn": {
+      "name": "@cloudgear/cdn",
+      "version": "0.1.0",
+      "dependencies": {
+        "@cloudgear/blob": "workspace:*",
+        "@cloudgear/dns": "workspace:*",
+      },
+    },
+    "packages/dns": {
+      "name": "@cloudgear/dns",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@aws-sdk/client-route-53": "^3.700.0",
+      },
+      "optionalPeers": [
+        "@aws-sdk/client-route-53",
+      ],
+    },
     "packages/functions": {
       "name": "@cloudgear/functions",
       "version": "0.1.0",
@@ -50,9 +73,15 @@
 
     "@aws-sdk/checksums": ["@aws-sdk/checksums@3.1001.5", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-6erto9nK2OZO/woEgmFIaPh5gChgdNd7nL6jgAf8TAXz3/QHC8Pan2TFe9GYp3IxOIKCCGWPylSjtOHKfNzQlw=="],
 
+    "@aws-sdk/client-acm": ["@aws-sdk/client-acm@3.1156.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/credential-provider-node": "^3.972.88", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-vRy8mVgYOO1E/YXDlBuXCUKsmNKkVjKFIW2ZS30kWZydbS6CnqFxNkMajDzqJcm+PZ74rwgnhNHsJkc+UIEMzQ=="],
+
+    "@aws-sdk/client-cloudfront": ["@aws-sdk/client-cloudfront@3.1156.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/credential-provider-node": "^3.972.88", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-z4V/ecv6b5uGwVVMaE8NbczaPVfM2HwbZAGUFp9XDjm+Q8WoFrF0vRlWaRWpW+rox4yPZc4tSo+cv8drud+r8A=="],
+
     "@aws-sdk/client-iam": ["@aws-sdk/client-iam@3.1156.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/credential-provider-node": "^3.972.88", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-Z8wtt8eI78O2OPUqAuPoecTY+kwr0Z35AYJbdgG6VNKaWlzhSoXabCF0h7u9sAq9fpLD8Pq3vByH8ainVh+gPg=="],
 
     "@aws-sdk/client-lambda": ["@aws-sdk/client-lambda@3.1156.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/credential-provider-node": "^3.972.88", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-HMwqZ9ImXWSm7wRKytFaanXYbRm1wK4wPXz59mNgLZxNr461MLj3xfNGzJGnb6a3gZ0yYTkPwUDk0LGCwtb3bQ=="],
+
+    "@aws-sdk/client-route-53": ["@aws-sdk/client-route-53@3.1156.0", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/credential-provider-node": "^3.972.88", "@aws-sdk/middleware-sdk-route53": "^3.972.28", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-1IwDSboTwUovZhuyDBhjAgPxFeIdy5+XCmZNKYFdg0XJax27qx4Ir7/m5CA60pdAHWBTMpUKm0jtyNEOlZnsuA=="],
 
     "@aws-sdk/client-s3": ["@aws-sdk/client-s3@3.1156.0", "", { "dependencies": { "@aws-sdk/checksums": "^3.1001.5", "@aws-sdk/core": "^3.978.5", "@aws-sdk/credential-provider-node": "^3.972.88", "@aws-sdk/middleware-sdk-s3": "^3.972.81", "@aws-sdk/signature-v4-multi-region": "^3.996.49", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-Z2PqQqKMDVX56tNZ6ggmjoI5o/8+4+8ArmjLwE5ktYsEzs1BrvklBT1ZzI+s0Vcf3wfPguoEMD7EkMswmEta/A=="],
 
@@ -74,6 +103,8 @@
 
     "@aws-sdk/credential-provider-web-identity": ["@aws-sdk/credential-provider-web-identity@3.972.82", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/nested-clients": "^3.997.50", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-LUo46IqPTJ4xKBsrLuoaxiv/D2GTBCcFDMD1y3jKIqPR/p7Rw14RJFZ0iRWftqZtyLPQX9JMGnSi3mBu4y/pNA=="],
 
+    "@aws-sdk/middleware-sdk-route53": ["@aws-sdk/middleware-sdk-route53@3.972.28", "", { "dependencies": { "@aws-sdk/types": "^3.975.0", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-93l3lB5ngw0XQDGvuK/R9R3UAN4+xeYgLOW8E6nzldlNhu0E8vfkYMTlh5km643i9F193b5ZO21wOWWT47RxHw=="],
+
     "@aws-sdk/middleware-sdk-s3": ["@aws-sdk/middleware-sdk-s3@3.972.81", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/signature-v4-multi-region": "^3.996.49", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-jfanv1pV0sJFZw6/DPiNjvK7B478god0zOum5yIWo+/+1Gy+CSXWpGBWx+3nBJyDvjcu/2kUMr4ADUp9BHH34Q=="],
 
     "@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.997.50", "", { "dependencies": { "@aws-sdk/core": "^3.978.5", "@aws-sdk/signature-v4-multi-region": "^3.996.49", "@aws-sdk/types": "^3.975.0", "@smithy/core": "^3.36.1", "@smithy/fetch-http-handler": "^5.8.0", "@smithy/node-http-handler": "^4.12.1", "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-nKb8qu4QsnpZTq/6JIXc72mzuzfh7BK4sUQkpQznPec2z4W7Ob2xYkcM4i5e1yGTBnbJVeFv/0sf3jcz85hclA=="],
@@ -89,6 +120,10 @@
     "@aws/lambda-invoke-store": ["@aws/lambda-invoke-store@0.3.0", "", {}, "sha512-sl4Bm6yiMNYrZKkqqDFWN0UfnWhlS8ivKxrYl+6t0gCLrqr8y3B2IqZZbFRkfaVVp7C/baApyh71P+LeE1A2sQ=="],
 
     "@cloudgear/blob": ["@cloudgear/blob@workspace:packages/blob"],
+
+    "@cloudgear/cdn": ["@cloudgear/cdn@workspace:packages/cdn"],
+
+    "@cloudgear/dns": ["@cloudgear/dns@workspace:packages/dns"],
 
     "@cloudgear/functions": ["@cloudgear/functions@workspace:packages/functions"],
 

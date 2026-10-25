@@ -11,7 +11,11 @@ export type { CertDriver, CertDriverFactory, CertDriverOptions, CertInfo, CertPr
 export { createCdnDriver, registerCdnDriver } from "./cdn-driver";
 export type { CdnDriver, CdnDriverFactory, CdnInfo, CdnProvider, CdnState } from "./cdn-driver";
 
+export type ProviderOptions = Record<string, string | number | boolean>;
+
 export interface CertOptions {
+  // Provider settings with no dedicated option; MUST be literals.
+  options?: ProviderOptions;
   driver?: CertDriver;
 }
 
@@ -52,6 +56,7 @@ export interface CdnOptions {
   cert: Cert;
   // The static site: served at "/" from this store's bucket (and path prefix, if it has one).
   bucket: BlobStore;
+  options?: ProviderOptions;
   driver?: CdnDriver;
 }
 

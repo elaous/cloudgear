@@ -25,11 +25,12 @@ import { createHash } from "node:crypto";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import type { DnsDriver } from "@cloudgear/dns";
-import { CreateBucketCommand, DeleteBucketCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, DeleteBucketCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
 import type { FunctionSpec } from "../../config/schema";
+import { environmentOptions } from "../../providers";
 import { zip } from "../../build/zip";
 import { fitName } from "../../names";
 import { certificateDriver } from "./certificate";
@@ -184,8 +185,21 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     }
   }
 
+  async function setVersioning(bucket: string, region: string, enabled: boolean) {
+    await s3For(region).send(
+      new PutBucketVersioningCommand({ Bucket: bucket, VersioningConfiguration: { Status: enabled ? "Enabled" : "Suspended" } }),
+    );
+  }
+
   function environment(spec: FunctionComparable) {
-    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...spec.env } };
+    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...spec.env, ...environmentOptions(spec.options) } };
+  }
+
+  function lambdaOptions(spec: FunctionComparable) {
+    return {
+      TracingConfig: { Mode: (spec.options?.tracing ?? "PassThrough") as "Active" | "PassThrough" },
+      EphemeralStorage: { Size: Number(spec.options?.ephemeral_storage_mb ?? 512) },
+    };
   }
 
   return {
@@ -201,6 +215,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               region === "us-east-1" ? undefined : { LocationConstraint: region as BucketLocationConstraint },
           }),
         );
+        if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
+          await setVersioning(entry.physical_name, region, true);
+        }
         return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },
       async update(entry, current) {
@@ -211,6 +228,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
             `Bucket "${entry.physical_name}" cannot move from region "${before}" to "${after}"; destroy it (after emptying it) and apply again`,
           );
         }
+        const wanted = (entry.spec.options as Record<string, string> | undefined)?.versioning === "true";
+        const had = (current.spec.options as Record<string, string> | undefined)?.versioning === "true";
+        if (wanted !== had) await setVersioning(entry.physical_name, after, wanted);
         return {};
       },
       async delete(current) {
@@ -257,6 +277,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
                   MemorySize: spec.memory_mb,
                   Timeout: spec.timeout_s,
                   Environment: environment(spec),
+                  ...lambdaOptions(spec),
                 }),
               );
               break;
@@ -298,6 +319,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               MemorySize: spec.memory_mb,
               Timeout: spec.timeout_s,
               Environment: environment(spec),
+              ...lambdaOptions(spec),
             }),
           );
           await waitForFunction(entry.physical_name);

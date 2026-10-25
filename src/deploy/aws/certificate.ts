@@ -76,7 +76,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
         }
       }
       try {
-        const requested = await deps.acm.send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS" }));
+        const requested = await deps.acm.send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS", KeyAlgorithm: spec.options?.key_algorithm as never }));
         const arn: string = requested.CertificateArn;
         outputs.arn = arn;
         deps.log(`requested a certificate for ${spec.domain}`);
@@ -89,6 +89,10 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     async update(entry, current) {
       // Only a previous run that stopped before the certificate was issued gets here with work to do.
       if (!current.outputs.arn) throw new Error("Certificate state has no ARN; destroy and apply again");
+      const before = (current.spec.options as Record<string, string> | undefined)?.key_algorithm;
+      if (before !== (entry.spec.options as Record<string, string> | undefined)?.key_algorithm) {
+        throw new Error(`Certificate ${entry.physical_name} cannot change key_algorithm; destroy it and apply again`);
+      }
       try {
         return await validate(current.outputs.arn, { ...current.outputs }, entry.spec as unknown as CertificateComparable);
       } catch (err) {

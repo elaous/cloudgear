@@ -1,5 +1,5 @@
 import type { CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
-import { providerProfile } from "../providers";
+import { providerProfile, validateConfigOptions } from "../providers";
 import { stateKey, type State, type StateEntry } from "./state";
 
 export type Op = "create" | "update" | "replace" | "delete" | "forget" | "noop" | "dry";
@@ -24,6 +24,7 @@ export interface CertificateComparable {
   for_cdn: boolean;
   dns_provider: string;
   dns_zone: string;
+  options?: Record<string, string>;
 }
 
 export interface CdnComparable {
@@ -33,6 +34,7 @@ export interface CdnComparable {
   bucket: string;
   bucket_region: string;
   path: string;
+  options?: Record<string, string>;
   // Functions served by the CDN; their URLs are read from state when applying.
   behaviors: { path_pattern: string; function: string; methods: string[] }[];
 }
@@ -56,6 +58,7 @@ export interface FunctionComparable {
   code: string;
   env: Record<string, string>;
   reserved_concurrency: number;
+  options?: Record<string, string>;
   auth: "iam" | "none";
   invokers: string[];
   permissions: { type: string; physical_name: string; path: string; actions: string[] }[];
@@ -63,13 +66,19 @@ export interface FunctionComparable {
 
 const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   code: ["code"],
-  config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency"],
+  config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency", "options"],
   permissions: ["permissions"],
   auth: ["auth"],
   invokers: ["invokers"],
 };
 
+// Empty options omitted so older state still matches.
+function optionsSpec(options?: Record<string, string>): { options?: Record<string, string> } {
+  return options && Object.keys(options).length ? { options } : {};
+}
+
 export function desiredEntries(config: CloudgearConfig, state: State): DesiredEntry[] {
+  validateConfigOptions(config);
   const resources = new Map(config.resource.map((r) => [r.name, r]));
   const physicalOf = (name: string) => {
     const resource = resources.get(name);
@@ -85,7 +94,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     name: r.name,
     physical_name: physicalOf(r.name),
     dry: r.dry,
-    spec: { physical_name: physicalOf(r.name), region: r.region ?? "" },
+    spec: { physical_name: physicalOf(r.name), region: r.region ?? "", ...optionsSpec(r.options) },
     source: r,
     deps: [],
   }));
@@ -98,6 +107,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       timeout_s: fn.timeout_s,
       code: fn.bundle.sha256,
       reserved_concurrency: fn.reserved_concurrency,
+      ...optionsSpec(fn.options),
       auth: config.authenticated,
       invokers: config.authenticated === "iam" ? [...config.invoker].sort() : [],
       env: Object.fromEntries(
@@ -137,6 +147,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       spec: {
         domain: config.certificate.domain,
         for_cdn: !!config.cdn,
+        ...optionsSpec(config.certificate.options),
         dns_provider: config.dns.provider,
         dns_zone: config.dns.zone,
       } satisfies CertificateComparable,
@@ -166,6 +177,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         bucket: physicalOf(cdn.bucket),
         bucket_region: (bucket as ResourceSpec).region ?? "",
         path: cdn.path,
+        ...optionsSpec(cdn.options),
         behaviors: cdn.behavior.map((b) => ({
           path_pattern: b.path_pattern,
           function: functions.get(b.function)?.physical_name ?? b.function,

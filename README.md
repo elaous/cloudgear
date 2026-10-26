@@ -493,7 +493,9 @@ Alternatively declare a function's permissions with `@policy`, a method
 decorator. TypeScript decorates class members, so the routed function is a
 method of a class, either `static` on an exported class or an instance method
 reached through an exported instance (`export const api = new Api(...)`, routed
-as `api.read`):
+as `api.read`; the receiver MUST be that exported variable itself, not an alias
+or property, and the instance MAY live in another module; with several
+instances of one class, each routed method belongs to one):
 
 ```ts
 import { BlobStore, permissions, policy } from "@cloudgear/blob";

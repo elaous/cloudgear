@@ -105,6 +105,11 @@ describe("schedules in source", () => {
     expect(JSON.parse(proc.stdout.toString())).toEqual({ runs: 2 });
   });
 
+  test("an instance method that is routed and scheduled is one function", () => {
+    const model = analyzeApp(fixture("instance-routed.ts"));
+    expect(model.functions.map((f) => [f.name, f.exportName, f.routes.length, f.schedules])).toEqual([["jobs-tick", "jobs", 1, ["0 3 * * *"]]]);
+  });
+
   test("an app may have only scheduled functions", () => {
     const model = analyzeApp(fixture("only-scheduled.ts"));
     expect(model.functions.map((f) => [f.name, f.routes, f.schedules])).toEqual([["Jobs-tick", [], ["*/5 * * * *"]]]);
@@ -122,8 +127,8 @@ describe("schedules in source", () => {
     ["both-days.ts", /cannot restrict both day-of-month and day-of-week/],
     ["substitution.ts", /cannot contain \${} substitutions/],
     ["options-variable.ts", /route options must be an object literal/],
-    ["instance-method.ts", /"tick" must be exported so it can be bundled on its own/],
-    ["instance-two.ts", /"tick" must be exported so it can be bundled on its own/],
+    ["instance-method.ts", /"run" must be exported so it can be bundled on its own.*no exported instance of Jobs/],
+    ["instance-two.ts", /2 exported instances of Jobs \(first, second\)/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });

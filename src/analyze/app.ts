@@ -600,7 +600,7 @@ export function analyzeApp(entryPath: string): AppModel {
         const decorators = method.getDecorators().filter(isScheduleDecorator);
         if (!decorators.length) continue;
         const at = where(method);
-        if (!Node.isClassDeclaration(method.getParent())) throw new Error(`${at}: @schedule applies to a method of an exported class`);
+        if (!Node.isClassDeclaration(method.getParent())) throw new Error(`${at}: @schedule applies to a method of a class declaration`);
         const schedules = decorators.flatMap((decorator) => readSchedules(decorator.getCallExpression()?.getArguments()[0], `${where(decorator)}: @schedule`));
         found.push({ node: method, label: method.getName(), schedules });
       }
@@ -615,27 +615,46 @@ export function analyzeApp(entryPath: string): AppModel {
     return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "policy" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob";
   }
 
-  // The exported variable holding an instance of `cls`: the one the receiver names, or the only one.
-  function instanceExport(cls: ClassDeclaration, receiver?: Node): string | undefined {
-    const exported = localFiles
+  function exportedInstances(cls: ClassDeclaration): VariableDeclaration[] {
+    return localFiles
       .flatMap((file) => file.getVariableDeclarations())
       .filter((variable) => {
         const init = variable.getInitializer();
         const created = init && Node.isNewExpression(init) ? resolveSymbol(init.getExpression().getSymbol())?.getDeclarations()[0] : undefined;
         return created === cls && exportNameOf(variable) !== undefined;
       });
+  }
+
+  function instanceExport(cls: ClassDeclaration, receiver?: Node): { exportName: string; file: string } | undefined {
     const receiverDecl = receiver && Node.isIdentifier(receiver) ? resolveSymbol(receiver.getSymbol())?.getDeclarations()[0] : undefined;
-    const chosen = receiver ? exported.filter((variable) => variable === receiverDecl) : exported;
-    return chosen.length === 1 ? exportNameOf(chosen[0]!) : undefined;
+    const chosen = exportedInstances(cls).filter((variable) => !receiver || variable === receiverDecl);
+    const only = chosen.length === 1 ? chosen[0]! : undefined;
+    return only && { exportName: exportNameOf(only)!, file: relative(only.getSourceFile().getFilePath()) };
+  }
+
+  function instanceProblem(decl: Node, receiver?: Node): string | undefined {
+    const cls = Node.isMethodDeclaration(decl) && !decl.isStatic() ? decl.getParent() : undefined;
+    if (!cls || !Node.isClassDeclaration(cls)) return undefined;
+    const names = exportedInstances(cls).map((variable) => exportNameOf(variable));
+    if (!names.length) return `no exported instance of ${cls.getName() ?? "the class"}; add \`export const x = new ${cls.getName() ?? "Class"}(...)\``;
+    if (!receiver && names.length > 1) return `${names.length} exported instances of ${cls.getName()} (${names.join(", ")}); route the method through one of them`;
+    return `the receiver must be an exported instance variable itself (one of ${names.join(", ")}), not an alias or property`;
   }
 
   function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node): AnalyzedFunction {
     const existing = functions.get(decl);
-    if (existing) return existing;
+    if (existing) {
+      const again = receiver ? exportTargetOf(decl, instanceExport, receiver) : undefined;
+      if (again && again.exportName !== existing.exportName) {
+        throw new Error(`${where(decl)}: "${label}" is routed through two different instances (${existing.exportName}, ${again.exportName}); a method belongs to one instance`);
+      }
+      return existing;
+    }
     const target = exportTargetOf(decl, instanceExport, receiver);
     if (!target) {
+      const problem = instanceProblem(decl, receiver);
       throw new Error(
-        `${where(decl)}: "${label}" must be exported so it can be bundled on its own (a named function, a method of an exported object, a static method of an exported class, or a method of an exported instance of a class)`,
+        `${where(decl)}: "${label}" must be exported so it can be bundled on its own (a named function, a method of an exported object, a static method of an exported class, or a method of an exported instance of a class)${problem ? `: ${problem}` : ""}`,
       );
     }
     const param = fnNode.getParameters()[0];
@@ -646,7 +665,7 @@ export function analyzeApp(entryPath: string): AppModel {
           ? path.basename(decl.getSourceFile().getFilePath(), ".ts")
           : target.exportName,
       declaredName: declaredNameOf(decl),
-      file: relative(decl.getSourceFile().getFilePath()),
+      file: target.file ?? relative(decl.getSourceFile().getFilePath()),
       exportName: target.exportName,
       member: target.member,
       inputType: param?.getTypeNode()?.getText(),
@@ -1017,16 +1036,29 @@ function declaredNameOf(decl: Node): string {
   return "";
 }
 
-type InstanceExport = (cls: ClassDeclaration, receiver?: Node) => string | undefined;
+interface ExportTarget {
+  exportName: string;
+  member?: string;
+  // Module the export lives in, when it is not the declaration's own.
+  file?: string;
+}
 
-function exportTargetOf(decl: Node, instanceExport: InstanceExport, receiver?: Node): { exportName: string; member?: string } | undefined {
+type InstanceExport = (cls: ClassDeclaration, receiver?: Node) => { exportName: string; file: string } | undefined;
+
+function exportTargetOf(decl: Node, instanceExport: InstanceExport, receiver?: Node): ExportTarget | undefined {
   const direct = exportNameOf(decl);
   if (direct) return { exportName: direct };
   if (!Node.isMethodDeclaration(decl) && !Node.isPropertyAssignment(decl)) return undefined;
   const object = decl.getParent();
   if (Node.isMethodDeclaration(decl) && Node.isClassDeclaration(object)) {
-    const exported = decl.isStatic() ? exportNameOf(object) : instanceExport(object, receiver);
-    return exported && /^[A-Za-z_$][\w$]*$/.test(decl.getName()) ? { exportName: exported, member: decl.getName() } : undefined;
+    const member = decl.getName();
+    if (!/^[A-Za-z_$][\w$]*$/.test(member)) return undefined;
+    if (decl.isStatic()) {
+      const exportName = exportNameOf(object);
+      return exportName ? { exportName, member } : undefined;
+    }
+    const instance = instanceExport(object, receiver);
+    return instance ? { ...instance, member } : undefined;
   }
   const variable = Node.isObjectLiteralExpression(object) ? object.getParentIfKind(SyntaxKind.VariableDeclaration) : undefined;
   const exportName = variable && variable.getInitializer() === object ? exportNameOf(variable) : undefined;

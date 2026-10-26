@@ -63,6 +63,13 @@ describe("@policy on a static method of an exported class", () => {
     expect(JSON.parse(proc.stdout.toString())).toEqual({ greeting: "hello", found: false });
   });
 
+  test("the receiver picks the instance when a class has several, and the instance may live in another file", () => {
+    const model = analyzeApp(fixture("two-instances-ok.ts"));
+    expect(model.functions.map((f) => [f.exportName, f.member])).toEqual([["b", "read"]]);
+    const other = analyzeApp(fixture("other-file/main.ts"));
+    expect(other.functions.map((f) => [f.file, f.exportName, f.member])).toEqual([["tests/fixtures/router/policy/other-file/main.ts", "api", "read"]]);
+  });
+
   test("a function that does more than its policy allows is refused", () => {
     expect(() => analyzeApp(fixture("exceeds.ts"))).toThrow(/needs permissions\.Put on "data", which its @policy does not allow/);
   });
@@ -94,7 +101,9 @@ describe("@policy on a static method of an exported class", () => {
     ["empty.ts", /lists no permissions/],
     ["unknown-store.ts", /@policy needs a BlobStore variable/],
     ["instance-method.ts", /must be exported so it can be bundled on its own/],
-    ["instance-unexported.ts", /must be exported so it can be bundled on its own/],
+    ["instance-unexported.ts", /must be exported so it can be bundled on its own.*no exported instance of Api/],
+    ["two-instances.ts", /routed through two different instances \(a, b\)/],
+    ["alias.ts", /the receiver must be an exported instance variable itself \(one of api\)/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });

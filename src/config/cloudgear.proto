@@ -84,6 +84,8 @@ message Function {
   // 0 leaves concurrency unreserved.
   int32 reserved_concurrency = 12;
   map<string, string> options = 13;
+  // Five-field UTC cron expressions that also trigger the function.
+  repeated string schedule = 14;
 }
 
 message Source {

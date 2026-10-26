@@ -13,6 +13,7 @@ import {
   PutFunctionConcurrencyCommand,
   RemovePermissionCommand,
   UpdateFunctionUrlConfigCommand,
+  DeleteFunctionUrlConfigCommand,
   CreateFunctionCommand,
   CreateFunctionUrlConfigCommand,
   DeleteFunctionCommand,
@@ -24,6 +25,7 @@ import {
 import { createHash } from "node:crypto";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
+import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
@@ -35,6 +37,7 @@ import { zip } from "../../build/zip";
 import { fitName } from "../../names";
 import { certificateDriver } from "./certificate";
 import { cloudFrontDriver } from "./cloudfront";
+import { scheduleDriver } from "./schedule";
 
 export interface SendClient {
   send(command: any): Promise<any>;
@@ -43,7 +46,7 @@ export interface SendClient {
 export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
-  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient };
+  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient };
   // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
   // the declaration from the config still cleans up through the right zone). Needed only for certificates and CDNs.
   dns?: (provider: string, zone: string) => DnsDriver | Promise<DnsDriver>;
@@ -73,6 +76,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   // CloudFront only accepts certificates from us-east-1, and its API is global.
   const acm = options.clients?.acm ?? new ACMClient({ region: "us-east-1" });
   const cloudfront = options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" });
+  const events = options.clients?.events ?? new EventBridgeClient({ region: options.region });
   const zones = new Map<string, Promise<DnsDriver>>();
   const requireDns = (provider: string, zone: string): Promise<DnsDriver> => {
     if (!options.dns) throw new Error("A DNS driver is required for the certificate and CDN, but none was configured");
@@ -203,6 +207,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   return {
+    "@aws.Schedule": scheduleDriver({ events, lambda, log }),
     "@aws.Certificate": certificateDriver({ acm, dns: requireDns, sleep, log }),
     "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
     "@aws.S3": {
@@ -289,13 +294,16 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           undo.push(() => lambda.send(new DeleteFunctionCommand({ FunctionName: entry.physical_name })));
           await waitForFunction(entry.physical_name);
 
-          const url = await lambda.send(
-            new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),
-          );
-          if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
-          else await addPublic(entry.physical_name);
+          const routed = (entry.source as FunctionSpec).route.length > 0;
+          const url = routed
+            ? await lambda.send(new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }))
+            : undefined;
+          if (routed) {
+            if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
+            else await addPublic(entry.physical_name);
+          }
           if (spec.reserved_concurrency > 0) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
-          return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, url: url.FunctionUrl };
+          return { arn: created.FunctionArn, role_name: roleName, role_arn: role.Role.Arn, ...(url ? { url: url.FunctionUrl } : {}) };
         } catch (err) {
           for (const step of undo.reverse()) await step().catch(() => {});
           throw err;
@@ -328,6 +336,21 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (spec.reserved_concurrency !== previous) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
         }
         const before = (current.spec.invokers as string[] | undefined) ?? [];
+        if (spec.scheduled_only && current.outputs.url) {
+          await ignore(lambda.send(new DeleteFunctionUrlConfigCommand({ FunctionName: entry.physical_name })), "ResourceNotFoundException");
+          if ((current.spec.auth ?? "iam") === "iam") await removeInvokers(entry.physical_name, before);
+          else await removePublic(entry.physical_name);
+          return { url: "" };
+        }
+        if (!current.outputs.url) {
+          if (!(entry.source as FunctionSpec).route.length) return {} as Record<string, string>;
+          const url = await lambda.send(
+            new CreateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),
+          );
+          if (spec.auth === "iam") await addInvokers(entry.physical_name, spec.invokers);
+          else await addPublic(entry.physical_name);
+          return { url: url.FunctionUrl as string };
+        }
         if (changes.includes("auth")) {
           await lambda.send(
             new UpdateFunctionUrlConfigCommand({ FunctionName: entry.physical_name, AuthType: urlAuthType(spec.auth) }),

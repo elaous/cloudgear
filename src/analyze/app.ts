@@ -76,6 +76,7 @@ interface Tally {
 export type Authentication = "iam" | "none";
 
 export interface CertificateModel {
+  provider: string;
   domain: string;
   dns: { provider: string; domain: string; zone: string };
   // What the certificate serves; decides the region it is issued in.
@@ -407,7 +408,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const region = readRegion(optionsArg, `${at}: Cert`);
       const clash = [...certificates.values()].find((c) => c.domain === dns.domain);
       if (clash) throw new Error(`${at}: a certificate for "${dns.domain}" is already declared`);
-      certificates.set(certExpr, { domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
+      certificates.set(certExpr, { provider: "aws", domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
     }
 
     const certOf = (node: Node | undefined, what: string, at: string): CertificateModel => {

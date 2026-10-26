@@ -16,7 +16,7 @@ const error = (name: string, message = name) => Object.assign(new Error(message)
 
 const apiConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig => ({
   ...baseConfig(),
-  certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "api" }],
+  certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "api" }],
   api: { provider: "aws", domain: DOMAIN },
   ...overrides,
 });
@@ -105,7 +105,7 @@ describe("planning the API domain", () => {
     const regionOf = (config: CloudgearConfig) => plan(config, emptyState()).find((a) => a.key === CERT_KEY)!.desired!.spec.region;
     expect(regionOf(apiConfig())).toBe("");
     expect(regionOf(apiConfig({ region: "eu-central-1" }))).toBe("eu-central-1");
-    expect(regionOf(apiConfig({ api: undefined, certificate: [{ domain: DOMAIN, dns: dnsSpec }] }))).toBe("us-east-1");
+    expect(regionOf(apiConfig({ api: undefined, certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec }] }))).toBe("us-east-1");
   });
 
   test("it needs its certificate, and only routed functions are behind it", () => {
@@ -260,7 +260,7 @@ describe("applying the API domain", () => {
 
   test("the API's region is the router's, and its certificate cannot say otherwise", () => {
     const config = (region?: string, certRegion?: string) =>
-      apiConfig({ region, certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "api", ...(certRegion ? { region: certRegion } : {}) }] });
+      apiConfig({ region, certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "api", ...(certRegion ? { region: certRegion } : {}) }] });
     const regionOf = (c: CloudgearConfig, type: string) => plan(c, emptyState()).find((a) => a.type === type)!.desired!.spec.region;
     expect(regionOf(config("eu-central-1"), "@aws.ApiGateway")).toBe("eu-central-1");
     expect(regionOf(config("eu-central-1"), "@aws.Certificate")).toBe("eu-central-1");
@@ -359,7 +359,7 @@ describe("applying the API domain", () => {
     const state = emptyState();
     const { aws } = regionalAws();
     await applyAll(apiConfig(), state, aws);
-    const moved = apiConfig({ region: "eu-central-1", certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "api" }] });
+    const moved = apiConfig({ region: "eu-central-1", certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "api" }] });
     await expect(applyAll(moved, state, fakeAws({}, aws.dns))).rejects.toThrow(/cannot move from eu-west-1 to eu-central-1; destroy it and apply again/);
   });
 
@@ -376,7 +376,7 @@ describe("applying the API domain", () => {
   });
 
   test("a hand-written config whose certificate has the wrong usage is refused", () => {
-    expect(() => plan(apiConfig({ certificate: [{ domain: DOMAIN, dns: dnsSpec }] }), emptyState())).toThrow(/must have usage "api"/);
+    expect(() => plan(apiConfig({ certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec }] }), emptyState())).toThrow(/must have usage "api"/);
   });
 
   test("an existing domain name is reused, and a changed certificate updates it", async () => {

@@ -12,6 +12,7 @@ import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan } from "./deploy/plan";
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { generate } from "./generate";
+import { providerOfType } from "./providers";
 
 const USAGE = `Usage: cloudgear <command> [options]
 
@@ -200,8 +201,35 @@ function readConfig(configPath: string): CloudgearConfig {
   return decodeConfig(fs.readFileSync(configPath, "utf8"));
 }
 
+// Deployers come from every provider the config uses, each keyed by its resource types.
 async function drivers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
-  if (config.provider !== "aws") throw new Error(`Provider "${config.provider}" has no deploy drivers yet`);
+  const providers = providersOf(config);
+  debug("cli", "providers", { providers });
+  const all: Drivers = {};
+  for (const provider of providers) {
+    const factory = DEPLOYERS[provider];
+    if (!factory) throw new Error(`Provider "${provider}" has no deploy drivers yet; the config can be planned but not applied`);
+    Object.assign(all, await factory(config, configPath, region));
+  }
+  return all;
+}
+
+const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined) => Promise<Drivers>> = {
+  aws: awsDeployers,
+};
+
+function providersOf(config: CloudgearConfig): string[] {
+  const types = [
+    ...config.resource.map((r) => r.type),
+    ...config.function.map((f) => f.type),
+    ...config.certificate.map((c) => `@${c.provider}.Certificate`),
+    ...(config.cdn ? [`@${config.cdn.provider}.CDN`] : []),
+    ...(config.api ? [`@${config.api.provider}.Api`] : []),
+  ];
+  return [...new Set(types.map(providerOfType))].sort();
+}
+
+async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
   // The router's own `region` option wins, then --region, then the environment.
   const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });

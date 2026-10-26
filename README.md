@@ -449,6 +449,52 @@ Declaring a store twice with different options fails. An existing certificate
 cannot change `key_algorithm`. Add a key by extending `options` in
 `src/providers.ts` and handling it in the driver.
 
+## Hybrid clouds
+
+Each entry in the config names its own provider through its `type`
+(`@aws.S3`, `@gcp.GCS`, `@gcp.CloudFunction`). The top-level `provider` is the
+router's, and so the functions': a `BlobStore` MAY use any provider, so an app
+can have functions on GCP and a bucket on AWS and another on GCS:
+
+```ts
+const archive = new BlobStore("aws", "://archive");
+const cache = new BlobStore("gcp", "gs://cache");
+new FunctionRouter("gcp").url("GET", "/report/{id}", getReport);
+```
+
+```
+provider: "gcp"
+resource { name: "archive"  type: "@aws.S3"  physical_name: "archive" ... }
+resource { name: "cache"    type: "@gcp.GCS" physical_name: "cache" ... }
+function {
+  name: "getReport"
+  type: "@gcp.CloudFunction"   runtime: "nodejs22"  timeout_s: 60
+  permission { resource: "archive"  action: "s3:GetObject"  action: "s3:ListBucket" }
+  permission { resource: "cache"    action: "storage.objects.get" }
+  env { key: "CLOUDGEAR_BLOB_ARCHIVE"  value_from: "archive" }
+  env { key: "CLOUDGEAR_BLOB_CACHE"    value_from: "cache" }
+  ...
+}
+```
+
+A function's permissions are written in the vocabulary of the store's provider
+(IAM actions for S3, `storage.objects.*` permissions for GCS). On GCP a function
+runs as a service account, which its deployer creates and grants on the
+function's own buckets, as AWS creates a role for a Lambda. `provider` profiles
+in `src/providers.ts` hold each provider's types, defaults, permission
+mapping, option keys and reserved environment names.
+
+What exists today: the config, `generate` (a Cloud Functions HTTP adapter
+bundles the functions) and `plan` handle several providers. There are no GCP
+deployers, so `apply` stops before doing anything if the config uses a provider
+without deployers, and a CDN, an API domain or a schedule needs a provider that
+supports it (AWS). Access from a function to a store of another provider is not
+provisioned yet: `generate` warns, and the function gets no credentials for the
+store. A mechanism (a stored key, workload identity federation, a signed URL)
+registers under `"<function provider>-><store provider>"` in
+`CROSS_PROVIDER_ACCESS`, and a deployer per provider is added to `DEPLOYERS` in
+`src/cli.ts`.
+
 ## Debugging
 
 Set `CG_DEBUG=true` (also `1`, `yes`, `on`) to print debug lines on stderr,
@@ -659,6 +705,7 @@ Where each moving part lives, since several are called across packages:
 | `grant`, `normalizeBlobPath` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
 | `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
+| GCP function adapter | `packages/functions/drivers/gcp.ts` | bundles (`src/build/bundle.ts`) |
 | `DNS`, `registerDnsDriver` | `packages/dns/index.ts` | apps; `src/analyze/app.ts` |
 | Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` (used by `DNS` and `src/cli.ts`) |
 | `Cert`, `CDN` | `packages/cdn/index.ts` | apps; `src/analyze/app.ts` |
@@ -675,7 +722,7 @@ Where each moving part lives, since several are called across packages:
 
 ## Status
 
-Early draft. Only the `aws` provider has inference rules and deploy drivers;
+Early draft. Only the `aws` provider has deploy drivers (`gcp` is described and planned, see Hybrid clouds);
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has at most one

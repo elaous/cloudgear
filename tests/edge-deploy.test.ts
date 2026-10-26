@@ -18,7 +18,7 @@ const dnsSpec = { provider: "gandi", domain: DOMAIN, zone: "example.com" };
 
 const cdnConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig => ({
   ...baseConfig(),
-  certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
+  certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
   cdn: { provider: "aws", domain: DOMAIN, bucket: "data", path: "web/" },
   ...overrides,
 });
@@ -51,7 +51,7 @@ describe("planning the edge", () => {
   test("a CDN without its certificate, or with an unknown bucket, is a config error", () => {
     expect(() => plan(cdnConfig({ certificate: [] }), emptyState())).toThrow(/cdn needs a certificate for "cdn.example.com"/);
     expect(() => plan(cdnConfig({ cdn: { ...cdnConfig().cdn!, bucket: "nope" } }), emptyState())).toThrow(/bucket "nope" is not a declared resource/);
-    expect(() => plan(cdnConfig({ certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "cdn", region: "eu-west-1" }] }), emptyState())).toThrow(/must be in us-east-1/);
+    expect(() => plan(cdnConfig({ certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn", region: "eu-west-1" }] }), emptyState())).toThrow(/must be in us-east-1/);
   });
 
   test("a certificate can be planned without a CDN", () => {
@@ -364,7 +364,7 @@ describe("records and cleanup the CDN does not own", () => {
     const dns = new MemoryDnsDriver();
     await dns.upsert(foreign);
     const aws = fakeAws({}, dns);
-    await applyAll(cdnConfig({ cdn: undefined, certificate: [{ domain: DOMAIN, dns: dnsSpec }] }), emptyState(), aws);
+    await applyAll(cdnConfig({ cdn: undefined, certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec }] }), emptyState(), aws);
     expect(aws.names()).toContain("RequestCertificateCommand");
     expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
   });
@@ -470,7 +470,7 @@ describe("records and cleanup the CDN does not own", () => {
   test("origin access controls are found on later pages and get names within CloudFront's limit", async () => {
     const long = "a-very-long-subdomain-name-for-a-site.deeply.nested.example.com";
     const config = cdnConfig({
-      certificate: [{ domain: long, dns: { ...dnsSpec, domain: long }, usage: "cdn" }],
+      certificate: [{ provider: "aws", domain: long, dns: { ...dnsSpec, domain: long }, usage: "cdn" }],
       cdn: { ...cdnConfig().cdn!, domain: long },
     });
     const pages: string[] = [];

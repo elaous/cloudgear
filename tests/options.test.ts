@@ -210,6 +210,7 @@ describe("applying options on AWS", () => {
         function: [],
         certificate: [
           {
+            provider: "aws",
             domain: "cdn.example.com",
             dns: { provider: "gandi", domain: "cdn.example.com", zone: "example.com" },
             ...(key_algorithm ? { options: { key_algorithm } } : {}),

@@ -443,6 +443,9 @@ export function analyzeApp(entryPath: string): AppModel {
       }
       if (!bucketStore) throw new Error(`${at}: the CDN's bucket must be a BlobStore variable declared in your project`);
       if (bucketStore.resource.provider !== "aws") throw new Error(`${at}: the CDN's bucket must use provider "aws"`);
+      if (bucketStore.resource.name.includes(".")) {
+        warnings.push(`${at}: bucket "${bucketStore.resource.name}" contains dots; CloudFront's HTTPS connection to its S3 endpoint may fail certificate checks`);
+      }
       if (bucketStore.resource.dry) {
         warnings.push(`${at}: bucket "${bucketStore.resource.name}" is dry, but the CDN adds one statement to its bucket policy`);
       }

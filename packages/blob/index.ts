@@ -104,6 +104,12 @@ export class BlobStore {
     return process.env[BlobStore.envVarFor(this.name)] ?? this.name;
   }
 
+  // Bucket name is used as the host.
+  url(key = ""): string {
+    const encoded = key.split("/").map(encodeURIComponent).join("/");
+    return `https://${this.location}/${this.path}${encoded}`;
+  }
+
   async get(key: string): Promise<Uint8Array | null> {
     return (await this.driver()).get(this.path + key);
   }

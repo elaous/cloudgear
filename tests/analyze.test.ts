@@ -174,6 +174,13 @@ describe("analyzeApp", () => {
       expect(() => analyzeApp(fixture(file))).toThrow(error);
     });
 
+    test("warns when the CDN's bucket name contains dots", () => {
+      expect(analyzeApp(fixture("edge/dotted-bucket.ts")).warnings).toEqual([
+        expect.stringMatching(/bucket "www.example.com" contains dots; CloudFront's HTTPS connection to its S3 endpoint may fail/),
+      ]);
+      expect(analyzeApp(fixture("edge/bucket-only.ts")).warnings).toEqual([]);
+    });
+
     test("warns when a function uses files the CDN makes public", () => {
       const warnings = analyzeApp(fixture("edge/shared-bucket.ts")).warnings;
       expect(warnings).toEqual([expect.stringMatching(/"readPrivate" also uses the CDN's bucket "my-site" under "private\/"; files there are public through the CDN/)]);
@@ -412,6 +419,14 @@ describe("generate", () => {
     const text = fs.readFileSync(configPath, "utf8");
     expect(text).toContain('region: "us-east-2"');
     expect(decodeConfig(text)).toEqual(config);
+  });
+
+  test("a bucket named after a domain keeps its name and gets a dotted-safe env var", async () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "domain-bucket-"));
+    const { config } = await generate({ entry: fixture("domain-bucket.ts"), configPath: path.join(dir2, "c.prototxt"), buildDir: path.join(dir2, "b"), project: "dom" });
+    expect(config.resource).toMatchObject([{ name: "assets.example.com", type: "@aws.S3", physical_name: "assets.example.com" }]);
+    expect(config.function[0]!.env).toEqual([{ key: "CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM", value_from: "assets.example.com" }]);
+    expect(config.function[0]!.permission).toMatchObject([{ resource: "assets.example.com", path: "img/", action: ["s3:GetObject", "s3:ListBucket"] }]);
   });
 
   test("rejects stores that map to the same env var", async () => {

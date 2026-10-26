@@ -157,10 +157,16 @@ describe("BlobStore", () => {
     });
 
     test("url() is the same for every provider and never touches the driver", () => {
-      const failing = new Proxy({}, { get: () => () => Promise.reject(new Error("the driver was used")) }) as never;
+      const used = () => Promise.reject(new Error("the driver was used"));
+      const failing = { get: used, put: used, delete: used, list: used, exists: used };
       const store = new BlobStore("gcp", "gs://assets.example.com", { driver: failing });
       expect(store.url("k")).toBe("https://assets.example.com/k");
-      expect(store.get("k")).rejects.toThrow("the driver was used");
+    });
+
+    test("the failing driver in the test above really is used by the other methods", async () => {
+      const used = () => Promise.reject(new Error("the driver was used"));
+      const store = new BlobStore("gcp", "gs://assets.example.com", { driver: { get: used, put: used, delete: used, list: used, exists: used } });
+      await expect(store.get("k")).rejects.toThrow("the driver was used");
     });
 
     test("keys are encoded per segment and otherwise kept as given", () => {

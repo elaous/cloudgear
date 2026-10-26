@@ -6,6 +6,7 @@
   "type": "module",
   "module": "src/cli.ts",
   "scripts": {
+    "link": "for p in ./packages/*; do cd $p; bun link; cd -; done",
     "generate": "bun src/cli.ts generate",
     "typecheck": "tsc --noEmit",
     "test": "bun test"

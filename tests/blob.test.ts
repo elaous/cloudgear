@@ -157,7 +157,20 @@ describe("BlobStore", () => {
     });
 
     test("url() is the same for every provider and never touches the driver", () => {
-      expect(new BlobStore("gcp", "gs://assets.example.com").url("k")).toBe("https://assets.example.com/k");
+      const failing = new Proxy({}, { get: () => () => Promise.reject(new Error("the driver was used")) }) as never;
+      const store = new BlobStore("gcp", "gs://assets.example.com", { driver: failing });
+      expect(store.url("k")).toBe("https://assets.example.com/k");
+      expect(store.get("k")).rejects.toThrow("the driver was used");
+    });
+
+    test("keys are encoded per segment and otherwise kept as given", () => {
+      const s = store({ path: "img" });
+      expect(s.url("")).toBe("https://assets.example.com/img/");
+      expect(s.url("q?x=1&y=%20")).toBe("https://assets.example.com/img/q%3Fx%3D1%26y%3D%2520");
+      expect(s.url("café/日本.png")).toBe("https://assets.example.com/img/caf%C3%A9/%E6%97%A5%E6%9C%AC.png");
+      expect(s.url("/lead")).toBe("https://assets.example.com/img//lead");
+      expect(s.url("a/../b")).toBe("https://assets.example.com/img/a/../b");
+      expect(() => s.url("\ud800")).toThrow(URIError);
     });
   });
 

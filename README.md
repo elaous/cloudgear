@@ -364,10 +364,12 @@ strips it again, and `cloudgear generate` scopes the function's IAM policy to
 that prefix (object access to `bucket/img-cache/*`, listing with an
 `s3:prefix` condition). Two stores may share a bucket with different paths.
 `path` MUST be a string literal. `store.url(key?)` returns
-`https://<bucket>/<path><key>` (the key's segments are URL-encoded), for a
-bucket named after the domain that serves it (`s3://assets.example.com`); the
-bucket is its physical name once deployed, and nothing is requested. On AWS, a missing key in a prefix-scoped
-store may surface as `AccessDenied` instead of `null`, because S3 only
+`https://<bucket>/<path><key>` for a bucket named after the domain that serves
+it (`s3://assets.example.com`). The key's segments are URL-encoded but not
+normalized (`a/../b` stays as written), the bucket is its physical name once
+deployed, and nothing is requested. A CDN that serves a dotted bucket may fail
+its HTTPS connection to S3 (not checked against real AWS); `generate` warns.
+On AWS, a missing key in a prefix-scoped store may surface as `AccessDenied` instead of `null`, because S3 only
 answers "not found" to callers that can list the whole bucket; this has not
 been checked against a real bucket.
 

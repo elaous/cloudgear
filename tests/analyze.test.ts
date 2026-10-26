@@ -174,6 +174,13 @@ describe("analyzeApp", () => {
       expect(() => analyzeApp(fixture(file))).toThrow(error);
     });
 
+    test("warns when the CDN's bucket name contains dots", () => {
+      expect(analyzeApp(fixture("edge/dotted-bucket.ts")).warnings).toEqual([
+        expect.stringMatching(/bucket "www.example.com" contains dots; CloudFront's HTTPS connection to its S3 endpoint may fail/),
+      ]);
+      expect(analyzeApp(fixture("edge/bucket-only.ts")).warnings).toEqual([]);
+    });
+
     test("warns when a function uses files the CDN makes public", () => {
       const warnings = analyzeApp(fixture("edge/shared-bucket.ts")).warnings;
       expect(warnings).toEqual([expect.stringMatching(/"readPrivate" also uses the CDN's bucket "my-site" under "private\/"; files there are public through the CDN/)]);

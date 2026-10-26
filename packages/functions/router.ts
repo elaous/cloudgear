@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { debug, errorSummary, timed } from "@cloudgear/debug";
 import path from "node:path";
 import {
   INVOKE_CONTENT_TYPE,
@@ -138,10 +139,14 @@ export class FunctionRouter {
   }
 
   fetch = async (req: Request): Promise<Response> => {
-    const limited = this.checkRateLimit(req);
-    if (limited) return limited;
-
     const url = new URL(req.url);
+    debug("router", `${req.method} ${url.pathname}`);
+    const limited = this.checkRateLimit(req);
+    if (limited) {
+      debug("router", `rate limited ${req.method} ${url.pathname}`);
+      return limited;
+    }
+
     let pathMatched = false;
     for (const route of this.routes) {
       let params: Record<string, string> | null;
@@ -153,6 +158,7 @@ export class FunctionRouter {
       if (!params) continue;
       pathMatched = true;
       if (route.method !== req.method) continue;
+      debug("router", `matched ${route.key}`, { name: route.name, public: route.public, params: Object.keys(params) });
       let context: RequestContext = {};
       if (this.options.authenticate && !route.public) {
         let principal: Awaited<ReturnType<Authenticator>>;
@@ -160,11 +166,14 @@ export class FunctionRouter {
           principal = await this.options.authenticate(req);
         } catch (err) {
           console.error(err);
+          debug("router", `authentication failed: ${errorSummary(err)}`);
           return Response.json({ error: "Authentication unavailable" }, { status: 503 });
         }
         if (!principal) {
+          debug("router", `rejected ${route.key}: no valid principal`);
           return Response.json({ error: "Unauthorized" }, { status: 401, headers: { "www-authenticate": "Bearer" } });
         }
+        debug("router", `authenticated ${route.key}`);
         context = { auth: principal };
       }
       let input: Record<string, unknown>;
@@ -175,6 +184,7 @@ export class FunctionRouter {
       }
       return this.dispatch(route, input, context, req);
     }
+    debug("router", `${pathMatched ? "method not allowed" : "no route"} for ${req.method} ${url.pathname}`);
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
 
@@ -234,13 +244,16 @@ export class FunctionRouter {
   }
 
   private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request): Promise<Response> {
+    debug("router", `dispatching ${route.key} in ${this.mode} mode`, { input: Object.keys(input) });
     if (this.mode === "local") {
-      const result = await invoke(route.fn, input, context);
+      const result = await timed("router", `local call ${route.key}`, () => invoke(route.fn, input, context));
+      debug("router", `local ${route.key} -> ${result.status}`);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
     }
     const endpoints = this.loadEndpoints();
     const url = endpoints?.routes[route.key];
     if (!url) {
+      debug("router", `no deployed endpoint for ${route.key}`, { known: Object.keys(endpoints?.routes ?? {}) });
       return Response.json({ error: `No deployed endpoint for "${route.key}"` }, { status: 502 });
     }
     let upstream: Response;
@@ -256,8 +269,10 @@ export class FunctionRouter {
       });
     } catch (err) {
       console.error(err);
+      debug("router", `remote call to ${route.key} failed: ${errorSummary(err)}`);
       return Response.json({ error: "Function unreachable" }, { status: 502 });
     }
+    debug("router", `remote ${route.key} -> ${upstream.status}`);
     const headers = new Headers(upstream.headers);
     // fetch() already decoded the body, so these no longer describe it.
     for (const name of ["content-encoding", "content-length", "transfer-encoding"]) headers.delete(name);
@@ -294,8 +309,13 @@ export async function request(
     ...init.headers,
   };
   const finalHeaders = init.sign ? await signFunctionUrlRequest(url, body, headers, init.sign) : headers;
+  const target = new URL(url);
   // Redirects belong to the client; following one here would resend a stale signature.
-  return fetch(url, { method: "POST", headers: finalHeaders, body, redirect: "manual" });
+  return timed("router", `POST ${target.host}${target.pathname}`, () => fetch(url, { method: "POST", headers: finalHeaders, body, redirect: "manual" }), {
+    route: init.route,
+    signed: !!init.sign,
+    bytes: body.length,
+  });
 }
 
 function readEndpoints(provider: string, file?: string): Endpoints | null {

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { debug, timed } from "@cloudgear/debug";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
 import { analyzeApp } from "./analyze/app";
@@ -19,7 +20,23 @@ export interface GenerateOptions {
 const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
-  const model = analyzeApp(options.entry);
+  const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry));
+  debug("generate", "analyzed", {
+    provider: model.provider,
+    region: model.region,
+    resources: model.resources.map((r) => ({ name: r.name, dry: r.dry, region: r.region, options: r.options })),
+    functions: model.functions.map((f) => ({
+      name: f.name,
+      file: f.file,
+      routes: f.routes.map((r) => `${r.method} ${r.path}`),
+      schedules: f.schedules,
+      uses: [...f.uses.values()].map((u) => ({ resource: u.resource, path: u.path, accesses: [...u.accesses] })),
+    })),
+    certificates: model.certificates.map((c) => ({ domain: c.domain, usage: c.usage, region: c.region })),
+    cdn: model.cdn?.domain,
+    api: model.api?.domain,
+    warnings: model.warnings.length,
+  });
   const profile = providerProfile(model.provider);
   const project = sanitize(options.project ?? projectName(path.dirname(path.resolve(options.entry))));
   const configDir = path.dirname(path.resolve(options.configPath));
@@ -62,7 +79,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
-    const bundle = await bundleFunction({
+    const bundle = await timed("generate", `bundle ${fn.name}`, () => bundleFunction({
       name: fn.name,
       sourceFile: fn.file,
       exportName: fn.exportName,
@@ -73,7 +90,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       trustContext: model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
-    });
+    }));
+    debug("generate", `bundled ${fn.name}`, { file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size });
     const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);
     const usedResources = [...new Set(used.map((use) => use.resource))];
     functions.push({
@@ -136,6 +154,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));
+  debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
   return { config, warnings: model.warnings };
 }
 

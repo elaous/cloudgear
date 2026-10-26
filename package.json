@@ -31,7 +31,8 @@
     "@cloudgear/cdn": "workspace:*",
     "@cloudgear/dns": "workspace:*",
     "@cloudgear/functions": "workspace:*",
-    "ts-morph": "^24.0.0"
+    "ts-morph": "^24.0.0",
+    "@cloudgear/debug": "workspace:*"
   },
   "workspaces": [
     "packages/*"

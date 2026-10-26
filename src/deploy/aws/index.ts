@@ -23,6 +23,7 @@ import {
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda";
 import { createHash } from "node:crypto";
+import { timed } from "@cloudgear/debug";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
@@ -63,28 +64,33 @@ const LAMBDA_TRUST_POLICY = JSON.stringify({
   Statement: [{ Effect: "Allow", Principal: { Service: "lambda.amazonaws.com" }, Action: "sts:AssumeRole" }],
 });
 
+// Logs each SDK call and its duration when CG_DEBUG is set.
+function withDebug(service: string, client: SendClient): SendClient {
+  return { send: (command) => timed(`aws.${service}`, command.constructor.name, () => client.send(command), { input: command.input }) };
+}
+
 export function awsDrivers(options: AwsDriverOptions): Drivers {
   // Buckets may live in other regions than the functions; one client per region.
   const s3Clients = new Map<string, SendClient>();
   const s3For = (region?: string): SendClient => {
     const wanted = region || options.region;
-    if (options.clients?.s3) return options.clients.s3;
-    if (!s3Clients.has(wanted)) s3Clients.set(wanted, new S3Client({ region: wanted }));
+    if (options.clients?.s3) return withDebug("s3", options.clients.s3);
+    if (!s3Clients.has(wanted)) s3Clients.set(wanted, withDebug(`s3:${wanted}`, new S3Client({ region: wanted })));
     return s3Clients.get(wanted)!;
   };
-  const lambda = options.clients?.lambda ?? new LambdaClient({ region: options.region });
-  const iam = options.clients?.iam ?? new IAMClient({ region: options.region });
+  const lambda = withDebug("lambda", options.clients?.lambda ?? new LambdaClient({ region: options.region }));
+  const iam = withDebug("iam", options.clients?.iam ?? new IAMClient({ region: options.region }));
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
   const acmClients = new Map<string, SendClient>();
   const acmFor = (region: string): SendClient => {
-    if (options.clients?.acm) return options.clients.acm;
-    if (!acmClients.has(region)) acmClients.set(region, new ACMClient({ region }));
+    if (options.clients?.acm) return withDebug("acm", options.clients.acm);
+    if (!acmClients.has(region)) acmClients.set(region, withDebug(`acm:${region}`, new ACMClient({ region })));
     return acmClients.get(region)!;
   };
   // CloudFront's API is global, reached through us-east-1.
-  const cloudfront = options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" });
-  const apigateway = options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region });
-  const events = options.clients?.events ?? new EventBridgeClient({ region: options.region });
+  const cloudfront = withDebug("cloudfront", options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" }));
+  const apigateway = withDebug("apigateway", options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region }));
+  const events = withDebug("events", options.clients?.events ?? new EventBridgeClient({ region: options.region }));
   const zones = new Map<string, Promise<DnsDriver>>();
   const requireDns = (provider: string, zone: string): Promise<DnsDriver> => {
     if (!options.dns) throw new Error("A DNS driver is required for the certificate and CDN, but none was configured");

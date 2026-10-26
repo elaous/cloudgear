@@ -243,6 +243,65 @@ what it made in state, so the next `apply` resumes from there. Functions keep
 their IAM-protected function URLs, which the router uses in remote mode; the
 API domain is a second, public way to reach them.
 
+#### Serving the router through a CDN
+
+A `CDN` serves either a `bucket` or a `router`. Passing the router puts its
+routes behind CloudFront instead of API Gateway, on a `Cert` of their own:
+
+```ts
+const router = new FunctionRouter("aws", { authenticate: jwtAuth({ issuer, header: "x-auth-token" }) })
+  .url("GET", "/items", functions.listItems)
+  .url("GET", "/items/{id}", functions.getItem);
+new CDN("aws", apiCert, { router });
+```
+
+`apply` creates a distribution for the CDN's domain whose origins are the
+functions' IAM-protected function URLs. It signs requests to them with an origin
+access control of type Lambda, adds one behavior per path (`/items/{id}` becomes
+`/items/*`, and a literal path also gets its trailing-slash variant), and allows
+only that distribution to call each function. Caching is off for these
+behaviors, plain HTTP is refused (they are HTTPS only), and a path that matches
+no behavior reaches the first function, which answers 404. A site `CDN` and a router `CDN` MAY coexist,
+each with its own `Cert`.
+
+| | API Gateway (`cert`) | CDN (`router`) |
+| --- | --- | --- |
+| Price | about $1 per million requests | within CloudFront's request pricing and free tier |
+| Same path, different methods, different functions | supported | refused unless `methodRouting: "function"` |
+| Routes | up to 300 | about 25 distinct paths by default (a quota) |
+| `POST` and `PUT` from clients | plain requests | MUST send `x-amz-content-sha256`, the SHA-256 hex digest of the body |
+| `Authorization` header | passed through | replaced by CloudFront's signature; `jwtAuth` MUST read another header |
+| Site and API on one domain | no | no; the CDN serves one or the other |
+| Deploy time | seconds | minutes per distribution update |
+
+Route changes reach CloudFront's edges over a few minutes, and requests for the
+changed routes MAY get a 404 or a 5xx meanwhile. Moving a domain between `cert`
+and a CDN stops at the old CNAME: remove that DNS record first, or use another
+domain.
+
+A router MUST NOT have both a `cert` and a CDN. With a CDN, functions are
+called directly like with a `cert`: the router's `authenticate` hook and
+`rateLimit` do not run (see the rules below), and `authenticated` MUST be
+`"iam"`.
+
+CloudFront routes by path only. When different functions serve the same path
+for different methods, or a literal path such as `POST /items/new` hides methods
+of the param path that covers it (`GET /items/{id}`), `cloudgear generate` stops
+and lists the paths with the options. Give those paths one function that handles every method, serve the
+router through API Gateway, or set `methodRouting: "function"` on the CDN:
+
+```ts
+new CDN("aws", apiCert, { router, methodRouting: "function" });
+```
+
+`apply` then publishes a CloudFront Function that picks the function by method
+and path on every request (a `HEAD` request goes to the `GET` route unless the
+path has a `HEAD` route) and answers 404 for anything else. CloudFront charges
+for its invocations (about $0.10 per million after 2 million free a month; check
+current pricing) and every request pays a little latency. The function is only
+created when some path needs it; otherwise `generate` warns that the option has
+no effect.
+
 DNS providers (`new DNS(provider, domain, { zone })`): `"gandi"` (LiveDNS; set
 `GANDI_TOKEN` to a personal access token, or the legacy `GANDI_API_KEY`) and
 `"aws"` (Route 53; needs a public hosted zone named like the zone, with
@@ -260,8 +319,10 @@ Rules the analyzer enforces:
 
 - An app MAY declare any number of `DNS` and `Cert`s, one `DNS` per `Cert`,
   each assigned to a variable with literal arguments; two `Cert`s MUST NOT
-  cover the same domain. At most one `CDN`, and at most one router `cert`.
-- The CDN and the router MUST NOT share a `Cert`: each serves its own domain.
+  cover the same domain. At most one `CDN` with a `bucket`, at most one `CDN`
+  with a `router`, and at most one router `cert`.
+- Two CDNs, or a CDN and the router, MUST NOT share a `Cert`: each serves its
+  own domain.
 - A `Cert` needs neither: declare only `DNS` and `Cert` to get a validated
   certificate (it may then cover the zone apex). `new Cert(provider, dns, {
   region })` sets the region of a certificate that nothing uses; for a CDN it
@@ -282,6 +343,8 @@ Rules the analyzer enforces:
   pass the URL in as configuration there.
 - `examples/cdn-app` is a complete app: two domains, a CDN and a routed
   function with a `@policy`.
+- A CDN's `router` MUST be the app's `FunctionRouter`, passed as a variable.
+  `POST` and `PUT` routes make `generate` warn about the payload hash header.
 - Requests on the router's domain reach functions directly, so the router's
   `authenticate` hook and `rateLimit` do not run for them. `generate` refuses
   a router that has a custom `authenticate` unless every route is
@@ -726,6 +789,8 @@ Where each moving part lives, since several are called across packages:
 | certificate, CloudFront and API Gateway drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts`, `apigateway.ts` | `awsDrivers` |
 | schedule driver (EventBridge) | `src/deploy/aws/schedule.ts` | `awsDrivers` |
 | `cron`, `schedule` | `packages/functions/cron.ts` | apps; `src/analyze/app.ts`, `src/deploy/plan.ts` |
+| `groupRoutes`, `conflictingGroups` (CloudFront paths) | `src/routes.ts` | `src/analyze/app.ts`, `src/deploy/plan.ts` |
+| `routeFunctionCode` (method routing) | `src/deploy/aws/route-function.ts` | `src/deploy/aws/cloudfront.ts` |
 | `debug`, `timed`, `redact` | `packages/debug/index.ts` | every package and `src/` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
@@ -737,4 +802,4 @@ Early draft. Only the `aws` provider has deploy drivers (`gcp` is described and 
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has at most one
-CDN, and uploading the static site is not built yet.
+CDN per kind (bucket or router), and uploading the static site is not built yet.

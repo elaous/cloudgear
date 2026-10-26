@@ -13,6 +13,7 @@ import {
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
 import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
+import { behaviorsFor, conflictingGroups } from "../routes";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -95,8 +96,8 @@ export interface EdgeModel {
     bucket: string;
     path: string;
   };
-  // The router's own domain, served through API Gateway.
-  api?: { provider: string; domain: string };
+  // The router's own domain, through API Gateway or a CDN.
+  api?: { provider: string; domain: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
 }
 
 export interface AppModel extends EdgeModel {
@@ -198,7 +199,13 @@ export function analyzeApp(entryPath: string): AppModel {
   const publicRoutes = new Map<string, boolean>();
 
   const functions = new Map<Node, AnalyzedFunction>();
-  const addCalls = collectAddCalls(router, where);
+  const isCdnRouterOption = (node: Node) => {
+    if (!Node.isShorthandPropertyAssignment(node) && !Node.isPropertyAssignment(node)) return false;
+    if (propName(node) !== "router") return false;
+    const created = node.getParent()?.getParent();
+    return !!created && Node.isNewExpression(created) && isClass(created, "@cloudgear/cdn", "CDN");
+  };
+  const addCalls = collectAddCalls(router, where, isCdnRouterOption);
   const scheduledMethods = findScheduledMethods();
   if (addCalls.length === 0 && scheduledMethods.length === 0) {
     throw new Error(`${where(router)}: FunctionRouter has no .url(...) routes`);
@@ -263,7 +270,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const flags = fn.routes.map((r) => publicRoutes.get(`${r.method} ${r.path}`) ?? false);
       if (flags.some(Boolean) && !flags.every(Boolean)) {
         throw new Error(
-          `${fn.file}: "${fn.name}" serves both public and protected routes; with a cert on the router a function verifies tokens as a whole, so give each its own function`,
+          `${fn.file}: "${fn.name}" serves both public and protected routes; with a cert or a CDN on the router a function verifies tokens as a whole, so give each its own function`,
         );
       }
       fn.anonymous = flags.every(Boolean);
@@ -374,7 +381,14 @@ export function analyzeApp(entryPath: string): AppModel {
       if (routerCert) throw new Error(`${where(router)}: the router's cert needs a Cert declared with new Cert(...)`);
       return { certificates: [] };
     }
-    if (cdnExprs.length > 1) throw new Error(`Only one CDN per app is supported, found: ${cdnExprs.map(where).join(", ")}`);
+    const servesRouter = (expr: NewExpression) => {
+      const options = expr.getArguments()[2];
+      return !!options && Node.isObjectLiteralExpression(options) && options.getProperties().some((prop) => !Node.isSpreadAssignment(prop) && propName(prop) === "router");
+    };
+    const siteCdnExprs = cdnExprs.filter((expr) => !servesRouter(expr));
+    const routerCdnExprs = cdnExprs.filter(servesRouter);
+    if (siteCdnExprs.length > 1) throw new Error(`Only one CDN per app can serve a bucket, found: ${siteCdnExprs.map(where).join(", ")}`);
+    if (routerCdnExprs.length > 1) throw new Error(`Only one CDN per app can serve the router, found: ${routerCdnExprs.map(where).join(", ")}`);
 
     const initializerOf = (node: Node | undefined, what: string, at: string): NewExpression => {
       const decl = node && Node.isIdentifier(node) ? resolveSymbol(node.getSymbol())?.getDeclarations()[0] : undefined;
@@ -424,7 +438,7 @@ export function analyzeApp(entryPath: string): AppModel {
 
     let cdn: EdgeModel["cdn"];
     let cdnCert: CertificateModel | undefined;
-    const [cdnExpr] = cdnExprs;
+    const [cdnExpr] = siteCdnExprs;
     if (cdnExpr) {
       const at = where(cdnExpr);
       const [providerArg, certArg, optionsArg] = cdnExpr.getArguments();
@@ -473,6 +487,23 @@ export function analyzeApp(entryPath: string): AppModel {
     }
 
     let api: EdgeModel["api"];
+    const [routerCdnExpr] = routerCdnExprs;
+    if (routerCert !== undefined && routerCdnExpr) {
+      throw new Error(`${where(router)}: serve the router through API Gateway (a cert) or through a CDN, not both`);
+    }
+    const directCalls = (at: string, how: string, advice: string, domainOf: string) => {
+      if (hasOption(routerOptions, "authenticate") && !jwtSettings) {
+        const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
+        if (open) {
+          throw new Error(
+            `${at}: with ${how}, functions are called directly and the router's authenticate hook does not run for "${open[0]}"; mark it { public: true }, use jwtAuth, or ${advice}`,
+          );
+        }
+      }
+      if (hasOption(routerOptions, "rateLimit")) {
+        warnings.push(`${at}: rateLimit does not apply to routes served on ${domainOf}`);
+      }
+    };
     if (routerCert !== undefined) {
       const at = where(router);
       const cert = certOf(routerCert, "the router's cert", at);
@@ -484,19 +515,77 @@ export function analyzeApp(entryPath: string): AppModel {
       if (cert.region && cert.region !== routerRegion) {
         throw new Error(`${at}: the router's Cert must be in the function region (${routerRegion ?? "the deploy region"}), but it says ${cert.region}`);
       }
-      if (hasOption(routerOptions, "authenticate") && !jwtSettings) {
-        const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
-        if (open) {
-          throw new Error(
-            `${at}: with a cert, API Gateway calls functions directly and the router's authenticate hook does not run for "${open[0]}"; mark it { public: true }, use jwtAuth, or drop the cert`,
-          );
-        }
-      }
-      if (hasOption(routerOptions, "rateLimit")) {
-        warnings.push(`${at}: rateLimit does not apply to routes served on the cert's domain`);
-      }
+      directCalls(at, "a cert on the router", "drop the cert", "the cert's domain");
       cert.usage = "api";
       api = { provider: "aws", domain: cert.domain };
+    }
+    if (routerCdnExpr) {
+      const at = where(routerCdnExpr);
+      const [providerArg, certArg, optionsArg] = routerCdnExpr.getArguments();
+      if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
+      const cert = certOf(certArg, "the CDN's cert", at);
+      if (cert === cdnCert) throw new Error(`${at}: two CDNs cannot share a Cert; give each its own domain`);
+      subdomain(cert, at, "the API");
+      if (cert.region && cert.region !== "us-east-1") throw new Error(`${at}: a CDN needs its certificate in us-east-1, but the Cert says ${cert.region}`);
+      if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with a router`);
+      let routerOk = false;
+      for (const prop of optionsArg.getProperties()) {
+        if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in CDN options cannot be analyzed`);
+        const key = propName(prop);
+        if (key === "bucket") throw new Error(`${at}: a CDN serves either a bucket or a router, not both`);
+        if (key === "router") {
+          const decl = valueDeclaration(prop);
+          routerOk = !!decl && Node.isVariableDeclaration(decl) && chainRoot(decl.getInitializer()) === router;
+        }
+      }
+      if (!routerOk) throw new Error(`${at}: the CDN's router must be the app's FunctionRouter, passed as a variable`);
+      const methodRouting = readStringOption(optionsArg, "methodRouting", `${at}: CDN options`);
+      if (methodRouting !== undefined && methodRouting !== "function") throw new Error(`${at}: methodRouting must be "function"`);
+      if (authenticated !== "iam") {
+        throw new Error(`${where(router)}: a CDN reaches functions through CloudFront origin access control, which needs authenticated: "iam"`);
+      }
+      if (jwtSettings?.header === "authorization") {
+        throw new Error(
+          `${where(router)}: with a CDN, jwtAuth needs a header other than "authorization" (for example { header: "x-auth-token" }); CloudFront origin access control signs requests to functions with that header`,
+        );
+      }
+      directCalls(where(router), "a CDN", "drop the CDN", "the CDN's domain");
+
+      const routes = [...functions.values()].flatMap((fn) => fn.routes.map((r) => ({ method: r.method, path: r.path, function: fn.name })));
+      const conflicts = conflictingGroups(routes);
+      if (conflicts.length && methodRouting !== "function") {
+        const lines = conflicts.map((group) => `  ${group.pattern} is served by ${group.functions.map((name) => `"${name}"`).join(" and ")} (${group.methods.join(", ")})`);
+        throw new Error(
+          [
+            `${at}: CloudFront routes by path only, but these paths reach different functions:`,
+            ...lines,
+            "Choose one:",
+            "  - serve the router through API Gateway: pass { cert } to the router instead of a CDN (about $1 per million requests, no extra charge for method routing);",
+            "  - give each of those paths one function that handles every method;",
+            '  - set methodRouting: "function" on the CDN: a CloudFront Function picks the function by method and path on every request (about $0.10 per million invocations after 2 million free a month, plus a little latency; check current CloudFront pricing).',
+          ].join("\n"),
+        );
+      }
+      if (methodRouting === "function" && !conflicts.length) {
+        warnings.push(`${at}: methodRouting is set but no path reaches several functions; no CloudFront Function will be created`);
+      }
+      const behaviors = methodRouting === "function" && conflicts.length ? 0 : behaviorsFor(routes).length;
+      const origins = new Set(routes.map((r) => r.function)).size;
+      if (behaviors > 25 || origins > 25) {
+        warnings.push(`${at}: ${behaviors} behaviors and ${origins} origins; a CloudFront distribution allows 25 of each by default, so request a quota increase`);
+      }
+      const bodied = new Set(routes.map((r) => r.method).filter((m) => m === "POST" || m === "PUT"));
+      if (bodied.size) {
+        warnings.push(`${at}: ${[...bodied].sort().join(" and ")} requests through the CDN MUST carry an x-amz-content-sha256 header holding the SHA-256 hex digest of the body (origin access control for Lambda requires it)`);
+      }
+      cert.usage = "cdn";
+      api = {
+        provider: "aws",
+        domain: cert.domain,
+        via: "cloudfront",
+        ...(methodRouting === "function" && conflicts.length ? { method_routing: true } : {}),
+        options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
+      };
     }
     return { certificates: [...certificates.values()], cdn, api };
   }
@@ -890,10 +979,21 @@ function readCertReference(options: Node | undefined, at: string): Node | undefi
   return undefined;
 }
 
+// Follows `new X().a().b()` back to `new X()`.
+function chainRoot(node: Node | undefined): Node | undefined {
+  let current = node;
+  while (current && Node.isCallExpression(current)) {
+    const callee = current.getExpression();
+    if (!Node.isPropertyAccessExpression(callee)) return undefined;
+    current = callee.getExpression();
+  }
+  return current;
+}
+
 const ROUTER_MEMBERS = new Set(["listen", "fetch", "provider", "mode"]);
 
 // Follows .url chains through variables; throws if the router flows anywhere untraceable.
-function collectAddCalls(router: NewExpression, where: (node: Node) => string): CallExpression[] {
+function collectAddCalls(router: NewExpression, where: (node: Node) => string, isCdnOption: (node: Node) => boolean): CallExpression[] {
   const calls: CallExpression[] = [];
   const followed = new Set<Node>();
 
@@ -922,6 +1022,7 @@ function collectAddCalls(router: NewExpression, where: (node: Node) => string): 
       throw new Error(`${where(top)}: export the router with a name (export const router = ...) so its routes can be traced`);
     }
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === top && ROUTER_MEMBERS.has(parent.getName())) return;
+    if (parent && isCdnOption(parent)) return;
     throw new Error(
       `${where(top)}: the router is used in a way cloudgear cannot trace ("${parent?.getText().slice(0, 60)}"); keep .url(...) calls on the router variable`,
     );

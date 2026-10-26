@@ -93,6 +93,7 @@ interface CompiledRoute {
 interface Endpoints {
   routes: Record<string, string>;
   auth?: EndpointAuth;
+  api?: { domain: string };
 }
 
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
@@ -213,7 +214,8 @@ export class FunctionRouter {
     const endpoints = remote ? this.loadEndpoints() : null;
     if (remote && !endpoints) throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
     const local = this.server?.url.origin;
-    const api = remote && this.options.cert ? `https://${this.options.cert.domain}` : undefined;
+    const apiDomain = remote ? (this.options.cert?.domain ?? endpoints?.api?.domain) : undefined;
+    const api = apiDomain ? `https://${apiDomain}` : undefined;
     if (api) return Object.fromEntries(this.routes.map((route) => [route.name, `${api}${route.path}`]));
     if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
     const urls: Record<string, string> = {};
@@ -331,7 +333,8 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   }
   // Nothing deployed (for example after destroy): stay in local mode.
   if (Object.keys(parsed.routes).length === 0) return null;
-  return { routes: parsed.routes, auth: parsed.auth };
+  const apiDomain = typeof parsed.api?.domain === "string" ? parsed.api.domain : undefined;
+  return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain } } : {}) };
 }
 
 // Stops at the nearest package.json so a parent project's endpoints are never picked up.

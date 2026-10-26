@@ -34,6 +34,9 @@ export interface CertificateSpec {
 export interface ApiSpec {
   provider: string;
   domain: string;
+  via?: "cloudfront";
+  method_routing?: boolean;
+  options?: Options;
 }
 
 export interface CdnSpec {
@@ -85,6 +88,7 @@ const REPEATED = new Set([
   "function.options",
   "function.schedule",
   "certificate.options",
+  "api.options",
   "cdn.options",
 ]);
 
@@ -119,7 +123,13 @@ export function decodeConfig(text: string): CloudgearConfig {
       path: String(raw.cdn.path ?? ""),
       ...optionsFrom(raw.cdn),
     },
-    api: raw.api && { provider: str(raw.api, "provider"), domain: str(raw.api, "domain") },
+    api: raw.api && {
+      provider: str(raw.api, "provider"),
+      domain: str(raw.api, "domain"),
+      ...(raw.api.via === "cloudfront" ? { via: "cloudfront" as const } : {}),
+      ...(raw.api.method_routing === true ? { method_routing: true } : {}),
+      ...optionsFrom(raw.api),
+    },
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
       type: str(r, "type"),
@@ -170,6 +180,7 @@ function optionsToProto(config: CloudgearConfig): unknown {
     function: config.function.map(withOptions),
     certificate: config.certificate.map(withOptions),
     cdn: config.cdn && withOptions(config.cdn),
+    api: config.api && withOptions(config.api),
   };
 }
 

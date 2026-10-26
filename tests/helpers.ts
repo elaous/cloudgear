@@ -67,6 +67,8 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
       throw Object.assign(new Error("no policy"), { name: "NoSuchBucketPolicy" });
     },
     CreateInvalidationCommand: () => ({ Invalidation: { Id: "I1" } }),
+    PutRuleCommand: (input) => ({ RuleArn: `arn:aws:events:eu-west-1:1:rule/${input.Name}` }),
+    PutTargetsCommand: () => ({ FailedEntryCount: 0 }),
   };
   const client: SendClient = {
     async send(command) {
@@ -81,7 +83,7 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
   const drivers = awsDrivers({
     region: "eu-west-1",
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
-    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client },
+    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client },
     dns: dns ? (provider, zone) => (onDns?.(provider, zone), dns) : undefined,
     sleep: async () => void sleeps.push(0),
     log: (message) => void logs.push(message),

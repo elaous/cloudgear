@@ -380,6 +380,40 @@ Deployed functions find the physical store through the env var
 `BlobStore.envVarFor(name)` (`CLOUDGEAR_BLOB_<NAME>`), which `cloudgear
 generate` writes into the config and `BlobStore.location` reads.
 
+### Scheduled functions
+
+A function can also run on a schedule, with a `cron` template string (standard
+five fields, minute hour day-of-month month day-of-week, always UTC), either as
+a route option or with the `@schedule` decorator:
+
+```ts
+import { FunctionRouter, cron, schedule } from "@cloudgear/functions";
+
+export class Jobs {
+  @schedule(cron`0 3 * * *`)
+  static async nightly() { /* no route, no URL */ }
+}
+new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * * * *` });
+```
+
+- `@schedule` goes on a `static` method of an exported class and makes it a
+  function of its own, with no route and no function URL; `@schedule` and the
+  `schedule` option MAY be combined and repeated, and an app MAY have no
+  routes at all. Both are read by `generate`, so the value MUST be a literal
+  `cron` template without `${}`; they do nothing at runtime.
+- On AWS each expression becomes an EventBridge rule (`@aws.Schedule`) that
+  targets the function, plus a Lambda permission for `events.amazonaws.com`.
+  `cron` is converted to EventBridge's six-field form (`*/15 * * * *` becomes
+  `cron(0/15 * * * ? *)`). Seconds are not supported, and day-of-month and
+  day-of-week MUST NOT both be restricted.
+- The function is called with `{ scheduledTime, rule }` and no `context.auth`;
+  token verification behind a CDN does not apply to it. A run that fails is
+  thrown, so Lambda records it. Scheduled runs do not happen under `listen()`.
+- Changing an expression or the function's name replaces the rule. The
+  provider profile names the deployer type (`schedule.type` in
+  `src/providers.ts`), so another provider's scheduler (Cloud Scheduler on GCP)
+  is a new deployer, not yet implemented.
+
 ### Provider options
 
 Settings that have no dedicated option go in `options`, a map of string,
@@ -593,6 +627,8 @@ Where each moving part lives, since several are called across packages:
 | CDN drivers (`cloudfront`, `memory-cdn`) | `packages/cdn/cdn-driver.ts`, `packages/cdn/drivers/` | `CDN.status()`, `CDN.url()` |
 | `policy`, `permissions` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | certificate and CloudFront drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts` | `awsDrivers` |
+| schedule driver (EventBridge) | `src/deploy/aws/schedule.ts` | `awsDrivers` |
+| `cron`, `schedule` | `packages/functions/cron.ts` | apps; `src/analyze/app.ts`, `src/deploy/plan.ts` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |

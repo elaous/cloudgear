@@ -11,7 +11,7 @@ import {
 } from "ts-morph";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
-import { METHODS } from "@cloudgear/functions";
+import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -47,6 +47,8 @@ export interface AnalyzedFunction {
   // Every route is `public`, so the function skips token verification.
   anonymous?: boolean;
   options?: Record<string, string>;
+  // Five-field UTC cron expressions that also trigger the function.
+  schedules: string[];
 }
 
 // Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
@@ -186,7 +188,10 @@ export function analyzeApp(entryPath: string): AppModel {
 
   const functions = new Map<Node, AnalyzedFunction>();
   const addCalls = collectAddCalls(router, where);
-  if (addCalls.length === 0) throw new Error(`${where(router)}: FunctionRouter has no .url(...) routes`);
+  const scheduledMethods = findScheduledMethods();
+  if (addCalls.length === 0 && scheduledMethods.length === 0) {
+    throw new Error(`${where(router)}: FunctionRouter has no .url(...) routes`);
+  }
   for (const call of addCalls) {
     const [methodArg, pathArg, fnArg] = call.getArguments();
     const method = stringLiteral(methodArg, `${where(call)}: route method`).toUpperCase();
@@ -199,64 +204,7 @@ export function analyzeApp(entryPath: string): AppModel {
     if (!decl || !fnNode || !isLocal(decl)) {
       throw new Error(`${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`);
     }
-    let fn = functions.get(decl);
-    if (!fn) {
-      const target = exportTargetOf(decl);
-      if (!target) {
-        throw new Error(
-          `${where(decl)}: "${fnArg.getText()}" must be exported so it can be bundled on its own (a named function, or a method of an exported object)`,
-        );
-      }
-      const param = fnNode.getParameters()[0];
-      fn = {
-        name: target.member
-          ? `${target.exportName}-${target.member}`
-          : target.exportName === "default"
-            ? path.basename(decl.getSourceFile().getFilePath(), ".ts")
-            : target.exportName,
-        declaredName: declaredNameOf(decl),
-        file: relative(decl.getSourceFile().getFilePath()),
-        exportName: target.exportName,
-        member: target.member,
-        inputType: param?.getTypeNode()?.getText(),
-        routes: [],
-        uses: new Map(),
-      };
-      const tallies = new Map<string, Tally>();
-      collectUsage(fnNode, tallies, new Set());
-      const policies = readPolicies(fnNode, fn.name);
-      for (const [key, allowed] of policies) {
-        const tally = tallies.get(key);
-        const extra = [...(tally ? [...tally.ops, ...tally.grants] : [])].filter((access) => !allowed.has(access));
-        if (tally?.widenedAt && tally.grants.size === 0) {
-          throw new Error(
-            `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value, so the @policy of "${fn.name}" cannot guard it; call it directly or declare grant(store, ...)`,
-          );
-        }
-        if (tally && extra.length) {
-          throw new Error(
-            `${where(decl)}: "${fn.name}" needs ${[...new Set(extra)].map((a) => permissionName(a)).join(", ")} on "${tally.store.resource.name}", which its @policy does not allow`,
-          );
-        }
-      }
-      for (const [key, tally] of tallies) {
-        const policy = policies.get(key);
-        if (policy) continue;
-        let accesses = new Set([...tally.ops, ...tally.grants]);
-        if (tally.widenedAt && tally.grants.size === 0) {
-          accesses = new Set(ALL_ACCESS);
-          warnings.push(
-            `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value; granting every operation on it (use grant(store, ...) to narrow)`,
-          );
-        }
-        fn.uses.set(key, { resource: tally.store.resource.name, path: tally.store.path, accesses });
-      }
-      for (const [key, accesses] of policies) {
-        const [resource, storePath] = key.split("\0") as [string, string];
-        fn.uses.set(key, { resource, path: storePath, accesses });
-      }
-      functions.set(decl, fn);
-    }
+    const fn = functionFor(decl, fnNode, fnArg.getText());
     checkPathParams(routePath, fnNode, where(call));
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
@@ -268,6 +216,7 @@ export function analyzeApp(entryPath: string): AppModel {
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
     fn.routes.push({ method, path: routePath, name: routeName });
+    addSchedules(fn, readScheduleOption(call.getArguments()[3], `${where(call)}: route`));
     const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
     const earlier = routeOptionsOf.get(fn);
     if (earlier && !sameOptions(earlier.options, routeFunctionOptions)) {
@@ -275,6 +224,12 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     routeOptionsOf.set(fn, earlier ?? { options: routeFunctionOptions, at: where(call) });
     fn.options = routeFunctionOptions;
+  }
+
+  for (const method of scheduledMethods) {
+    const fnNode = functionNode(method.node)!;
+    const fn = functionFor(method.node, fnNode, method.label);
+    addSchedules(fn, method.schedules);
   }
 
   for (const fn of functions.values()) {
@@ -592,11 +547,135 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   }
 
+  function addSchedules(fn: AnalyzedFunction, schedules: string[]) {
+    for (const expression of schedules) if (!fn.schedules.includes(expression)) fn.schedules.push(expression);
+  }
+
+  function isCronTag(node: Node): boolean {
+    if (!Node.isTaggedTemplateExpression(node)) return false;
+    const tag = node.getTag();
+    const decl = Node.isIdentifier(tag) ? resolveSymbol(tag.getSymbol())?.getDeclarations()[0] : undefined;
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "cron" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+  }
+
+  function readCron(node: Node | undefined, at: string): string {
+    if (!node || !isCronTag(node) || !Node.isTaggedTemplateExpression(node)) {
+      throw new Error(`${at}: a schedule must be cron\`...\` from @cloudgear/functions, got: ${node?.getText() ?? "nothing"}`);
+    }
+    const template = node.getTemplate();
+    if (!Node.isNoSubstitutionTemplateLiteral(template)) throw new Error(`${at}: cron\`...\` cannot contain \${} substitutions`);
+    try {
+      toEventBridgeCron(template.getLiteralValue());
+      return normalizeCron(template.getLiteralValue());
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+  }
+
+  function readSchedules(node: Node | undefined, at: string): string[] {
+    const nodes = node && Node.isArrayLiteralExpression(node) ? node.getElements() : [node];
+    return nodes.map((item) => readCron(item, at));
+  }
+
+  function readScheduleOption(options: Node | undefined, at: string): string[] {
+    if (!options || !Node.isObjectLiteralExpression(options)) return [];
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "schedule");
+    if (!prop) return [];
+    return readSchedules(Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined, at);
+  }
+
+  function isScheduleDecorator(decorator: Node): boolean {
+    if (!Node.isDecorator(decorator)) return false;
+    const callee = decorator.getCallExpression()?.getExpression();
+    const decl = callee && Node.isIdentifier(callee) ? resolveSymbol(callee.getSymbol())?.getDeclarations()[0] : undefined;
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "schedule" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+  }
+
+  // Methods carrying `@schedule(cron`...`)`, routed or not.
+  function findScheduledMethods(): { node: Node; label: string; schedules: string[] }[] {
+    const found: { node: Node; label: string; schedules: string[] }[] = [];
+    for (const file of localFiles) {
+      for (const method of file.getDescendantsOfKind(SyntaxKind.MethodDeclaration)) {
+        const decorators = method.getDecorators().filter(isScheduleDecorator);
+        if (!decorators.length) continue;
+        const at = where(method);
+        if (!Node.isClassDeclaration(method.getParent()) || !method.isStatic()) {
+          throw new Error(`${at}: @schedule applies to a static method of an exported class`);
+        }
+        const schedules = decorators.flatMap((decorator) => readSchedules(decorator.getCallExpression()?.getArguments()[0], `${where(decorator)}: @schedule`));
+        found.push({ node: method, label: method.getName(), schedules });
+      }
+    }
+    return found;
+  }
+
   function isPolicyDecorator(decorator: Node): boolean {
     if (!Node.isDecorator(decorator)) return false;
     const callee = decorator.getCallExpression()?.getExpression();
     const decl = callee && Node.isIdentifier(callee) ? resolveSymbol(callee.getSymbol())?.getDeclarations()[0] : undefined;
     return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "policy" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/blob";
+  }
+
+  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string): AnalyzedFunction {
+    const existing = functions.get(decl);
+    if (existing) return existing;
+    const target = exportTargetOf(decl);
+    if (!target) {
+      throw new Error(
+        `${where(decl)}: "${label}" must be exported so it can be bundled on its own (a named function, or a method of an exported object)`,
+      );
+    }
+    const param = fnNode.getParameters()[0];
+    const fn: AnalyzedFunction = {
+      name: target.member
+        ? `${target.exportName}-${target.member}`
+        : target.exportName === "default"
+          ? path.basename(decl.getSourceFile().getFilePath(), ".ts")
+          : target.exportName,
+      declaredName: declaredNameOf(decl),
+      file: relative(decl.getSourceFile().getFilePath()),
+      exportName: target.exportName,
+      member: target.member,
+      inputType: param?.getTypeNode()?.getText(),
+      routes: [],
+      schedules: [],
+      uses: new Map(),
+    };
+    const tallies = new Map<string, Tally>();
+    collectUsage(fnNode, tallies, new Set());
+    const policies = readPolicies(fnNode, fn.name);
+    for (const [key, allowed] of policies) {
+      const tally = tallies.get(key);
+      const extra = [...(tally ? [...tally.ops, ...tally.grants] : [])].filter((access) => !allowed.has(access));
+      if (tally?.widenedAt && tally.grants.size === 0) {
+        throw new Error(
+          `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value, so the @policy of "${fn.name}" cannot guard it; call it directly or declare grant(store, ...)`,
+        );
+      }
+      if (tally && extra.length) {
+        throw new Error(
+          `${where(decl)}: "${fn.name}" needs ${[...new Set(extra)].map((a) => permissionName(a)).join(", ")} on "${tally.store.resource.name}", which its @policy does not allow`,
+        );
+      }
+    }
+    for (const [key, tally] of tallies) {
+      const policy = policies.get(key);
+      if (policy) continue;
+      let accesses = new Set([...tally.ops, ...tally.grants]);
+      if (tally.widenedAt && tally.grants.size === 0) {
+        accesses = new Set(ALL_ACCESS);
+        warnings.push(
+          `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value; granting every operation on it (use grant(store, ...) to narrow)`,
+        );
+      }
+      fn.uses.set(key, { resource: tally.store.resource.name, path: tally.store.path, accesses });
+    }
+    for (const [key, accesses] of policies) {
+      const [resource, storePath] = key.split("\0") as [string, string];
+      fn.uses.set(key, { resource, path: storePath, accesses });
+    }
+    functions.set(decl, fn);
+    return fn;
   }
 
   // Permissions a routed method declares with `@policy(store, { permissions: [...] })`, by store key.

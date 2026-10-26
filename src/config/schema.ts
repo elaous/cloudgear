@@ -61,6 +61,7 @@ export interface FunctionSpec {
   env: { key: string; value?: string; value_from?: string }[];
   reserved_concurrency: number;
   options?: Options;
+  schedule?: string[];
 }
 
 const REPEATED = new Set([
@@ -75,6 +76,7 @@ const REPEATED = new Set([
   "cdn.behavior.method",
   "resource.options",
   "function.options",
+  "function.schedule",
   "certificate.options",
   "cdn.options",
 ]);
@@ -142,6 +144,7 @@ export function decodeConfig(text: string): CloudgearConfig {
         e.value_from !== undefined ? { key: str(e, "key"), value_from: str(e, "value_from") } : { key: str(e, "key"), value: String(e.value ?? "") },
       ),
       reserved_concurrency: Number(f.reserved_concurrency ?? 0),
+      ...(f.schedule?.length ? { schedule: f.schedule.map(String) } : {}),
       ...optionsFrom(f),
     })),
   };

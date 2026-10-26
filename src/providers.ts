@@ -15,6 +15,7 @@ export interface ProviderProfile {
   function: { type: string; runtime: string; memoryMb: number; timeoutS: number };
   blobStore: { type: string; actions: Record<BlobAccess, string[]> };
   cdn: { type: string; certificate: string };
+  schedule: { type: string };
 }
 
 const oneOf =
@@ -47,6 +48,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     },
     function: { type: "@aws.Lambda", runtime: "nodejs22.x", memoryMb: 256, timeoutS: 10 },
     cdn: { type: "@aws.CloudFront", certificate: "@aws.Certificate" },
+    schedule: { type: "@aws.Schedule" },
     blobStore: {
       type: "@aws.S3",
       actions: {

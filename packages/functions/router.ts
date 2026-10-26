@@ -17,6 +17,7 @@ import {
   type Provider,
 } from "./http";
 import type { Authenticator } from "./auth";
+import type { CronSchedule } from "./cron";
 import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
 
 export type ProviderOptions = Record<string, string | number | boolean>;
@@ -31,6 +32,8 @@ export interface RouteOptions {
   public?: boolean;
   // Provider settings of the route's function; literals only.
   options?: ProviderOptions;
+  // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
+  schedule?: CronSchedule | CronSchedule[];
 }
 
 export interface EndpointsFile {

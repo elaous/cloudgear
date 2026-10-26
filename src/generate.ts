@@ -94,6 +94,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
       reserved_concurrency: reservedConcurrency,
       options: fn.options,
+      schedule: fn.schedules.length ? fn.schedules : undefined,
     });
   }
 

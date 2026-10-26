@@ -1,4 +1,6 @@
 import type { CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
+import { createHash } from "node:crypto";
+import { toEventBridgeCron } from "@cloudgear/functions";
 import { providerProfile, validateConfigOptions } from "../providers";
 import { stateKey, type State, type StateEntry } from "./state";
 
@@ -25,6 +27,13 @@ export interface CertificateComparable {
   dns_provider: string;
   dns_zone: string;
   options?: Record<string, string>;
+}
+
+export interface ScheduleComparable {
+  cron: string;
+  expression: string;
+  function: string;
+  function_key: string;
 }
 
 export interface CdnComparable {
@@ -60,6 +69,7 @@ export interface FunctionComparable {
   reserved_concurrency: number;
   options?: Record<string, string>;
   auth: "iam" | "none";
+  scheduled_only?: true;
   invokers: string[];
   permissions: { type: string; physical_name: string; path: string; actions: string[] }[];
 }
@@ -68,7 +78,7 @@ const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   code: ["code"],
   config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency", "options"],
   permissions: ["permissions"],
-  auth: ["auth"],
+  auth: ["auth", "scheduled_only"],
   invokers: ["invokers"],
 };
 
@@ -109,6 +119,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       reserved_concurrency: fn.reserved_concurrency,
       ...optionsSpec(fn.options),
       auth: config.authenticated,
+      ...(fn.route.length ? {} : { scheduled_only: true as const }),
       invokers: config.authenticated === "iam" ? [...config.invoker].sort() : [],
       env: Object.fromEntries(
         fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
@@ -133,6 +144,23 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         return resource ? [stateKey(resource)] : [];
       }),
     });
+  }
+
+  for (const fn of config.function) {
+    for (const cron of fn.schedule ?? []) {
+      const id = createHash("sha256").update(cron).digest("hex").slice(0, 8);
+      entries.push({
+        kind: "resource",
+        type: providerProfile(config.provider).schedule.type,
+        name: `${fn.name}@${id}`,
+        physical_name: `${fn.physical_name.slice(0, 55)}-${id}`,
+        dry: false,
+        spec: { cron, expression: toEventBridgeCron(cron), function: fn.physical_name, function_key: stateKey(fn) } satisfies ScheduleComparable,
+        source: fn,
+        deps: [stateKey(fn)],
+        refresh: true,
+      });
+    }
   }
 
   if (config.certificate) {

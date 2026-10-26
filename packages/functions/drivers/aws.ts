@@ -22,6 +22,12 @@ export interface FunctionUrlEvent {
   requestContext: { http: { method: string } };
 }
 
+export interface ScheduledEvent {
+  source: "aws.events";
+  time?: string;
+  resources?: string[];
+}
+
 export interface FunctionUrlResult {
   statusCode: number;
   headers: Record<string, string>;
@@ -40,7 +46,12 @@ export interface HandlerOptions {
 export function createHandler(fn: Handler, routes: RouteSpec[], options: HandlerOptions = {}) {
   const compiled = routes.map((route) => ({ ...route, matcher: compilePath(route.path) }));
 
-  return async (event: FunctionUrlEvent): Promise<FunctionUrlResult> => {
+  return async (event: FunctionUrlEvent | ScheduledEvent): Promise<FunctionUrlResult> => {
+    if (isScheduled(event)) {
+      const result = await invoke(fn, { scheduledTime: event.time, rule: event.resources?.[0] }, {});
+      if (result.status >= 500) throw new Error(`Scheduled run failed with status ${result.status}`);
+      return toLambda(result);
+    }
     const headers = lowerCaseKeys(event.headers ?? {});
     const text = event.body
       ? event.isBase64Encoded
@@ -77,6 +88,10 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
     // A HEAD request served by a GET route gets the headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
   };
+}
+
+function isScheduled(event: FunctionUrlEvent | ScheduledEvent): event is ScheduledEvent {
+  return !("requestContext" in event) && (event as ScheduledEvent).source === "aws.events";
 }
 
 interface Resolved {

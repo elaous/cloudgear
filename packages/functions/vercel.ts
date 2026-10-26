@@ -73,7 +73,8 @@ export class VercelResponse extends Writable {
 
   send(body?: unknown): this {
     if (body === undefined || body === null) return this.finish();
-    if (Buffer.isBuffer(body)) return this.typed("application/octet-stream").finish(body);
+    if (ArrayBuffer.isView(body)) return this.typed("application/octet-stream").finish(Buffer.from(body.buffer, body.byteOffset, body.byteLength));
+    if (body instanceof ArrayBuffer) return this.typed("application/octet-stream").finish(Buffer.from(body));
     if (typeof body === "string") return this.typed("text/html; charset=utf-8").finish(body);
     return this.json(body);
   }
@@ -93,15 +94,23 @@ export class VercelResponse extends Writable {
     done();
   }
 
-  result(): { status: number; headers: Record<string, string>; body: string } {
+  // Text bodies as utf8; any other content type as base64. `cookies` are the Set-Cookie values.
+  result(): { status: number; headers: Record<string, string>; body: string; base64?: boolean; cookies?: string[] } {
     const headers: Record<string, string> = {};
-    for (const [name, value] of this.headers) headers[name] = Array.isArray(value) ? value.join(", ") : value;
-    return { status: this.statusCode, headers, body: Buffer.concat(this.chunks).toString("utf8") };
+    let cookies: string[] | undefined;
+    for (const [name, value] of this.headers) {
+      if (name === "set-cookie") cookies = Array.isArray(value) ? value : [value];
+      else headers[name] = Array.isArray(value) ? value.join(", ") : value;
+    }
+    const raw = Buffer.concat(this.chunks);
+    const type = headers["content-type"];
+    const binary = raw.length > 0 && type !== undefined && !TEXTUAL.test(type);
+    return { status: this.statusCode, headers, body: raw.toString(binary ? "base64" : "utf8"), ...(binary ? { base64: true } : {}), ...(cookies ? { cookies } : {}) };
   }
 
-  // Resolves once everything written, or piped in, has been flushed.
+  // Resolves once the writer has flushed everything, which needs the function to end it.
   settled(): Promise<void> {
-    if (!this.writableEnded || this.writableFinished) return Promise.resolve();
+    if (this.writableFinished) return Promise.resolve();
     return new Promise((resolve) => this.once("finish", () => resolve()));
   }
 
@@ -115,6 +124,8 @@ export class VercelResponse extends Writable {
     return this;
   }
 }
+
+const TEXTUAL = /^(text\/|application\/(json|javascript|xml|x-www-form-urlencoded)|[^;]*\+(json|xml))/i;
 
 function parseCookies(header: string | undefined): Record<string, string> {
   const cookies: Record<string, string> = {};

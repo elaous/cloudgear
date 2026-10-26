@@ -37,6 +37,8 @@ export interface FunctionUrlResult {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
+  isBase64Encoded?: boolean;
+  cookies?: string[];
 }
 
 export interface HandlerOptions {
@@ -152,7 +154,8 @@ function resolveInput(
     }
     const context = trustContext && typeof payload.context === "object" && payload.context !== null ? payload.context : {};
     const original = trustContext && isOriginalRequest(payload.request) ? payload.request : undefined;
-    return { input: payload.input, context, original, params: original ? paramsFor(routes, original.method, new URL(original.url).pathname) : undefined };
+    const params = original ? paramsFor(routes, original.method, new URL(original.url).pathname) : paramsFor(routes, event.requestContext.http.method.toUpperCase(), event.rawPath);
+    return { input: payload.input, context, original, params };
   }
 
   const method = event.requestContext.http.method.toUpperCase();
@@ -184,7 +187,13 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
 }
 
 function toLambda(result: HttpResult): FunctionUrlResult {
-  return { statusCode: result.status, headers: result.headers, body: result.body };
+  return {
+    statusCode: result.status,
+    headers: result.headers,
+    body: result.body,
+    ...(result.base64 ? { isBase64Encoded: true } : {}),
+    ...(result.cookies ? { cookies: result.cookies } : {}),
+  };
 }
 
 function lowerCaseKeys(record: Record<string, string | undefined>): Record<string, string> {

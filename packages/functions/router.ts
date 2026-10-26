@@ -298,7 +298,9 @@ export class FunctionRouter {
       const vercel = original ? vercelRequestFrom({ method: original.method, url: original.url, headers: Object.fromEntries(original.headers), raw: new Uint8Array(await original.arrayBuffer()) }, params) : undefined;
       const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context, { request: vercel, response: route.response }));
       debug("router", `local ${route.key} -> ${result.status}`);
-      return new Response(result.body || null, { status: result.status, headers: result.headers });
+      const headers = new Headers(result.headers);
+      for (const cookie of result.cookies ?? []) headers.append("set-cookie", cookie);
+      return new Response((result.base64 ? Buffer.from(result.body, "base64") : result.body) || null, { status: result.status, headers });
     }
     const endpoints = this.loadEndpoints();
     const url = endpoints?.routes[route.key];

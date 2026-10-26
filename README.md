@@ -122,9 +122,11 @@ export default async function (request, response) {
   returns its output, as usual, built with `response(body, { status, headers })`),
   or `VercelResponse`, a writer like `ServerResponse & { send, json, status,
   redirect }` (the function writes to it and returns nothing; a returned value
-  is used only if nothing was written). The writer supports `setHeader`,
+  is used only if nothing was written, and the writer MUST be ended, since the
+  response waits for it). The writer supports `setHeader`,
   `getHeader`, `removeHeader`, `writeHead`, `write`, `end`, `send`, `json`,
-  `status` and `redirect`, and its output is text.
+  `status` and `redirect`; text and JSON bodies are sent as text, any other
+  content type as base64, and several `Set-Cookie` values stay separate.
 - So the arguments are `(request or input, response?, context)`. Without
   `request` the function takes its input, and `generate` checks the route's path
   params against its type; with `request` it does not, since they are in

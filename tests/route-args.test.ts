@@ -189,6 +189,36 @@ describe("the Lambda adapter", () => {
     expect(result.headers["content-type"]).toContain("application/json");
   });
 
+  test("waits for a writer that is ended after the function returns", async () => {
+    const handler = createHandler(async (_request: unknown, res: VercelResponse) => void setTimeout(() => res.json({ late: true }), 5), routes, { request: true, response: "writer" });
+    const result = await handler(event());
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ late: true });
+  });
+
+  test("binary bodies are base64 and Set-Cookie values stay separate", async () => {
+    const handler = createHandler(
+      async (_request: unknown, res: VercelResponse) => void res.setHeader("set-cookie", ["a=1; Expires=Wed, 01 Jan 2031 00:00:00 GMT", "b=2"]).send(new Uint8Array([0xff, 0xfe, 0x00])),
+      routes,
+      { request: true, response: "writer" },
+    );
+    const result = await handler(event());
+    expect(result.isBase64Encoded).toBe(true);
+    expect(Buffer.from(result.body, "base64")).toEqual(Buffer.from([0xff, 0xfe, 0x00]));
+    expect(result.cookies).toEqual(["a=1; Expires=Wed, 01 Jan 2031 00:00:00 GMT", "b=2"]);
+    expect(result.headers["set-cookie"]).toBeUndefined();
+  });
+
+  test("an untrusted invoke-typed call still gets its path params, and __proto__ in the query is harmless", async () => {
+    let seen: any;
+    const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true });
+    await handler(invokeEvent({ input: {} }));
+    expect(seen.query.slug).toBe("hello");
+    await handler(event({ rawQueryString: "__proto__=a&__proto__=b" }));
+    expect(Array.isArray(Object.getPrototypeOf(seen.query))).toBe(false);
+    expect(({} as any)[0]).toBeUndefined();
+  });
+
   test("parses a JSON body, repeated query keys and cookies", async () => {
     let seen: any;
     const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true });

@@ -44,6 +44,10 @@ export interface HttpResult {
   status: number;
   headers: Record<string, string>;
   body: string;
+  // The body is base64 of binary content.
+  base64?: boolean;
+  // Set-Cookie values, which cannot be joined into one header.
+  cookies?: string[];
 }
 
 export function response<T>(
@@ -152,7 +156,7 @@ export function vercelRequestFrom(
   params: Record<string, string> = {},
 ): VercelRequest {
   const url = new URL(original.url);
-  const query: VercelRequestQuery = {};
+  const query: VercelRequestQuery = Object.create(null);
   for (const [key, value] of url.searchParams) {
     const earlier = query[key];
     query[key] = earlier === undefined ? value : [...(Array.isArray(earlier) ? earlier : [earlier]), value];

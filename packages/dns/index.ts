@@ -1,3 +1,4 @@
+import { timed } from "@cloudgear/debug";
 import {
   createDnsDriver,
   isWithinZone,
@@ -48,15 +49,22 @@ export class DNS {
   }
 
   async upsert(record: DnsRecord): Promise<void> {
-    return (await this.driver()).upsert(this.checked(record));
+    const checked = this.checked(record);
+    return timed("dns", `${this.provider} upsert ${checked.type} ${checked.name}`, async () => (await this.driver()).upsert(checked), {
+      zone: this.zone,
+      values: checked.values,
+      ttl: checked.ttl,
+    });
   }
 
   async remove(name: string, type: DnsRecordType): Promise<void> {
-    return (await this.driver()).remove(this.checkedName(name), type);
+    const checked = this.checkedName(name);
+    return timed("dns", `${this.provider} remove ${type} ${checked}`, async () => (await this.driver()).remove(checked, type), { zone: this.zone });
   }
 
   async get(name: string, type: DnsRecordType): Promise<DnsRecord | null> {
-    return (await this.driver()).get(this.checkedName(name), type);
+    const checked = this.checkedName(name);
+    return timed("dns", `${this.provider} get ${type} ${checked}`, async () => (await this.driver()).get(checked, type), { zone: this.zone });
   }
 
   private checked(record: DnsRecord): DnsRecord {

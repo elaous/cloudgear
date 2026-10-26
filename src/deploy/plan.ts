@@ -1,7 +1,7 @@
 import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
 import { createHash } from "node:crypto";
 import { toEventBridgeCron } from "@cloudgear/functions";
-import { providerProfile, validateConfigOptions } from "../providers";
+import { capability, providerOfType, validateConfigOptions } from "../providers";
 import { conflictingGroups, groupRoutes, routeShape } from "../routes";
 import { stateKey, type State, type StateEntry } from "./state";
 
@@ -166,7 +166,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       const id = createHash("sha256").update(`${fn.physical_name}\0${cron}`).digest("hex").slice(0, 8);
       entries.push({
         kind: "resource",
-        type: providerProfile(config.provider).schedule.type,
+        type: capability(providerOfType(fn.type), "schedule").type,
         name: `${fn.name}@${id}`,
         physical_name: `${fn.physical_name.slice(0, 55)}-${id}`,
         dry: false,
@@ -183,11 +183,11 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const certificate = certificates.get(domain);
     if (!certificate) throw new Error(`cloudgear config: ${what} needs a certificate for "${domain}"`);
     if (certificate.usage !== what) throw new Error(`cloudgear config: the certificate for "${domain}" must have usage "${what}"`);
-    return stateKey({ type: providerProfile(config.provider).cdn.certificate, name: domain });
+    return stateKey({ type: capability(certificate.provider, "cdn").certificate, name: domain });
   };
 
   for (const certificate of config.certificate) {
-    const profile = providerProfile(config.provider).cdn;
+    const profile = capability(certificate.provider, "cdn");
     if (certificate.usage === "cdn" && certificate.region && certificate.region !== CLOUDFRONT_REGION) {
       throw new Error(`cloudgear config: the certificate for ${certificate.domain} serves a CDN, so it must be in ${CLOUDFRONT_REGION}`);
     }
@@ -217,7 +217,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const { cdn } = config;
     const certificate = certificates.get(cdn.domain);
     const certificateKey = certificateKeyOf(cdn.domain, "cdn");
-    const profile = providerProfile(cdn.provider).cdn;
+    const profile = capability(cdn.provider, "cdn");
     const bucket = resources.get(cdn.bucket);
     if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
     entries.push({
@@ -251,7 +251,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     }
     entries.push({
       kind: "resource",
-      type: providerProfile(api.provider).cdn.type,
+      type: capability(api.provider, "cdn").type,
       name: api.domain,
       physical_name: api.domain,
       dry: false,
@@ -282,7 +282,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const routed = config.function.filter((fn) => fn.route.length > 0);
     entries.push({
       kind: "resource",
-      type: providerProfile(api.provider).api.type,
+      type: capability(api.provider, "api").type,
       name: api.domain,
       physical_name: api.domain,
       dry: false,

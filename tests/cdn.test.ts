@@ -159,7 +159,7 @@ describe("a Cert without a CDN", () => {
   test("is analyzed and written to the config, even on the zone apex", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cert-only-"));
     const { config } = await generate({ entry: fixture("edge/cert-only.ts"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "certonly" });
-    expect(config.certificate).toEqual([{ domain: "example.com", dns: { provider: "aws", domain: "example.com", zone: "example.com" } }]);
+    expect(config.certificate).toEqual([{ provider: "aws", domain: "example.com", dns: { provider: "aws", domain: "example.com", zone: "example.com" } }]);
     expect(config.cdn).toBeUndefined();
     expect(config.api).toBeUndefined();
   });
@@ -196,8 +196,8 @@ describe("generate with certificates, a CDN and an API domain", () => {
       const { config } = await generate({ entry: fixture("edge/app.ts"), configPath, buildDir: path.join(dir, "build"), project: "edge" });
 
       expect(config.certificate).toEqual([
-        { domain: "www.example.com", dns: { provider: "gandi", domain: "www.example.com", zone: "example.com" }, usage: "cdn" },
-        { domain: "api.example.com", dns: { provider: "gandi", domain: "api.example.com", zone: "example.com" }, usage: "api" },
+        { provider: "aws", domain: "www.example.com", dns: { provider: "gandi", domain: "www.example.com", zone: "example.com" }, usage: "cdn" },
+        { provider: "aws", domain: "api.example.com", dns: { provider: "gandi", domain: "api.example.com", zone: "example.com" }, usage: "api" },
       ]);
       expect(config.cdn).toEqual({ provider: "aws", domain: "www.example.com", bucket: "my-site", path: "web/" });
       expect(config.api).toEqual({ provider: "aws", domain: "api.example.com" });

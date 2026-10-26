@@ -124,6 +124,62 @@ describe("BlobStore", () => {
     }
   });
 
+  describe("a bucket named after a domain", () => {
+    const store = (options = {}) => new BlobStore("aws", "s3://assets.example.com", options);
+
+    test("url() is the bucket name as the host, plus the path prefix and the encoded key", () => {
+      expect(store().url()).toBe("https://assets.example.com/");
+      expect(store().url("a.png")).toBe("https://assets.example.com/a.png");
+      expect(store({ path: "/img-cache/" }).url("a b/c#d.png")).toBe("https://assets.example.com/img-cache/a%20b/c%23d.png");
+      expect(new BlobStore("aws", "://assets.example.com").url("x")).toBe("https://assets.example.com/x");
+    });
+
+    test("url() follows the deployed physical name, like the driver does", () => {
+      process.env.CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM = "assets-1234.example.org";
+      try {
+        expect(store().url("k")).toBe("https://assets-1234.example.org/k");
+      } finally {
+        delete process.env.CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM;
+      }
+    });
+
+    test("the name keeps its dots for the driver, and the env var replaces them", async () => {
+      process.env.CLOUDGEAR_BLOB_DRIVER = "memory";
+      try {
+        const s = store({ path: "p" });
+        expect(s.name).toBe("assets.example.com");
+        expect(BlobStore.envVarFor(s.name)).toBe("CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM");
+        await s.put("k", "v");
+        expect(await store({ path: "p" }).getText("k")).toBe("v");
+      } finally {
+        delete process.env.CLOUDGEAR_BLOB_DRIVER;
+      }
+    });
+
+    test("url() is the same for every provider and never touches the driver", () => {
+      const used = () => Promise.reject(new Error("the driver was used"));
+      const failing = { get: used, put: used, delete: used, list: used, exists: used };
+      const store = new BlobStore("gcp", "gs://assets.example.com", { driver: failing });
+      expect(store.url("k")).toBe("https://assets.example.com/k");
+    });
+
+    test("the failing driver in the test above really is used by the other methods", async () => {
+      const used = () => Promise.reject(new Error("the driver was used"));
+      const store = new BlobStore("gcp", "gs://assets.example.com", { driver: { get: used, put: used, delete: used, list: used, exists: used } });
+      await expect(store.get("k")).rejects.toThrow("the driver was used");
+    });
+
+    test("keys are encoded per segment and otherwise kept as given", () => {
+      const s = store({ path: "img" });
+      expect(s.url("")).toBe("https://assets.example.com/img/");
+      expect(s.url("q?x=1&y=%20")).toBe("https://assets.example.com/img/q%3Fx%3D1%26y%3D%2520");
+      expect(s.url("café/日本.png")).toBe("https://assets.example.com/img/caf%C3%A9/%E6%97%A5%E6%9C%AC.png");
+      expect(s.url("/lead")).toBe("https://assets.example.com/img//lead");
+      expect(s.url("a/../b")).toBe("https://assets.example.com/img/a/../b");
+      expect(() => s.url("\ud800")).toThrow(URIError);
+    });
+  });
+
   test("BLOB_OPERATIONS names only real methods", () => {
     for (const method of Object.keys(BLOB_OPERATIONS)) {
       expect(typeof (BlobStore.prototype as any)[method]).toBe("function");

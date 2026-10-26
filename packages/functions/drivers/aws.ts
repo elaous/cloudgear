@@ -1,3 +1,4 @@
+import { debug, errorSummary, timed } from "@cloudgear/debug";
 import type { Authenticator } from "../auth";
 import {
   INVOKE_CONTENT_TYPE,
@@ -48,6 +49,7 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
 
   return async (event: FunctionUrlEvent | ScheduledEvent): Promise<FunctionUrlResult> => {
     if (isScheduled(event)) {
+      debug("lambda", "scheduled event", { time: event.time, rule: event.resources?.[0] });
       const result = await invoke(fn, { scheduledTime: event.time, rule: event.resources?.[0] }, {});
       if (result.status >= 500) throw new Error(`Scheduled run failed with status ${result.status}`);
       return toLambda(result);
@@ -69,22 +71,31 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
         principal = await options.authenticate(req);
       } catch (err) {
         console.error(err);
+        debug("lambda", `token verification unavailable: ${errorSummary(err)}`);
         return toLambda(json(503, { error: "Authentication unavailable" }));
       }
-      if (!principal) return toLambda(json(401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" }));
+      if (!principal) {
+        debug("lambda", "rejected: no valid token");
+        return toLambda(json(401, { error: "Unauthorized" }, { "www-authenticate": "Bearer" }));
+      }
+      debug("lambda", "token verified");
       context = { auth: principal };
     }
 
     let resolved: Resolved | undefined;
+    debug("lambda", `${event.requestContext.http.method} request`, { invokeProtocol: !!contentType?.startsWith(INVOKE_CONTENT_TYPE), bytes: text.length });
     try {
       resolved = resolveInput(compiled, event, text, contentType, options.trustContext ?? false);
     } catch (err) {
+      debug("lambda", `bad request: ${errorSummary(err)}`);
       return toLambda({ status: 400, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: (err as Error).message }) });
     }
     if (!resolved) {
+      debug("lambda", `no route for ${event.requestContext.http.method} ${event.rawPath}`);
       return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
     }
-    const result = await invoke(fn, resolved.input, context ?? resolved.context);
+    const result = await timed("lambda", "handler", () => invoke(fn, resolved.input, context ?? resolved.context), () => ({ inputKeys: Object.keys(resolved.input as object) }));
+    debug("lambda", `responded ${result.status}`);
     // A HEAD request served by a GET route gets the headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
   };

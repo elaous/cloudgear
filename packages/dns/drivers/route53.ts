@@ -1,3 +1,4 @@
+import { timed } from "@cloudgear/debug";
 import {
   ChangeResourceRecordSetsCommand,
   ListHostedZonesByNameCommand,
@@ -46,13 +47,15 @@ export class Route53DnsDriver implements DnsDriver {
 
   private async find(name: string, type: DnsRecordType) {
     const fqdn = withTrailingDot(name);
-    const res = await this.client.send(
-      new ListResourceRecordSetsCommand({
-        HostedZoneId: await this.hostedZoneId(),
-        StartRecordName: fqdn,
-        StartRecordType: type,
-        MaxItems: 1,
-      }),
+    const res = await timed("route53", `list ${type} ${fqdn}`, async () =>
+      this.client.send(
+        new ListResourceRecordSetsCommand({
+          HostedZoneId: await this.hostedZoneId(),
+          StartRecordName: fqdn,
+          StartRecordType: type,
+          MaxItems: 1,
+        }),
+      ),
     );
     return (res.ResourceRecordSets ?? []).find(
       (set: { Name: string; Type: string }) => set.Name.replace(/\\052/g, "*") === fqdn && set.Type === type,
@@ -60,11 +63,13 @@ export class Route53DnsDriver implements DnsDriver {
   }
 
   private async change(action: "UPSERT" | "DELETE", recordSet: unknown) {
-    await this.client.send(
-      new ChangeResourceRecordSetsCommand({
-        HostedZoneId: await this.hostedZoneId(),
-        ChangeBatch: { Changes: [{ Action: action, ResourceRecordSet: recordSet as never }] },
-      }),
+    await timed("route53", `${action} ${(recordSet as { Type?: string; Name?: string }).Type} ${(recordSet as { Name?: string }).Name}`, async () =>
+      this.client.send(
+        new ChangeResourceRecordSetsCommand({
+          HostedZoneId: await this.hostedZoneId(),
+          ChangeBatch: { Changes: [{ Action: action, ResourceRecordSet: recordSet as never }] },
+        }),
+      ),
     );
   }
 

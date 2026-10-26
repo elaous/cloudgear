@@ -418,8 +418,13 @@ interface BlobDriver {
 strips it again, and `cloudgear generate` scopes the function's IAM policy to
 that prefix (object access to `bucket/img-cache/*`, listing with an
 `s3:prefix` condition). Two stores may share a bucket with different paths.
-`path` MUST be a string literal. On AWS, a missing key in a prefix-scoped
-store may surface as `AccessDenied` instead of `null`, because S3 only
+`path` MUST be a string literal. `store.url(key?)` returns
+`https://<bucket>/<path><key>` for a bucket named after the domain that serves
+it (`s3://assets.example.com`). The key's segments are URL-encoded but not
+normalized (`a/../b` stays as written), the bucket is its physical name once
+deployed, and nothing is requested. A CDN that serves a dotted bucket may fail
+its HTTPS connection to S3 (not checked against real AWS); `generate` warns.
+On AWS, a missing key in a prefix-scoped store may surface as `AccessDenied` instead of `null`, because S3 only
 answers "not found" to callers that can list the whole bucket; this has not
 been checked against a real bucket.
 
@@ -504,6 +509,88 @@ Declaring a store twice with different options fails. An existing certificate
 cannot change `key_algorithm`. Add a key by extending `options` in
 `src/providers.ts` and handling it in the driver.
 
+## Hybrid clouds
+
+Each entry in the config names its own provider through its `type`
+(`@aws.S3`, `@gcp.GCS`, `@gcp.CloudFunction`). The top-level `provider` is the
+router's provider, and every function runs there. A `BlobStore` MAY use any
+provider, so an app can have functions on GCP, a bucket on AWS and another on
+GCS:
+
+```ts
+const archive = new BlobStore("aws", "://archive");
+const cache = new BlobStore("gcp", "gs://cache");
+new FunctionRouter("gcp").url("GET", "/report/{id}", getReport);
+```
+
+```
+provider: "gcp"
+resource { name: "archive"  type: "@aws.S3"  physical_name: "archive" ... }
+resource { name: "cache"    type: "@gcp.GCS" physical_name: "cache" ... }
+function {
+  name: "getReport"
+  type: "@gcp.CloudFunction"   runtime: "nodejs22"  timeout_s: 60
+  permission { resource: "archive"  action: "s3:GetObject"  action: "s3:ListBucket" }
+  permission { resource: "cache"    action: "storage.objects.get" }
+  env { key: "CLOUDGEAR_BLOB_ARCHIVE"  value_from: "archive" }
+  env { key: "CLOUDGEAR_BLOB_CACHE"    value_from: "cache" }
+  ...
+}
+```
+
+A function's permissions are written in the vocabulary of the store's provider
+(IAM actions for S3, `storage.objects.*` permissions for GCS). On GCP a function
+runs as a service account, which its deployer creates and grants on the
+function's own buckets, as AWS creates a role for a Lambda. `provider` profiles
+in `src/providers.ts` hold each provider's types, defaults, permission
+mapping, option keys and reserved environment names.
+
+What exists today: the config, `generate` (a Cloud Functions HTTP adapter
+bundles the functions) and `plan` handle several providers. There are no GCP
+deployers, so `apply` stops before doing anything if the config uses a provider
+without deployers, and a CDN, an API domain or a schedule needs a provider that
+supports it (AWS). Access from a function to a store of another provider is not
+provisioned yet: `generate` warns, and the function gets no credentials for the
+store. A mechanism (a stored key, workload identity federation, a signed URL)
+registers under `"<function provider>-><store provider>"` in
+`CROSS_PROVIDER_ACCESS`, and a deployer per provider is added to `DEPLOYERS` in
+`src/cli.ts`. `apply` and `destroy` use the deployers of the providers in the
+planned actions, so removing the last GCP entry lets `destroy` run with AWS
+alone. The GCP adapter never trusts a caller identity sent in the request,
+because nothing authenticates callers before it runs; the router's API domain
+needs provider `aws`.
+
+## Debugging
+
+Set `CG_DEBUG=true` (also `1`, `yes`, `on`) to print debug lines on stderr,
+each tagged `[cg:debug HH:MM:SS.mmm] scope: message {data}`; stdout is
+unchanged and nothing is printed when it is unset. The variable is read on
+every call, so it works for the CLI, a local app and a deployed function alike.
+
+| Scope | What it logs |
+| --- | --- |
+| `cli` | the command, config and state paths, the drivers selected through `CLOUDGEAR_*`, region resolution, the plan summary, and a stack trace when a command fails |
+| `generate` | the analysis (provider, resources, functions with routes, schedules and accesses, certificates, CDN, API), each bundle's size and sha256, the written config |
+| `apply`, `state` | every action with its duration and result, and each state save with the output names |
+| `aws.<service>` | every SDK call (`CreateBucketCommand`, `PutRuleCommand`, ...) with its duration and outcome |
+| `dns`, `gandi`, `route53` | record operations (provider, zone, name, values) and Gandi's status codes |
+| `blob`, `cert`, `cdn` | store operations (key and size), certificate and CDN status lookups |
+| `router`, `lambda` | route matching, authentication outcome, rate limiting, remote calls (host, signed or not, status) and the Lambda adapter's request, verification and response |
+
+Values under keys that can hold secrets or large payloads are replaced with
+`[redacted]`: authorization and cookie headers, tokens, credentials, signatures,
+sessions, passwords, Lambda environment variables, code, IAM and bucket
+policies, request bodies, generic `Value`/`Input`/`Payload` fields and caller
+claims; long strings, arrays and nested objects are shortened. What is still
+logged, so do not put secrets there: blob object keys, bucket names, URLs,
+ARNs, DNS record names and values (public data), the concrete path of a request
+that matched no route, and error messages up to 300 characters (parse errors
+are reduced to `SyntaxError: invalid input`). A matched request is logged by
+its route template, so path parameters stay out. To debug a deployed function,
+give it the variable (`functionOptions: { "env.CG_DEBUG": "true" }`) and read
+its CloudWatch logs; adding the debug package changes every function's bundle,
+so the first `apply` after upgrading redeploys all functions.
+
 ## `cloudgear generate`
 
 Parses the app with the TypeScript compiler (it never executes it) starting
@@ -583,7 +670,7 @@ Requirements the analyzer enforces:
   works. The routed function may share a module with the router: inside
   Lambda `listen()` does nothing.
 - `new BlobStore(...)` MUST be assigned to a variable, with literal arguments
-  (including the options' `path`), and use the router's provider.
+  (including the options' `path`); it MAY use any provider (see Hybrid clouds).
 
 Directives go in a comment on the declaration line or the line above it:
 
@@ -592,8 +679,9 @@ Directives go in a comment on the declaration line or the line above it:
 
 Each function is bundled with `Bun.build` into
 `.cloudgear/build/<name>/index.mjs`: the function's module, its whole import
-tree and the `node_modules` it reaches, wrapped in the provider's handler
-adapter. Bundles target the Node.js Lambda runtime.
+tree and the `node_modules` it reaches, wrapped in the router's provider's
+handler adapter (Lambda for `aws`, a Cloud Functions HTTP function for `gcp`).
+Bundles target Node.js.
 
 The output is `cloudgear.prototxt`, protobuf text format for the
 `cloudgear.Config` message in `src/config/cloudgear.proto`:
@@ -683,6 +771,7 @@ Where each moving part lives, since several are called across packages:
 | `grant`, `normalizeBlobPath` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
 | `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
 | `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
+| GCP function adapter | `packages/functions/drivers/gcp.ts` | bundles (`src/build/bundle.ts`) |
 | `DNS`, `registerDnsDriver` | `packages/dns/index.ts` | apps; `src/analyze/app.ts` |
 | Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` (used by `DNS` and `src/cli.ts`) |
 | `Cert`, `CDN` | `packages/cdn/index.ts` | apps; `src/analyze/app.ts` |
@@ -694,13 +783,14 @@ Where each moving part lives, since several are called across packages:
 | `cron`, `schedule` | `packages/functions/cron.ts` | apps; `src/analyze/app.ts`, `src/deploy/plan.ts` |
 | `groupRoutes`, `conflictingGroups` (CloudFront paths) | `src/routes.ts` | `src/analyze/app.ts`, `src/deploy/plan.ts` |
 | `routeFunctionCode` (method routing) | `src/deploy/aws/route-function.ts` | `src/deploy/aws/cloudfront.ts` |
+| `debug`, `timed`, `redact` | `packages/debug/index.ts` | every package and `src/` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
 
 ## Status
 
-Early draft. Only the `aws` provider has inference rules and deploy drivers;
+Early draft. Only the `aws` provider has deploy drivers (`gcp` is described and planned, see Hybrid clouds);
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has at most one

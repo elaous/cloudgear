@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
+import { debug, timed } from "@cloudgear/debug";
 import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
 import { fitName, sanitizeName } from "./names";
-import { providerProfile, validateConfigOptions } from "./providers";
+import { capability, crossProviderAccess, providerProfile, validateConfigOptions } from "./providers";
 
 export interface GenerateOptions {
   entry: string;
@@ -19,17 +20,42 @@ export interface GenerateOptions {
 const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
-  const model = analyzeApp(options.entry);
+  const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry));
+  debug("generate", "analyzed", () => ({
+    provider: model.provider,
+    region: model.region,
+    resources: model.resources.map((r) => ({ name: r.name, dry: r.dry, region: r.region, options: r.options })),
+    functions: model.functions.map((f) => ({
+      name: f.name,
+      file: f.file,
+      routes: f.routes.map((r) => `${r.method} ${r.path}`),
+      schedules: f.schedules,
+      uses: [...f.uses.values()].map((u) => ({ resource: u.resource, path: u.path, accesses: [...u.accesses] })),
+    })),
+    certificates: model.certificates.map((c) => ({ domain: c.domain, usage: c.usage, region: c.region })),
+    cdn: model.cdn?.domain,
+    api: model.api?.domain,
+    warnings: model.warnings.length,
+  }));
   const profile = providerProfile(model.provider);
+  const warnings = [...model.warnings];
   const project = sanitize(options.project ?? projectName(path.dirname(path.resolve(options.entry))));
   const configDir = path.dirname(path.resolve(options.configPath));
   const fromConfig = (file: string) => path.relative(configDir, path.resolve(file));
 
-  for (const resource of model.resources) {
-    if (resource.provider !== model.provider) {
-      throw new Error(
-        `${resource.file}:${resource.line}: BlobStore "${resource.name}" uses provider "${resource.provider}" but the router uses "${model.provider}"`,
-      );
+  for (const fn of model.functions) {
+    if (fn.schedules.length) capability(model.provider, "schedule");
+  }
+
+  const resourceProvider = new Map(model.resources.map((r) => [r.name, r.provider]));
+  for (const fn of model.functions) {
+    for (const use of fn.uses.values()) {
+      const storeProvider = resourceProvider.get(use.resource);
+      if (storeProvider && storeProvider !== model.provider && !crossProviderAccess(model.provider, storeProvider)) {
+        warnings.push(
+          `${fn.file}: "${fn.name}" (${model.provider}) uses BlobStore "${use.resource}" (${storeProvider}); cross-provider access is not provisioned yet, so the function gets no credentials for it`,
+        );
+      }
     }
   }
 
@@ -62,7 +88,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
-    const bundle = await bundleFunction({
+    const bundle = await timed("generate", `bundle ${fn.name}`, () => bundleFunction({
       name: fn.name,
       sourceFile: fn.file,
       exportName: fn.exportName,
@@ -70,10 +96,11 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       routes: fn.routes,
       provider: model.provider,
       // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
-      trustContext: model.authenticated === "iam" && !model.api,
+      trustContext: model.provider === "aws" && model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
-    });
+    }));
+    debug("generate", `bundled ${fn.name}`, () => ({ file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size }));
     const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);
     const usedResources = [...new Set(used.map((use) => use.resource))];
     functions.push({
@@ -89,7 +116,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       permission: used.map((use) => ({
         resource: use.resource,
         path: use.path,
-        action: [...new Set([...use.accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
+        action: [...new Set([...use.accesses].flatMap((a) => providerProfile(resourceProvider.get(use.resource) ?? model.provider).blobStore.actions[a]))].sort(),
       })),
       env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
       reserved_concurrency: reservedConcurrency,
@@ -103,7 +130,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     provider: model.provider,
     resource: model.resources.map((r) => ({
       name: r.name,
-      type: profile.blobStore.type,
+      type: providerProfile(r.provider).blobStore.type,
       physical_name: r.name,
       dry: r.dry,
       source: `${fromConfig(r.file)}:${r.line}`,
@@ -115,6 +142,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     authenticated: model.authenticated,
     region: model.region,
     certificate: model.certificates.map((c) => ({
+      provider: c.provider,
       domain: c.domain,
       dns: c.dns,
       ...(c.usage ? { usage: c.usage } : {}),
@@ -136,7 +164,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));
-  return { config, warnings: model.warnings };
+  debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
+  return { config, warnings: [...new Set(warnings)] };
 }
 
 function projectName(dir: string): string {

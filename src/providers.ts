@@ -12,11 +12,14 @@ export interface OptionSchema {
 // and the permissions each client operation needs.
 export interface ProviderProfile {
   options: Record<string, OptionSchema>;
-  function: { type: string; runtime: string; memoryMb: number; timeoutS: number };
+  // Environment variable names the platform owns.
+  reservedEnv: RegExp;
+  // How a function is identified when it calls other services.
+  function: { type: string; runtime: string; memoryMb: number; timeoutS: number; identity: "role" | "service-account" };
   blobStore: { type: string; actions: Record<BlobAccess, string[]> };
-  cdn: { type: string; certificate: string };
-  api: { type: string };
-  schedule: { type: string };
+  cdn?: { type: string; certificate: string };
+  api?: { type: string };
+  schedule?: { type: string };
 }
 
 const oneOf =
@@ -47,7 +50,8 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       },
       "@aws.Certificate": { keys: { key_algorithm: oneOf("RSA_2048", "EC_prime256v1", "EC_secp384r1") } },
     },
-    function: { type: "@aws.Lambda", runtime: "nodejs22.x", memoryMb: 256, timeoutS: 10 },
+    reservedEnv: /^(AWS_|CLOUDGEAR_|LAMBDA_|NODE_OPTIONS$|_)/,
+    function: { type: "@aws.Lambda", runtime: "nodejs22.x", memoryMb: 256, timeoutS: 10, identity: "role" },
     cdn: { type: "@aws.CloudFront", certificate: "@aws.Certificate" },
     api: { type: "@aws.ApiGateway" },
     schedule: { type: "@aws.Schedule" },
@@ -62,7 +66,52 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       },
     },
   },
+  gcp: {
+    options: {
+      "@gcp.GCS": { keys: { versioning: oneOf("true", "false") } },
+      "@gcp.CloudFunction": { keys: {}, prefixes: { [ENV_OPTION_PREFIX]: environmentVariable } },
+    },
+    reservedEnv: /^(CLOUDGEAR_|FUNCTION_|K_|GOOGLE_|GCP_|NODE_OPTIONS$|_)/,
+    function: { type: "@gcp.CloudFunction", runtime: "nodejs22", memoryMb: 256, timeoutS: 60, identity: "service-account" },
+    blobStore: {
+      type: "@gcp.GCS",
+      actions: {
+        read: ["storage.objects.get"],
+        write: ["storage.objects.create"],
+        delete: ["storage.objects.delete"],
+        list: ["storage.objects.list"],
+      },
+    },
+  },
 };
+
+// The provider a resource type belongs to: "@aws.S3" is "aws".
+export function providerOfType(type: string): string {
+  const match = /^@([a-z0-9]+)\./.exec(type);
+  if (!match) throw new Error(`Resource type "${type}" does not name a provider (expected "@<provider>.<Service>")`);
+  return match[1]!;
+}
+
+export function profileOfType(type: string): ProviderProfile {
+  return providerProfile(providerOfType(type));
+}
+
+export function capability<K extends "cdn" | "api" | "schedule">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
+  const found = providerProfile(provider)[name];
+  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : "schedules"} yet`);
+  return found as NonNullable<ProviderProfile[K]>;
+}
+
+// Registered under "<function provider>-><store provider>".
+export interface CrossProviderAccess {
+  describe: string;
+}
+
+export const CROSS_PROVIDER_ACCESS: Record<string, CrossProviderAccess> = {};
+
+export function crossProviderAccess(functionProvider: string, storeProvider: string): CrossProviderAccess | undefined {
+  return CROSS_PROVIDER_ACCESS[`${functionProvider}->${storeProvider}`];
+}
 
 export function providerProfile(provider: string): ProviderProfile {
   const profile = PROVIDERS[provider];
@@ -72,11 +121,10 @@ export function providerProfile(provider: string): ProviderProfile {
   return profile;
 }
 
-const RESERVED_ENV = /^(AWS_|CLOUDGEAR_|LAMBDA_|NODE_OPTIONS$|_)/;
-
 export function validateOptions(provider: string, type: string, options: Record<string, string> | undefined, label: string): void {
   for (const [key, value] of Object.entries(options ?? {})) {
     const schema = providerProfile(provider).options[type];
+    const reserved = providerProfile(provider).reservedEnv;
     const prefix = Object.keys(schema?.prefixes ?? {}).find((p) => key.startsWith(p));
     const rule = (schema && Object.hasOwn(schema.keys, key) ? schema.keys[key] : undefined) ?? (prefix ? schema!.prefixes![prefix] : undefined);
     if (!rule) {
@@ -87,7 +135,7 @@ export function validateOptions(provider: string, type: string, options: Record<
     if (problem) throw new Error(`${label}: option "${key}" ${problem}`);
     if (prefix === ENV_OPTION_PREFIX) {
       const name = key.slice(prefix.length);
-      if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name) || RESERVED_ENV.test(name)) {
+      if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name) || reserved.test(name)) {
         throw new Error(`${label}: option "${key}" is not a usable environment variable name`);
       }
     }
@@ -104,10 +152,10 @@ export function environmentOptions(options: Record<string, string> | undefined):
 
 export function validateConfigOptions(config: CloudgearConfig): void {
   const check = (type: string, name: string, options?: Record<string, string>) =>
-    validateOptions(config.provider, type, options, `${type} "${name}"`);
+    validateOptions(providerOfType(type), type, options, `${type} "${name}"`);
   for (const resource of config.resource) check(resource.type, resource.name, resource.options);
   for (const fn of config.function) check(fn.type, fn.name, fn.options);
-  for (const certificate of config.certificate) check(providerProfile(config.provider).cdn.certificate, certificate.domain, certificate.options);
-  if (config.cdn) check(providerProfile(config.cdn.provider).cdn.type, config.cdn.domain, config.cdn.options);
-  if (config.api?.via === "cloudfront") check(providerProfile(config.api.provider).cdn.type, config.api.domain, config.api.options);
+  for (const certificate of config.certificate) check(capability(certificate.provider, "cdn").certificate, certificate.domain, certificate.options);
+  if (config.cdn) check(capability(config.cdn.provider, "cdn").type, config.cdn.domain, config.cdn.options);
+  if (config.api?.via === "cloudfront") check(capability(config.api.provider, "cdn").type, config.api.domain, config.api.options);
 }

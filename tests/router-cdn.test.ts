@@ -39,7 +39,7 @@ const listItems = fn({ name: "listItems", physical_name: "app-listItems", route:
 const routerCdnConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig => ({
   ...baseConfig(),
   function: [items, item],
-  certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
+  certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
   api: { provider: "aws", domain: DOMAIN, via: "cloudfront" },
   ...overrides,
 });
@@ -90,7 +90,7 @@ describe("planning a CDN that serves the router", () => {
   });
 
   test("the certificate must be in us-east-1", () => {
-    const config = routerCdnConfig({ certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "cdn", region: "eu-west-1" }] });
+    const config = routerCdnConfig({ certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn", region: "eu-west-1" }] });
     expect(() => plan(config, emptyState())).toThrow(/must be in us-east-1/);
   });
 

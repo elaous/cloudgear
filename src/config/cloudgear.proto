@@ -50,6 +50,7 @@ message Certificate {
   string usage = 4;
   // Empty means us-east-1 for a CDN or unused certificate, the function region for an API.
   string region = 5;
+  string provider = 6;
 }
 
 message Cdn {

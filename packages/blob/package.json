@@ -13,5 +13,8 @@
   },
   "peerDependenciesMeta": {
     "@aws-sdk/client-s3": { "optional": true }
+  },
+  "dependencies": {
+    "@cloudgear/debug": "workspace:*"
   }
 }

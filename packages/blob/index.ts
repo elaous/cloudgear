@@ -1,3 +1,4 @@
+import { debug, timed } from "@cloudgear/debug";
 import {
   createBlobDriver,
   parseBlobUri,
@@ -65,6 +66,18 @@ export function policy(_store: BlobStore, _options: PolicyOptions) {
   return (_method: unknown, _context: ClassMethodDecoratorContext): void => {};
 }
 
+function withDebug(driver: BlobDriver, store: string): BlobDriver {
+  const run = <T>(op: string, key: string, call: () => Promise<T>, extra: () => Record<string, unknown> = () => ({})) =>
+    timed("blob", `${op} ${key}`, call, () => ({ store, ...extra() }));
+  return {
+    get: (key) => run("get", key, () => driver.get(key)),
+    put: (key, data, contentType) => run("put", key, () => driver.put(key, data, contentType), () => ({ bytes: data.byteLength, contentType })),
+    delete: (key) => run("delete", key, () => driver.delete(key)),
+    list: (prefix) => run("list", prefix, () => driver.list(prefix)),
+    exists: (key) => run("exists", key, () => driver.exists(key)),
+  };
+}
+
 export class BlobStore {
   readonly name: string;
   readonly path: string;
@@ -89,6 +102,12 @@ export class BlobStore {
 
   get location(): string {
     return process.env[BlobStore.envVarFor(this.name)] ?? this.name;
+  }
+
+  // Bucket name is used as the host.
+  url(key = ""): string {
+    const encoded = key.split("/").map(encodeURIComponent).join("/");
+    return `https://${this.location}/${this.path}${encoded}`;
   }
 
   async get(key: string): Promise<Uint8Array | null> {
@@ -132,10 +151,15 @@ export class BlobStore {
   }
 
   private driver(): Promise<BlobDriver> {
-    this.driverPromise ??= createBlobDriver(this.provider, this.location, { region: this.region }).catch((err) => {
-      this.driverPromise = undefined;
-      throw err;
-    });
+    this.driverPromise ??= createBlobDriver(this.provider, this.location, { region: this.region })
+      .then((driver) => {
+        debug("blob", `driver ready for ${this.provider}://${this.location}`, { path: this.path, region: this.region });
+        return withDebug(driver, `${this.provider}://${this.location}`);
+      })
+      .catch((err) => {
+        this.driverPromise = undefined;
+        throw err;
+      });
     return this.driverPromise;
   }
 }

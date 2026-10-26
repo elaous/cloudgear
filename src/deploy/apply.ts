@@ -1,5 +1,7 @@
+import { debug, timed } from "@cloudgear/debug";
 import type { EndpointsFile } from "@cloudgear/functions";
 import type { CloudgearConfig } from "../config/schema";
+import { providerOfType } from "../providers";
 import type { DesiredEntry, PlannedAction } from "./plan";
 import type { State, StateEntry } from "./state";
 import { stateKey } from "./state";
@@ -60,6 +62,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
       deps: entry.deps,
     };
     options.save(state);
+    debug("state", `saved ${stateKey(entry)}`, { outputs: Object.keys(state.entries[stateKey(entry)]!.outputs) });
   };
 
   const create = async (action: PlannedAction) => {
@@ -84,7 +87,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
     }
   };
 
-  for (const action of actions) {
+  const execute = async (action: PlannedAction) => {
     const { desired, current } = action;
     switch (action.op) {
       case "create":
@@ -126,7 +129,24 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
       case "dry":
         break;
     }
+  };
+
+  for (const action of actions) {
+    if (action.op === "noop" || action.op === "dry") {
+      debug("apply", `${action.op} ${action.key}`);
+      continue;
+    }
+    await timed("apply", `${action.op} ${action.key}`, () => execute(action), {
+      changes: action.changes,
+      deps: action.desired?.deps ?? action.current?.deps,
+    });
   }
+}
+
+// Providers whose deployers the actions need, from the types being created, changed or removed.
+export function providersNeeded(actions: PlannedAction[]): string[] {
+  const needing = actions.filter((a) => a.op !== "noop" && a.op !== "dry" && a.op !== "forget");
+  return [...new Set(needing.map((a) => providerOfType(a.type)))].sort();
 }
 
 // Whether there is anything worth writing to the endpoints file.

@@ -1,5 +1,6 @@
 import type { BlobStore, ProviderOptions } from "@cloudgear/blob";
 import type { DNS } from "@cloudgear/dns";
+import { debug, timed } from "@cloudgear/debug";
 import fs from "node:fs";
 import path from "node:path";
 import { createCdnDriver, type CdnDriver, type CdnInfo, type CdnProvider } from "./cdn-driver";
@@ -43,7 +44,7 @@ export class Cert {
 
   // State of the deployed certificate: "none" until `cloudgear apply` has requested it.
   async status(): Promise<CertInfo> {
-    return (await this.driver()).describe(this.domain);
+    return timed("cert", `status ${this.domain}`, async () => (await this.driver()).describe(this.domain), { region: this.region });
   }
 
   private driver(): Promise<CertDriver> {
@@ -104,6 +105,7 @@ export class CDN {
   // provider. Throws until the CDN has been deployed.
   async url(): Promise<string> {
     const deployed = readDeployedCdn(this.domain);
+    debug("cdn", `url ${this.domain} ${deployed ? "from the endpoints file" : "not in the endpoints file"}`, { url: deployed });
     if (deployed) return deployed;
     const info = await this.status();
     if (!info.url) throw new Error(`The CDN for "${this.domain}" is not deployed; run cloudgear apply`);
@@ -112,7 +114,7 @@ export class CDN {
 
   // Live state of the distribution from the provider: "none" until deployed.
   async status(): Promise<CdnInfo> {
-    return (await this.driver()).describe(this.domain);
+    return timed("cdn", `status ${this.domain}`, async () => (await this.driver()).describe(this.domain));
   }
 
   private driver(): Promise<CdnDriver> {

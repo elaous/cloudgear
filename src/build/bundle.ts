@@ -22,7 +22,10 @@ export interface BundleResult {
   sha256: string;
 }
 
-const ADAPTERS: Record<string, string> = { aws: "@cloudgear/functions/drivers/aws" };
+const ADAPTERS: Record<string, string> = {
+  aws: "@cloudgear/functions/drivers/aws",
+  gcp: "@cloudgear/functions/drivers/gcp",
+};
 
 // One self-contained ESM file per function: its module, every import it
 // reaches and their node_modules, wrapped in the provider's handler adapter.

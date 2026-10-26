@@ -467,12 +467,18 @@ every call, so it works for the CLI, a local app and a deployed function alike.
 | `router`, `lambda` | route matching, authentication outcome, rate limiting, remote calls (host, signed or not, status) and the Lambda adapter's request, verification and response |
 
 Values under keys that can hold secrets or large payloads are replaced with
-`[redacted]`: authorization and cookie headers, tokens, credentials, Lambda
-environment variables, code, IAM policies, request bodies and caller claims;
-long strings, arrays and nested objects are shortened. Object keys, bucket
-names, URLs, record names and ARNs are logged. To debug a deployed function,
+`[redacted]`: authorization and cookie headers, tokens, credentials, signatures,
+sessions, passwords, Lambda environment variables, code, IAM and bucket
+policies, request bodies, generic `Value`/`Input`/`Payload` fields and caller
+claims; long strings, arrays and nested objects are shortened. What is still
+logged, so do not put secrets there: blob object keys, bucket names, URLs,
+ARNs, DNS record names and values (public data), the concrete path of a request
+that matched no route, and error messages up to 300 characters (parse errors
+are reduced to `SyntaxError: invalid input`). A matched request is logged by
+its route template, so path parameters stay out. To debug a deployed function,
 give it the variable (`functionOptions: { "env.CG_DEBUG": "true" }`) and read
-its CloudWatch logs.
+its CloudWatch logs; adding the debug package changes every function's bundle,
+so the first `apply` after upgrading redeploys all functions.
 
 ## `cloudgear generate`
 

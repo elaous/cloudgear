@@ -13,7 +13,7 @@ export function setDebugSink(next?: DebugSink): void {
 }
 
 const SENSITIVE =
-  /authorization|cookie|token|secret|password|credential|accesskeyid|api[-_]?key|private[-_]?key|policy|environment|variables|zipfile|^body$|claims|^context$/i;
+  /authorization|cookie|token|secret|passw|^pwd$|credential|accesskeyid|api[-_]?key|private[-_]?key|customerkey|signature|session|jwt|bearer|policy|environment|variables|zipfile|^body$|^headers$|^payload$|^input$|^value$|claims|^context$/i;
 const MAX_STRING = 160;
 const MAX_ITEMS = 10;
 const MAX_DEPTH = 3;
@@ -36,20 +36,26 @@ export function redact(value: unknown, key = "", depth = 0): unknown {
   return String(value);
 }
 
-export function debug(scope: string, message: string, data?: Record<string, unknown>): void {
+// A function is only called when debugging is on, so building the data costs nothing otherwise.
+export type DebugData = Record<string, unknown> | (() => Record<string, unknown>);
+
+export function debug(scope: string, message: string, data?: DebugData): void {
   if (!isDebug()) return;
   const time = new Date().toISOString().slice(11, 23);
-  const detail = data && Object.keys(data).length ? ` ${JSON.stringify(redact(data))}` : "";
+  const resolved = typeof data === "function" ? data() : data;
+  const detail = resolved && Object.keys(resolved).length ? ` ${JSON.stringify(redact(resolved))}` : "";
   sink(`[cg:debug ${time}] ${scope}: ${message}${detail}`);
 }
 
+// Parse errors quote the text they failed on, which may be a request body.
 export function errorSummary(err: unknown): string {
   const e = err as { name?: string; message?: string };
+  if (e?.name === "SyntaxError") return "SyntaxError: invalid input";
   return `${e?.name ?? "Error"}: ${(e?.message ?? String(err)).slice(0, 300)}`;
 }
 
 // Logs the outcome and duration of an async operation; costs nothing when debugging is off.
-export async function timed<T>(scope: string, message: string, run: () => Promise<T>, data?: Record<string, unknown>): Promise<T> {
+export async function timed<T>(scope: string, message: string, run: () => Promise<T>, data?: DebugData): Promise<T> {
   if (!isDebug()) return run();
   const started = performance.now();
   try {

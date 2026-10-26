@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import { debug, errorSummary, timed } from "@cloudgear/debug";
 import path from "node:path";
+import { debug, errorSummary, timed } from "@cloudgear/debug";
 import {
   INVOKE_CONTENT_TYPE,
   ROUTE_HEADER,
@@ -140,10 +140,10 @@ export class FunctionRouter {
 
   fetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    debug("router", `${req.method} ${url.pathname}`);
+    debug("router", `${req.method} request`);
     const limited = this.checkRateLimit(req);
     if (limited) {
-      debug("router", `rate limited ${req.method} ${url.pathname}`);
+      debug("router", `rate limited ${req.method}`);
       return limited;
     }
 
@@ -184,7 +184,7 @@ export class FunctionRouter {
       }
       return this.dispatch(route, input, context, req);
     }
-    debug("router", `${pathMatched ? "method not allowed" : "no route"} for ${req.method} ${url.pathname}`);
+    debug("router", pathMatched ? `method not allowed for ${req.method}` : `no route for ${req.method} ${url.pathname}`);
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
 
@@ -244,7 +244,7 @@ export class FunctionRouter {
   }
 
   private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request): Promise<Response> {
-    debug("router", `dispatching ${route.key} in ${this.mode} mode`, { input: Object.keys(input) });
+    debug("router", `dispatching ${route.key} in ${this.mode} mode`, () => ({ inputKeys: Object.keys(input) }));
     if (this.mode === "local") {
       const result = await timed("router", `local call ${route.key}`, () => invoke(route.fn, input, context));
       debug("router", `local ${route.key} -> ${result.status}`);

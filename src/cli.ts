@@ -100,7 +100,11 @@ async function main() {
           ? { ...config, resource: [], function: [], certificate: [], cdn: undefined, api: undefined }
           : config;
       const actions = plan(target, state);
-      debug("cli", "planned", Object.fromEntries([...new Set(actions.map((a) => a.op))].map((op) => [op, actions.filter((a) => a.op === op).length])));
+      debug("cli", "planned", () => {
+        const counts: Record<string, number> = {};
+        for (const a of actions) counts[a.op] = (counts[a.op] ?? 0) + 1;
+        return counts;
+      });
       console.log(formatPlan(actions));
       if (!hasChanges(actions)) {
         console.log("\nNo changes.");

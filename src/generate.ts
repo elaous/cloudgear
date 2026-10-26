@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import { debug, timed } from "@cloudgear/debug";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
+import { debug, timed } from "@cloudgear/debug";
 import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
@@ -21,7 +21,7 @@ const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
   const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry));
-  debug("generate", "analyzed", {
+  debug("generate", "analyzed", () => ({
     provider: model.provider,
     region: model.region,
     resources: model.resources.map((r) => ({ name: r.name, dry: r.dry, region: r.region, options: r.options })),
@@ -36,7 +36,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     cdn: model.cdn?.domain,
     api: model.api?.domain,
     warnings: model.warnings.length,
-  });
+  }));
   const profile = providerProfile(model.provider);
   const project = sanitize(options.project ?? projectName(path.dirname(path.resolve(options.entry))));
   const configDir = path.dirname(path.resolve(options.configPath));
@@ -91,7 +91,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
     }));
-    debug("generate", `bundled ${fn.name}`, { file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size });
+    debug("generate", `bundled ${fn.name}`, () => ({ file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size }));
     const used = [...fn.uses.values()].filter((use) => use.accesses.size > 0);
     const usedResources = [...new Set(used.map((use) => use.resource))];
     functions.push({

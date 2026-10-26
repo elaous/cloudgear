@@ -23,11 +23,11 @@ import {
   UpdateFunctionConfigurationCommand,
 } from "@aws-sdk/client-lambda";
 import { createHash } from "node:crypto";
-import { timed } from "@cloudgear/debug";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
+import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
@@ -66,7 +66,7 @@ const LAMBDA_TRUST_POLICY = JSON.stringify({
 
 // Logs each SDK call and its duration when CG_DEBUG is set.
 function withDebug(service: string, client: SendClient): SendClient {
-  return { send: (command) => timed(`aws.${service}`, command.constructor.name, () => client.send(command), { input: command.input }) };
+  return { send: (command) => timed(`aws.${service}`, command.constructor.name, () => client.send(command), () => ({ request: command.input })) };
 }
 
 export function awsDrivers(options: AwsDriverOptions): Drivers {

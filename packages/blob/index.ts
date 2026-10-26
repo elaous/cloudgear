@@ -67,11 +67,11 @@ export function policy(_store: BlobStore, _options: PolicyOptions) {
 }
 
 function withDebug(driver: BlobDriver, store: string): BlobDriver {
-  const run = <T>(op: string, key: string, call: () => Promise<T>, extra: Record<string, unknown> = {}) =>
-    timed("blob", `${op} ${key}`, call, { store, ...extra });
+  const run = <T>(op: string, key: string, call: () => Promise<T>, extra: () => Record<string, unknown> = () => ({})) =>
+    timed("blob", `${op} ${key}`, call, () => ({ store, ...extra() }));
   return {
     get: (key) => run("get", key, () => driver.get(key)),
-    put: (key, data, contentType) => run("put", key, () => driver.put(key, data, contentType), { bytes: data.byteLength, contentType }),
+    put: (key, data, contentType) => run("put", key, () => driver.put(key, data, contentType), () => ({ bytes: data.byteLength, contentType })),
     delete: (key) => run("delete", key, () => driver.delete(key)),
     list: (prefix) => run("list", prefix, () => driver.list(prefix)),
     exists: (key) => run("exists", key, () => driver.exists(key)),

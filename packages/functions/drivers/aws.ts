@@ -4,10 +4,12 @@ import {
   INVOKE_CONTENT_TYPE,
   buildInput,
   compilePath,
+  deserializeRequest,
   invoke,
   matchPath,
   parseBody,
-  type Handler,
+  response,
+  type OriginalRequest,
   type RequestContext,
   type HttpResult,
   type RouteSpec,
@@ -17,6 +19,7 @@ import {
 export interface FunctionUrlEvent {
   rawPath: string;
   rawQueryString?: string;
+  cookies?: string[];
   headers?: Record<string, string | undefined>;
   body?: string;
   isBase64Encoded?: boolean;
@@ -42,15 +45,19 @@ export interface HandlerOptions {
   // 401 for a bad token, 503 when the verifier fails. Skipped when `anonymous`.
   authenticate?: Authenticator;
   anonymous?: boolean;
+  // Pass the request, then the `response` helper, to the function before its input.
+  request?: boolean;
+  response?: boolean;
 }
 
-export function createHandler(fn: Handler, routes: RouteSpec[], options: HandlerOptions = {}) {
+export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec[], options: HandlerOptions = {}) {
   const compiled = routes.map((route) => ({ ...route, matcher: compilePath(route.path) }));
 
   return async (event: FunctionUrlEvent | ScheduledEvent): Promise<FunctionUrlResult> => {
     if (isScheduled(event)) {
       debug("lambda", "scheduled event", { time: event.time, rule: event.resources?.[0] });
-      const result = await invoke(fn, { scheduledTime: event.time, rule: event.resources?.[0] }, {});
+      const lead = leadArguments(options, () => new Request("https://schedule.invalid/", { method: "POST" }));
+      const result = await invoke(fn, { scheduledTime: event.time, rule: event.resources?.[0] }, {}, lead);
       if (result.status >= 500) throw new Error(`Scheduled run failed with status ${result.status}`);
       return toLambda(result);
     }
@@ -94,7 +101,8 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
       debug("lambda", `no route for ${event.requestContext.http.method} ${event.rawPath}`);
       return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
     }
-    const result = await timed("lambda", "handler", () => invoke(fn, resolved.input, context ?? resolved.context), () => ({ inputKeys: Object.keys(resolved.input as object) }));
+    const lead = leadArguments(options, () => resolved.original ?? requestFromEvent(event, headers));
+    const result = await timed("lambda", "handler", () => invoke(fn, resolved.input, context ?? resolved.context, lead), () => ({ inputKeys: Object.keys(resolved.input as object) }));
     debug("lambda", `responded ${result.status}`);
     // A HEAD request served by a GET route gets the headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
@@ -109,6 +117,20 @@ interface Resolved {
   input: unknown;
   context: RequestContext;
   headOnly?: boolean;
+  original?: Request;
+}
+
+function leadArguments(options: HandlerOptions, makeRequest: () => Request): unknown[] {
+  return [...(options.request ? [makeRequest()] : []), ...(options.response ? [response] : [])];
+}
+
+// The URL host is the one the function URL received; a CDN does not forward the viewer's.
+function requestFromEvent(event: FunctionUrlEvent, headers: Record<string, string>): Request {
+  if (event.cookies?.length) headers = { ...headers, cookie: event.cookies.join("; ") };
+  const method = event.requestContext.http.method.toUpperCase();
+  const query = event.rawQueryString ? `?${event.rawQueryString}` : "";
+  const body = !event.body || method === "GET" || method === "HEAD" ? undefined : event.isBase64Encoded ? Buffer.from(event.body, "base64") : event.body;
+  return new Request(`https://${headers.host ?? "function.invalid"}${event.rawPath}${query}`, { method, headers, body });
 }
 
 function resolveInput(
@@ -124,7 +146,8 @@ function resolveInput(
       throw new Error("Malformed invoke payload: expected { input, context }");
     }
     const context = trustContext && typeof payload.context === "object" && payload.context !== null ? payload.context : {};
-    return { input: payload.input, context };
+    const original = trustContext && isOriginalRequest(payload.request) ? deserializeRequest(payload.request) : undefined;
+    return { input: payload.input, context, original };
   }
 
   const method = event.requestContext.http.method.toUpperCase();
@@ -158,4 +181,9 @@ function lowerCaseKeys(record: Record<string, string | undefined>): Record<strin
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(record)) if (value !== undefined) out[key.toLowerCase()] = value;
   return out;
+}
+
+function isOriginalRequest(value: unknown): value is OriginalRequest {
+  const candidate = value as Partial<OriginalRequest> | null;
+  return typeof candidate === "object" && candidate !== null && typeof candidate.method === "string" && typeof candidate.url === "string" && typeof candidate.headers === "object" && candidate.headers !== null;
 }

@@ -17,6 +17,8 @@ export interface GenerateOptions {
   reservedConcurrency?: number;
 }
 
+const MAX_INCLUDED_BYTES = 250 * 1024 * 1024;
+const WARN_INCLUDED_BYTES = 40 * 1024 * 1024;
 const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
@@ -88,6 +90,16 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
+    if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.passResponse)) {
+      throw new Error(`${fn.file}: include, request and response are not supported for provider "${model.provider}" yet`);
+    }
+    const includedBytes = fn.include.reduce((sum, file) => sum + fs.statSync(file.abs).size, 0);
+    if (includedBytes > MAX_INCLUDED_BYTES) {
+      throw new Error(`${fn.file}: the files included in "${fn.name}" are ${Math.ceil(includedBytes / 1e6)} MB; a function package is limited to 250 MB unzipped`);
+    }
+    if (includedBytes > WARN_INCLUDED_BYTES) {
+      warnings.push(`${fn.file}: the files included in "${fn.name}" are ${Math.ceil(includedBytes / 1e6)} MB; a zipped package over 50 MB cannot be uploaded directly`);
+    }
     const bundle = await timed("generate", `bundle ${fn.name}`, () => bundleFunction({
       name: fn.name,
       sourceFile: fn.file,
@@ -98,6 +110,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
       trustContext: model.provider === "aws" && model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
+      include: fn.include,
+      passRequest: fn.passRequest,
+      passResponse: fn.passResponse,
       outDir: options.buildDir,
     }));
     debug("generate", `bundled ${fn.name}`, () => ({ file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size }));
@@ -122,6 +137,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       reserved_concurrency: reservedConcurrency,
       options: fn.options,
       schedule: fn.schedules.length ? fn.schedules : undefined,
+      include: fn.include.length ? fn.include.map((f) => f.rel) : undefined,
+      pass_request: fn.passRequest || undefined,
+      pass_response: fn.passResponse || undefined,
     });
   }
 

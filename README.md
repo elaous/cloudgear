@@ -59,6 +59,90 @@ the status or headers. Thrown errors are logged and answered with a generic
 `.url()` type-checks route path params against the function's input type, so
 `.url("GET", "/x/{id}", fn)` fails to compile when `fn`'s input has no `id`.
 
+Instead of a function, the third argument MAY be the path of a script file whose
+default export is the handler:
+
+```ts
+new FunctionRouter("aws")
+  .url("GET", "/hello", "./handlers/hello.ts")
+  .url("POST", "/items/{id}", "./handlers/save.ts", { name: "saveItem" });
+```
+
+```ts
+// handlers/save.ts
+export default async function ({ id }: { id: string }) {
+  return { id };
+}
+```
+
+The path MUST be a string literal. `./x` and `../x` are relative to the file
+that calls `.url`, like an import; `/x` and `x` start at the project root, the
+directory of the nearest `package.json`. `generate` analyzes the script like any
+routed function (its `BlobStore` use, `@policy` and input type) and bundles it
+on its own. The function is named after the script's path from the project root
+(`/api/v/[slug].ts` is `api-v-slug`). Because the router cannot see the
+script's types, route params are checked by `generate` and not by the compiler,
+and a route without `{ name }` is named `"METHOD /path"`. In local mode the
+router imports the script on its first request and answers 500 if it fails to
+load or has no default function. A `./x` path is relative to the file that calls
+`.url` at run time too, so `.url` MUST be called from the file the path is
+written for, and not through a helper in another file.
+
+#### Request, response and files
+
+A function that does not import cloudgear can still get the request and the
+response helper, and files, through the route's options:
+
+```ts
+import { FunctionRouter, response } from "@cloudgear/functions";
+
+new FunctionRouter("aws").url("GET", "/v/{slug}", "/api/v/[slug].ts", {
+  include: "dist/index.html",
+  request: true,
+  response,
+});
+```
+
+```ts
+// api/v/[slug].ts
+import fs from "node:fs";
+
+export default async function (request: Request, response, { slug }: { slug: string }) {
+  const html = fs.readFileSync("dist/index.html", "utf8");
+  return response({ slug, url: request.url, html }, { status: 200, headers: { "x-slug": slug } });
+}
+```
+
+- `request: true` passes the original `Request` as the first argument.
+- `response` MUST be the `response` helper imported from `@cloudgear/functions`.
+  It is passed after the request (or first without it) and returns what the
+  function can return to set the status and headers.
+- The input (body, query and path params) and the context follow, so the
+  arguments are `(request?, response?, input, context)`. Path params are
+  checked against the input's type, whichever position it is in.
+- `include` is a file, a directory (all its files) or an array of them, from the
+  project root, that MUST exist when `generate` runs. They are packaged with
+  the function at the same relative paths, so the function reads them relative
+  to its working directory (`dist/index.html` above); in local mode that is the
+  process's working directory, so the app SHOULD start from the project root.
+  They are part of the bundle's hash, so a change redeploys the function. An
+  `include` MUST NOT leave the project, contain a symbolic link, be the project
+  root, `.cloudgear` or `index.mjs`. `generate` refuses more than 250 MB
+  (Lambda's unzipped limit) and warns above 40 MB, since Lambda takes a zipped
+  package of up to 50 MB directly.
+- All routes of one function MUST give the same `include`, `request` and
+  `response`. They are not available for providers other than `aws` yet.
+- Behind the router in remote mode, the router forwards the original request
+  (method, URL, headers and body) to a function that asked for it, including
+  its credential headers (`authorization`, `cookie`, the token header). The
+  function trusts that request only when it trusts the router, that is with
+  `authenticated: "iam"` and no `cert` or CDN; otherwise, and when called
+  directly through a cert or a CDN, the request is rebuilt from the Function
+  URL event (its cookies joined into `cookie`), so its host is the function
+  URL's and not the viewer's. A Lambda payload is limited to 6 MB, and a
+  forwarded body travels twice, as input and in the request. A scheduled run
+  gets a synthetic `POST https://schedule.invalid/` request.
+
 ### Runtime: `FunctionRouter`
 
 `new FunctionRouter(provider, options)` takes `authenticated: "iam" | "none"`

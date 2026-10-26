@@ -125,9 +125,34 @@ export function parseBody(text: string, contentType: string | null): unknown {
   return text;
 }
 
-export async function invoke(fn: Handler, input: unknown, context: RequestContext = {}): Promise<HttpResult> {
+// The request as the router forwards it to a function that asked for it; `body` is base64.
+export interface OriginalRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+const HOP_BY_HOP = new Set(["connection", "content-length", "transfer-encoding"]);
+
+export async function serializeRequest(req: Request): Promise<OriginalRequest> {
+  const headers: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    if (!HOP_BY_HOP.has(key)) headers[key] = value;
+  });
+  const bytes = req.method === "GET" || req.method === "HEAD" ? new Uint8Array() : new Uint8Array(await req.arrayBuffer());
+  return { method: req.method, url: req.url, headers, ...(bytes.length ? { body: Buffer.from(bytes).toString("base64") } : {}) };
+}
+
+export function deserializeRequest(original: OriginalRequest): Request {
+  const body = original.body ? Buffer.from(original.body, "base64") : undefined;
+  return new Request(original.url, { method: original.method, headers: original.headers, body });
+}
+
+// `lead` goes before the input and context: the request and the response helper, when asked for.
+export async function invoke(fn: (...args: any[]) => unknown, input: unknown, context: RequestContext = {}, lead: unknown[] = []): Promise<HttpResult> {
   try {
-    return toHttpResult(await fn(input, context));
+    return toHttpResult(await fn(...lead, input, context));
   } catch (err) {
     console.error(err);
     return toHttpResult(response({ error: "Internal Server Error" }, { status: 500 }));

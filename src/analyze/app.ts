@@ -7,6 +7,7 @@ import {
   type CallExpression,
   type ClassDeclaration,
   type NewExpression,
+  type SourceFile,
   type Symbol as MorphSymbol,
   type VariableDeclaration,
 } from "ts-morph";
@@ -51,6 +52,11 @@ export interface AnalyzedFunction {
   options?: Record<string, string>;
   // Five-field UTC cron expressions that also trigger the function.
   schedules: string[];
+  // Files copied into the function's package, by path from the project root.
+  include: { rel: string; abs: string }[];
+  // The function receives the original request and the response helper before its input.
+  passRequest: boolean;
+  passResponse: boolean;
 }
 
 // Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
@@ -129,9 +135,23 @@ export function analyzeApp(entryPath: string): AppModel {
   project.resolveSourceFileDependencies();
 
   const packages = new PackageNames();
-  const localFiles = project
-    .getSourceFiles()
-    .filter((file) => !file.isDeclarationFile() && !file.isInNodeModules() && !packages.isCloudgear(file.getFilePath()));
+  const isAppFile = (file: SourceFile) => !file.isDeclarationFile() && !file.isInNodeModules() && !packages.isCloudgear(file.getFilePath());
+  const scanned = new Set<SourceFile>();
+  for (let added = true; added; ) {
+    added = false;
+    for (const file of project.getSourceFiles().filter((f) => isAppFile(f) && !scanned.has(f))) {
+      scanned.add(file);
+      for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const script = scriptOf(call);
+        if (script && !project.getSourceFile(script) && fs.existsSync(script)) {
+          project.addSourceFileAtPath(script);
+          project.resolveSourceFileDependencies();
+          added = true;
+        }
+      }
+    }
+  }
+  const localFiles = project.getSourceFiles().filter(isAppFile);
   const isLocal = (node: Node) => localFiles.includes(node.getSourceFile());
 
   const warnings: string[] = [];
@@ -195,6 +215,11 @@ export function analyzeApp(entryPath: string): AppModel {
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
+  const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
+  const isResponseHelper = (prop: Node) => {
+    const decl = valueDeclaration(prop);
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "response" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+  };
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
 
@@ -217,19 +242,42 @@ export function analyzeApp(entryPath: string): AppModel {
     const routePath = stringLiteral(pathArg, `${where(call)}: route path`);
     if (!fnArg) throw new Error(`${where(call)}: missing function argument`);
 
-    const decl = resolveSymbol(fnArg.getSymbol())?.getDeclarations()[0];
-    const fnNode = decl && functionNode(decl);
-    if (!decl || !fnNode || !isLocal(decl)) {
-      throw new Error(`${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`);
+    const scriptFile = scriptOf(call);
+    const scriptText = Node.isStringLiteral(fnArg) || Node.isNoSubstitutionTemplateLiteral(fnArg) ? fnArg.getLiteralText() : undefined;
+    let decl: Node | undefined;
+    if (scriptText !== undefined) {
+      const file = scriptFile && project.getSourceFile(scriptFile);
+      if (!file) throw new Error(`${where(call)}: script "${scriptText}" not found; "./x" is relative to this file, any other path to the project root`);
+      decl = file.getExportedDeclarations().get("default")?.[0];
+    } else {
+      decl = resolveSymbol(fnArg.getSymbol())?.getDeclarations()[0];
     }
-    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined);
-    checkPathParams(routePath, fnNode, where(call));
+    const fnNode = decl && (functionNode(decl) ?? (scriptText !== undefined && (Node.isArrowFunction(decl) || Node.isFunctionExpression(decl)) ? decl : undefined));
+    if (!decl || !fnNode || !isLocal(decl)) {
+      throw new Error(
+        scriptText !== undefined
+          ? `${where(call)}: script "${scriptText}" must export a function as its default export`
+          : `${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`,
+      );
+    }
+    const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), isResponseHelper);
+    const leading = Number(routeOptions.request) + Number(routeOptions.response);
+    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), leading);
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
-    const routeOptions = readRouteOptions(call.getArguments()[3], where(call));
+    const extras = JSON.stringify([routeOptions.include.map((f) => f.rel), routeOptions.request, routeOptions.response]);
+    const earlierExtras = extrasOf.get(fn);
+    if (earlierExtras && earlierExtras.key !== extras) {
+      throw new Error(`${where(call)}: the routes of "${fn.name}" give it different include, request or response settings (${earlierExtras.at}); set them identically`);
+    }
+    extrasOf.set(fn, earlierExtras ?? { key: extras, at: where(call) });
+    fn.include = routeOptions.include;
+    fn.passRequest = routeOptions.request;
+    fn.passResponse = routeOptions.response;
+    checkPathParams(routePath, fnNode, where(call), leading);
     publicRoutes.set(`${method} ${routePath}`, routeOptions.public);
-    const routeName = routeOptions.name ?? (fn.declaredName || `${method} ${routePath}`);
+    const routeName = routeOptions.name ?? ((scriptFile ? "" : fn.declaredName) || `${method} ${routePath}`);
     const clashing = routeNames.get(routeName);
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
@@ -712,7 +760,7 @@ export function analyzeApp(entryPath: string): AppModel {
     return `the receiver must be an exported instance variable itself (one of ${names.join(", ")}), not an alias or property`;
   }
 
-  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node): AnalyzedFunction {
+  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node, scriptName?: string, leadingParams = 0): AnalyzedFunction {
     const existing = functions.get(decl);
     if (existing) {
       const again = receiver ? exportTargetOf(decl, instanceExport, receiver) : undefined;
@@ -728,12 +776,12 @@ export function analyzeApp(entryPath: string): AppModel {
         `${where(decl)}: "${label}" must be exported so it can be bundled on its own (a named function, a method of an exported object, a static method of an exported class, or a method of an exported instance of a class)${problem ? `: ${problem}` : ""}`,
       );
     }
-    const param = fnNode.getParameters()[0];
+    const param = fnNode.getParameters()[leadingParams];
     const fn: AnalyzedFunction = {
       name: target.member
         ? `${target.exportName}-${target.member}`
         : target.exportName === "default"
-          ? path.basename(decl.getSourceFile().getFilePath(), ".ts")
+          ? (scriptName ?? path.parse(decl.getSourceFile().getFilePath()).name)
           : target.exportName,
       declaredName: declaredNameOf(decl),
       file: target.file ?? relative(decl.getSourceFile().getFilePath()),
@@ -742,6 +790,9 @@ export function analyzeApp(entryPath: string): AppModel {
       inputType: param?.getTypeNode()?.getText(),
       routes: [],
       schedules: [],
+      include: [],
+      passRequest: false,
+      passResponse: false,
       uses: new Map(),
     };
     const tallies = new Map<string, Tally>();
@@ -915,8 +966,16 @@ function hasOption(options: Node | undefined, name: string): boolean {
   );
 }
 
-function readRouteOptions(options: Node | undefined, at: string): { name?: string; public: boolean } {
-  const result: { name?: string; public: boolean } = { public: false };
+interface RouteSettings {
+  name?: string;
+  public: boolean;
+  include: { rel: string; abs: string }[];
+  request: boolean;
+  response: boolean;
+}
+
+function readRouteOptions(options: Node | undefined, at: string, callerFile: string, isResponseHelper: (prop: Node) => boolean): RouteSettings {
+  const result: RouteSettings = { public: false, include: [], request: false, response: false };
   if (!options) return result;
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: route options must be an object literal`);
   for (const prop of options.getProperties()) {
@@ -931,6 +990,22 @@ function readRouteOptions(options: Node | undefined, at: string): { name?: strin
       const value = Node.isPropertyAssignment(prop) ? prop.getInitializer()?.getText() : undefined;
       if (value !== "true" && value !== "false") throw new Error(`${at}: route public must be the literal true or false`);
       result.public = value === "true";
+    } else if (key === "request") {
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer()?.getText() : undefined;
+      if (value !== "true" && value !== "false") throw new Error(`${at}: route request must be the literal true or false`);
+      result.request = value === "true";
+    } else if (key === "response") {
+      if (!isResponseHelper(prop)) throw new Error(`${at}: route response must be the \`response\` helper imported from @cloudgear/functions`);
+      result.response = true;
+    } else if (key === "include") {
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+      const items = value && Node.isArrayLiteralExpression(value) ? value.getElements() : value ? [value] : [];
+      if (!items.length) throw new Error(`${at}: route include must be a string literal or an array of them`);
+      const byRel = new Map<string, { rel: string; abs: string }>();
+      for (const item of items) {
+        for (const file of expandInclude(stringLiteral(item, `${at}: route include`), callerFile, at)) byRel.set(file.rel, file);
+      }
+      result.include = [...byRel.values()].sort((a, b) => (a.rel < b.rel ? -1 : 1));
     }
   }
   return result;
@@ -1117,6 +1192,55 @@ function exportTargetOf(decl: Node, instanceExport: InstanceExport, receiver?: N
   return { exportName, member };
 }
 
+// Directory of the nearest package.json at or above the file; where "/x" and "x" paths start.
+function projectRootOf(file: string): string {
+  const pkg = findUp(path.dirname(file), "package.json");
+  return pkg ? path.dirname(pkg) : path.dirname(file);
+}
+
+// "./x" and "../x" are relative to the calling file; "/x" and "x" to the project root.
+function resolveRoutePath(spec: string, callerFile: string): string {
+  if (spec.startsWith("./") || spec.startsWith("../")) return path.resolve(path.dirname(callerFile), spec);
+  return path.join(projectRootOf(callerFile), spec.replace(/^\/+/, ""));
+}
+
+// `.url(method, path, "/api/script.ts")`: the absolute path of the script, whether or not it exists.
+function scriptOf(call: CallExpression): string | undefined {
+  const callee = call.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "url") return undefined;
+  const [method, , script] = call.getArguments();
+  if (!(method && Node.isStringLiteral(method) && (METHODS as readonly string[]).includes(method.getLiteralText().toUpperCase()))) return undefined;
+  if (!script || !(Node.isStringLiteral(script) || Node.isNoSubstitutionTemplateLiteral(script))) return undefined;
+  return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
+}
+
+// A script's function is named after its path from the project root: "api/v/[slug].ts" is "api-v-slug".
+function scriptNameOf(scriptFile: string, callerFile: string): string {
+  const rel = path.relative(projectRootOf(callerFile), scriptFile).replace(/\.[^./\\]+$/, "");
+  return rel.replace(/[^A-Za-z0-9_]+/g, "-").replace(/^-+|-+$/g, "") || "script";
+}
+
+const outside = (rel: string) => rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+
+function expandInclude(spec: string, callerFile: string, at: string): { rel: string; abs: string }[] {
+  const root = projectRootOf(callerFile);
+  const abs = resolveRoutePath(spec, callerFile);
+  const rel = path.relative(root, abs);
+  if (rel === "") throw new Error(`${at}: include "${spec}" must name a file or directory below the project root`);
+  if (outside(rel)) throw new Error(`${at}: include "${spec}" is outside the project`);
+  if (rel === ".cloudgear" || rel.startsWith(`.cloudgear${path.sep}`)) throw new Error(`${at}: include "${spec}" is generated output`);
+  if (!fs.existsSync(abs)) throw new Error(`${at}: include "${spec}" not found (paths start at ${relative(root)})`);
+  if (outside(path.relative(fs.realpathSync(root), fs.realpathSync(abs)))) throw new Error(`${at}: include "${spec}" resolves outside the project`);
+  const files = (entry: string): string[] => {
+    const stat = fs.lstatSync(entry);
+    if (stat.isSymbolicLink()) throw new Error(`${at}: include "${spec}" contains a symbolic link (${relative(entry)}); include the real files`);
+    return stat.isDirectory() ? fs.readdirSync(entry).flatMap((name) => files(path.join(entry, name))) : [entry];
+  };
+  const found = files(abs).map((file) => ({ rel: path.relative(root, file).split(path.sep).join("/"), abs: file }));
+  if (found.some((f) => f.rel === "index.mjs")) throw new Error(`${at}: include "${spec}" would replace the function's index.mjs`);
+  return found;
+}
+
 function functionNode(decl: Node) {
   if (Node.isFunctionDeclaration(decl) || Node.isMethodDeclaration(decl)) return decl;
   if (Node.isVariableDeclaration(decl) || Node.isPropertyAssignment(decl)) {
@@ -1133,9 +1257,9 @@ function exportNameOf(decl: Node): string | undefined {
   return undefined;
 }
 
-function checkPathParams(routePath: string, fnNode: ReturnType<typeof functionNode> & {}, at: string) {
+function checkPathParams(routePath: string, fnNode: ReturnType<typeof functionNode> & {}, at: string, leadingParams = 0) {
   const params = [...routePath.matchAll(/\{([A-Za-z_$][\w$]*)\}/g)].map((m) => m[1]!);
-  const param = fnNode.getParameters()[0];
+  const param = fnNode.getParameters()[leadingParams];
   if (!params.length || !param) return;
   const type = param.getType();
   if (type.isAny() || type.isUnknown()) return;

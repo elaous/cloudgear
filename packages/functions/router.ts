@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { debug, errorSummary, timed } from "@cloudgear/debug";
 import {
   INVOKE_CONTENT_TYPE,
@@ -10,8 +11,11 @@ import {
   invoke,
   matchPath,
   parseBody,
+  response,
   routeKey,
+  serializeRequest,
   type Handler,
+  type OriginalRequest,
   type RequestContext,
   type Method,
   type PathParams,
@@ -33,6 +37,12 @@ export interface RouteOptions {
   public?: boolean;
   // Provider settings of the route's function; literals only.
   options?: ProviderOptions;
+  // Files or directories, from the project root, packaged with the function; literals only.
+  include?: string | string[];
+  // Pass the original request to the function as its first argument.
+  request?: boolean;
+  // Pass the `response` helper after the request; give it the `response` import.
+  response?: typeof response;
   // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
   schedule?: CronSchedule | CronSchedule[];
 }
@@ -87,7 +97,11 @@ interface CompiledRoute {
   name: string;
   public: boolean;
   matcher: ReturnType<typeof compilePath>;
-  fn: Handler;
+  fn?: (...args: any[]) => unknown;
+  request: boolean;
+  response: boolean;
+  // Absolute path of the module whose default export handles the route.
+  script?: string;
 }
 
 interface Endpoints {
@@ -116,21 +130,33 @@ export class FunctionRouter {
     }
   }
 
+  // `script` is a path, relative to the file calling `url`, of a module whose default export handles the route.
+  url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
+  // With `request` or `response` the function takes them before its input.
+  url<P extends string>(
+    method: Method | Lowercase<Method>,
+    path: P,
+    fn: (...args: any[]) => unknown,
+    options: RouteOptions & ({ request: true } | { response: typeof response }),
+  ): this;
   url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
     method: Method | Lowercase<Method>,
     path: P,
     fn: Handler<I, O>,
-    options: RouteOptions = {},
-  ): this {
+    options?: RouteOptions,
+  ): this;
+  url(method: Method | Lowercase<Method>, path: string, handler: ((...args: any[]) => unknown) | string, options: RouteOptions = {}): this {
     const route = { method: assertMethod(method), path };
     const key = routeKey(route);
     if (this.routes.some((r) => r.key === key)) throw new Error(`Route "${key}" is already registered`);
-    const name = options.name ?? (fn.name || key);
+    const script = typeof handler === "string" ? scriptPath(handler) : undefined;
+    const fn = typeof handler === "string" ? undefined : handler;
+    const name = options.name ?? (fn?.name || key);
     if (!name) throw new Error(`Route "${key}": name must not be empty`);
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
-    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn: fn as Handler });
+    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn, script, request: options.request === true, response: !!options.response });
     return this;
   }
 
@@ -177,13 +203,14 @@ export class FunctionRouter {
         debug("router", `authenticated ${route.key}`);
         context = { auth: principal };
       }
+      const original = route.request ? (req.clone() as Request) : undefined;
       let input: Record<string, unknown>;
       try {
         input = buildInput(parseBody(await req.text(), req.headers.get("content-type")), url.searchParams, params);
       } catch {
         return Response.json({ error: "Malformed request body" }, { status: 400 });
       }
-      return this.dispatch(route, input, context, req);
+      return this.dispatch(route, input, context, req, original);
     }
     debug("router", pathMatched ? `method not allowed for ${req.method}` : `no route for ${req.method} ${url.pathname}`);
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
@@ -245,10 +272,27 @@ export class FunctionRouter {
     return Response.json({ error: "Too many requests" }, { status: 429, headers: { "retry-after": String(retryAfter) } });
   }
 
-  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request): Promise<Response> {
+  private async handlerOf(route: CompiledRoute): Promise<{ fn?: (...args: any[]) => unknown; error?: string }> {
+    if (route.fn) return { fn: route.fn };
+    let loaded: unknown;
+    try {
+      loaded = (await import(route.script!)).default;
+    } catch (err) {
+      console.error(err);
+      return { error: "Route script failed to load" };
+    }
+    if (typeof loaded !== "function") return { error: "Route script has no default export function" };
+    route.fn = loaded as (...args: any[]) => unknown;
+    return { fn: route.fn };
+  }
+
+  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request, original?: Request): Promise<Response> {
     debug("router", `dispatching ${route.key} in ${this.mode} mode`, () => ({ inputKeys: Object.keys(input) }));
     if (this.mode === "local") {
-      const result = await timed("router", `local call ${route.key}`, () => invoke(route.fn, input, context));
+      const { fn, error } = await this.handlerOf(route);
+      if (!fn) return Response.json({ error }, { status: 500 });
+      const lead = [...(original ? [original] : []), ...(route.response ? [response] : [])];
+      const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context, lead));
       debug("router", `local ${route.key} -> ${result.status}`);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
     }
@@ -266,6 +310,7 @@ export class FunctionRouter {
       upstream = await request(url, input, {
         route: route.key,
         context,
+        original: original ? await serializeRequest(original) : undefined,
         headers: token && header ? { [header]: token } : undefined,
         sign: this.authMode(endpoints) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
       });
@@ -300,11 +345,12 @@ export async function request(
   init: {
     route?: string;
     context?: RequestContext;
+    original?: OriginalRequest;
     headers?: Record<string, string>;
     sign?: { credentials?: AwsCredentialsProvider; region?: string };
   } = {},
 ): Promise<Response> {
-  const body = JSON.stringify({ input, context: init.context ?? {} });
+  const body = JSON.stringify({ input, context: init.context ?? {}, ...(init.original ? { request: init.original } : {}) });
   const headers: Record<string, string> = {
     "content-type": INVOKE_CONTENT_TYPE,
     ...(init.route ? { [ROUTE_HEADER]: init.route } : {}),
@@ -344,4 +390,25 @@ function findUp(dir: string, relativeFile: string): string | undefined {
     if (fs.existsSync(candidate)) return candidate;
     if (fs.existsSync(path.join(current, "package.json")) || path.dirname(current) === current) return undefined;
   }
+}
+
+const THIS_FILE = fileURLToPath(import.meta.url);
+const STACK_FILE = /(?:\(|\bat\s+)((?:file:\/\/)?\/.+?):\d+:\d+\)?\s*$/;
+
+// "./x" and "../x" resolve against the file that called `url`; "/x" and "x" against its project root.
+function scriptPath(script: string): string {
+  const frames = (new Error().stack ?? "").split("\n").slice(1);
+  for (const frame of frames) {
+    const found = STACK_FILE.exec(frame)?.[1];
+    const file = found?.startsWith("file://") ? fileURLToPath(found) : found;
+    if (!file || file === THIS_FILE) continue;
+    if (script.startsWith("./") || script.startsWith("../")) return path.resolve(path.dirname(file), script);
+    const manifest = findUp(path.dirname(file), "package.json");
+    const root = manifest ? path.dirname(manifest) : path.dirname(file);
+    const resolved = path.join(root, script.replace(/^\/+/, ""));
+    const fromRoot = path.relative(root, resolved);
+    if (fromRoot === ".." || fromRoot.startsWith(`..${path.sep}`)) throw new Error(`Route script "${script}" leaves the project`);
+    return resolved;
+  }
+  throw new Error(`Cannot tell which file called url() for the script "${script}"; pass a function instead`);
 }

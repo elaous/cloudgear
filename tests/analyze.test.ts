@@ -246,6 +246,27 @@ describe("analyzeApp", () => {
     });
   });
 
+  describe("routes handled by a script file", () => {
+    test("the file's default export is the function, with its store usage and input type", () => {
+      const model = analyzeApp(fixture("scripts/main.ts"));
+      expect(model.functions.map((f) => [f.name, f.file, f.exportName, f.routes])).toEqual([
+        ["handlers-hello", "tests/fixtures/router/scripts/handlers/hello.ts", "default", [{ method: "GET", path: "/hello", name: "GET /hello" }]],
+        ["handlers-save", "tests/fixtures/router/scripts/handlers/save.ts", "default", [{ method: "POST", path: "/items/{id}", name: "saveItem" }]],
+      ]);
+      expect(model.functions[1]!.inputType).toBe("{ id: string }");
+      expect([...model.functions[1]!.uses.values()]).toMatchObject([{ resource: "script-data" }]);
+      expect(model.resources.map((r) => r.name)).toEqual(["script-data"]);
+    });
+
+    test.each([
+      ["scripts/missing.ts", /script "\.\/handlers\/nope\.ts" not found; "\.\/x" is relative to this file, any other path to the project root/],
+      ["scripts/no-default.ts", /script "\.\/handlers\/named\.ts" must export a function as its default export/],
+      ["scripts/bad-param.ts", /path param\(s\) "other" missing from input type/],
+    ])("rejects %s", (file, error) => {
+      expect(() => analyzeApp(fixture(file))).toThrow(error);
+    });
+  });
+
   test("regions come from the router's and each store's options", () => {
     const model = analyzeApp(fixture("regions.ts"));
     expect(model.region).toBe("us-east-2");

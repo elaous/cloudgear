@@ -73,6 +73,9 @@ export interface FunctionSpec {
   reserved_concurrency: number;
   options?: Options;
   schedule?: string[];
+  include?: string[];
+  pass_request?: boolean;
+  pass_response?: boolean;
 }
 
 const REPEATED = new Set([
@@ -87,6 +90,7 @@ const REPEATED = new Set([
   "resource.options",
   "function.options",
   "function.schedule",
+  "function.include",
   "certificate.options",
   "api.options",
   "cdn.options",
@@ -164,6 +168,9 @@ export function decodeConfig(text: string): CloudgearConfig {
       ),
       reserved_concurrency: Number(f.reserved_concurrency ?? 0),
       ...(f.schedule?.length ? { schedule: f.schedule.map(String) } : {}),
+      ...(f.include?.length ? { include: f.include.map(String) } : {}),
+      ...(f.pass_request === true ? { pass_request: true } : {}),
+      ...(f.pass_response === true ? { pass_response: true } : {}),
       ...optionsFrom(f),
     })),
   };

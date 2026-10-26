@@ -449,6 +449,37 @@ Declaring a store twice with different options fails. An existing certificate
 cannot change `key_algorithm`. Add a key by extending `options` in
 `src/providers.ts` and handling it in the driver.
 
+## Debugging
+
+Set `CG_DEBUG=true` (also `1`, `yes`, `on`) to print debug lines on stderr,
+each tagged `[cg:debug HH:MM:SS.mmm] scope: message {data}`; stdout is
+unchanged and nothing is printed when it is unset. The variable is read on
+every call, so it works for the CLI, a local app and a deployed function alike.
+
+| Scope | What it logs |
+| --- | --- |
+| `cli` | the command, config and state paths, the drivers selected through `CLOUDGEAR_*`, region resolution, the plan summary, and a stack trace when a command fails |
+| `generate` | the analysis (provider, resources, functions with routes, schedules and accesses, certificates, CDN, API), each bundle's size and sha256, the written config |
+| `apply`, `state` | every action with its duration and result, and each state save with the output names |
+| `aws.<service>` | every SDK call (`CreateBucketCommand`, `PutRuleCommand`, ...) with its duration and outcome |
+| `dns`, `gandi`, `route53` | record operations (provider, zone, name, values) and Gandi's status codes |
+| `blob`, `cert`, `cdn` | store operations (key and size), certificate and CDN status lookups |
+| `router`, `lambda` | route matching, authentication outcome, rate limiting, remote calls (host, signed or not, status) and the Lambda adapter's request, verification and response |
+
+Values under keys that can hold secrets or large payloads are replaced with
+`[redacted]`: authorization and cookie headers, tokens, credentials, signatures,
+sessions, passwords, Lambda environment variables, code, IAM and bucket
+policies, request bodies, generic `Value`/`Input`/`Payload` fields and caller
+claims; long strings, arrays and nested objects are shortened. What is still
+logged, so do not put secrets there: blob object keys, bucket names, URLs,
+ARNs, DNS record names and values (public data), the concrete path of a request
+that matched no route, and error messages up to 300 characters (parse errors
+are reduced to `SyntaxError: invalid input`). A matched request is logged by
+its route template, so path parameters stay out. To debug a deployed function,
+give it the variable (`functionOptions: { "env.CG_DEBUG": "true" }`) and read
+its CloudWatch logs; adding the debug package changes every function's bundle,
+so the first `apply` after upgrading redeploys all functions.
+
 ## `cloudgear generate`
 
 Parses the app with the TypeScript compiler (it never executes it) starting
@@ -637,6 +668,7 @@ Where each moving part lives, since several are called across packages:
 | certificate, CloudFront and API Gateway drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts`, `apigateway.ts` | `awsDrivers` |
 | schedule driver (EventBridge) | `src/deploy/aws/schedule.ts` | `awsDrivers` |
 | `cron`, `schedule` | `packages/functions/cron.ts` | apps; `src/analyze/app.ts`, `src/deploy/plan.ts` |
+| `debug`, `timed`, `redact` | `packages/debug/index.ts` | every package and `src/` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |

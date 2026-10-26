@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
+import { debug, errorSummary, isDebug } from "@cloudgear/debug";
 import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, hasEndpoints, type Drivers } from "./deploy/apply";
@@ -53,6 +54,17 @@ async function main() {
   const configPath = path.resolve(values.config!);
   const workDir = path.join(path.dirname(configPath), ".cloudgear");
   const statePath = path.join(workDir, "state.json");
+  debug("cli", `command ${command}`, { args, config: configPath, state: statePath, cwd: process.cwd(), region: values.region });
+  if (isDebug()) {
+    debug("cli", "environment", {
+      CLOUDGEAR_DNS_DRIVER: process.env.CLOUDGEAR_DNS_DRIVER,
+      CLOUDGEAR_BLOB_DRIVER: process.env.CLOUDGEAR_BLOB_DRIVER,
+      CLOUDGEAR_CERT_DRIVER: process.env.CLOUDGEAR_CERT_DRIVER,
+      CLOUDGEAR_CDN_DRIVER: process.env.CLOUDGEAR_CDN_DRIVER,
+      AWS_REGION: process.env.AWS_REGION,
+      AWS_PROFILE: process.env.AWS_PROFILE,
+    });
+  }
 
   switch (command) {
     case "generate": {
@@ -75,6 +87,7 @@ async function main() {
     case "plan": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
+      debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
       console.log(formatPlan(plan(config, state)));
       return;
     }
@@ -87,6 +100,11 @@ async function main() {
           ? { ...config, resource: [], function: [], certificate: [], cdn: undefined, api: undefined }
           : config;
       const actions = plan(target, state);
+      debug("cli", "planned", () => {
+        const counts: Record<string, number> = {};
+        for (const a of actions) counts[a.op] = (counts[a.op] ?? 0) + 1;
+        return counts;
+      });
       console.log(formatPlan(actions));
       if (!hasChanges(actions)) {
         console.log("\nNo changes.");
@@ -186,6 +204,7 @@ async function drivers(config: CloudgearConfig, configPath: string, region: stri
   if (config.provider !== "aws") throw new Error(`Provider "${config.provider}" has no deploy drivers yet`);
   // The router's own `region` option wins, then --region, then the environment.
   const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+  debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });
   if (!resolvedRegion) throw new Error("Set the router's region option, --region or AWS_REGION to deploy");
   const configDir = path.dirname(configPath);
   // Credentials (for example GANDI_TOKEN) are read from the environment when the first record is written.
@@ -211,5 +230,9 @@ async function drivers(config: CloudgearConfig, configPath: string, region: stri
 
 main().catch((err) => {
   console.error(`cloudgear: ${err instanceof Error ? err.message : err}`);
+  if (isDebug()) {
+    debug("cli", `failed: ${errorSummary(err)}`);
+    if (err instanceof Error && err.stack) console.error(err.stack);
+  }
   process.exit(1);
 });

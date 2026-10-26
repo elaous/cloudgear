@@ -1,3 +1,4 @@
+import { debug, errorSummary } from "@cloudgear/debug";
 import { DEFAULT_TTL, quoteTxt, relativeName, withTrailingDot, type DnsDriver, type DnsRecord, type DnsRecordType } from "../driver";
 
 const API = "https://api.gandi.net/v5/livedns";
@@ -38,11 +39,19 @@ export class GandiDnsDriver implements DnsDriver {
 
   private async call(method: string, name: string, type: DnsRecordType, body?: unknown, tolerate: number[] = []) {
     const path = `/domains/${this.zone}/records/${relativeName(name, this.zone)}/${type}`;
-    const res = await (this.options.fetch ?? fetch)(`${API}${path}`, {
-      method,
-      headers: { ...this.auth(), "content-type": "application/json", accept: "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const started = performance.now();
+    let res: Response;
+    try {
+      res = await (this.options.fetch ?? fetch)(`${API}${path}`, {
+        method,
+        headers: { ...this.auth(), "content-type": "application/json", accept: "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (err) {
+      debug("gandi", `${method} ${path} failed (${Math.round(performance.now() - started)}ms): ${errorSummary(err)}`);
+      throw err;
+    }
+    debug("gandi", `${method} ${path} -> ${res.status} (${Math.round(performance.now() - started)}ms)`, { tolerated: tolerate });
     if (!res.ok && !tolerate.includes(res.status)) {
       throw new Error(`Gandi ${method} ${path} failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
     }

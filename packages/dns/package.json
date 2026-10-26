@@ -14,5 +14,8 @@
   },
   "peerDependenciesMeta": {
     "@aws-sdk/client-route-53": { "optional": true }
+  },
+  "dependencies": {
+    "@cloudgear/debug": "workspace:*"
   }
 }

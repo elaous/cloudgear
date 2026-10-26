@@ -124,6 +124,43 @@ describe("BlobStore", () => {
     }
   });
 
+  describe("a bucket named after a domain", () => {
+    const store = (options = {}) => new BlobStore("aws", "s3://assets.example.com", options);
+
+    test("url() is the bucket name as the host, plus the path prefix and the encoded key", () => {
+      expect(store().url()).toBe("https://assets.example.com/");
+      expect(store().url("a.png")).toBe("https://assets.example.com/a.png");
+      expect(store({ path: "/img-cache/" }).url("a b/c#d.png")).toBe("https://assets.example.com/img-cache/a%20b/c%23d.png");
+      expect(new BlobStore("aws", "://assets.example.com").url("x")).toBe("https://assets.example.com/x");
+    });
+
+    test("url() follows the deployed physical name, like the driver does", () => {
+      process.env.CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM = "assets-1234.example.org";
+      try {
+        expect(store().url("k")).toBe("https://assets-1234.example.org/k");
+      } finally {
+        delete process.env.CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM;
+      }
+    });
+
+    test("the name keeps its dots for the driver, and the env var replaces them", async () => {
+      process.env.CLOUDGEAR_BLOB_DRIVER = "memory";
+      try {
+        const s = store({ path: "p" });
+        expect(s.name).toBe("assets.example.com");
+        expect(BlobStore.envVarFor(s.name)).toBe("CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM");
+        await s.put("k", "v");
+        expect(await store({ path: "p" }).getText("k")).toBe("v");
+      } finally {
+        delete process.env.CLOUDGEAR_BLOB_DRIVER;
+      }
+    });
+
+    test("url() is the same for every provider and never touches the driver", () => {
+      expect(new BlobStore("gcp", "gs://assets.example.com").url("k")).toBe("https://assets.example.com/k");
+    });
+  });
+
   test("BLOB_OPERATIONS names only real methods", () => {
     for (const method of Object.keys(BLOB_OPERATIONS)) {
       expect(typeof (BlobStore.prototype as any)[method]).toBe("function");

@@ -414,6 +414,14 @@ describe("generate", () => {
     expect(decodeConfig(text)).toEqual(config);
   });
 
+  test("a bucket named after a domain keeps its name and gets a dotted-safe env var", async () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "domain-bucket-"));
+    const { config } = await generate({ entry: fixture("domain-bucket.ts"), configPath: path.join(dir2, "c.prototxt"), buildDir: path.join(dir2, "b"), project: "dom" });
+    expect(config.resource).toMatchObject([{ name: "assets.example.com", type: "@aws.S3", physical_name: "assets.example.com" }]);
+    expect(config.function[0]!.env).toEqual([{ key: "CLOUDGEAR_BLOB_ASSETS_EXAMPLE_COM", value_from: "assets.example.com" }]);
+    expect(config.function[0]!.permission).toMatchObject([{ resource: "assets.example.com", path: "img/", action: ["s3:GetObject", "s3:ListBucket"] }]);
+  });
+
   test("rejects stores that map to the same env var", async () => {
     await expect(
       generate({ entry: fixture("env-collision.ts"), configPath: path.join(dir, "y.prototxt"), buildDir: path.join(dir, "b") }),

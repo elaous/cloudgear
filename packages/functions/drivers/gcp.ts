@@ -17,27 +17,39 @@ export interface GcpResponse {
   send(body: string): unknown;
 }
 
-// Same routing, input and token handling as the AWS adapter; only the request shape differs.
+// Request context is never trusted: nothing authenticates callers first.
 export function createHandler(fn: Handler, routes: RouteSpec[], options: HandlerOptions = {}) {
-  const core = createCoreHandler(fn, routes, options);
+  const core = createCoreHandler(fn, routes, { ...options, trustContext: false });
 
   return async (req: GcpRequest, res: GcpResponse): Promise<void> => {
-    const url = new URL(req.originalUrl ?? req.url ?? "/", "http://function.invalid");
-    const result = await core({
-      rawPath: url.pathname,
-      rawQueryString: url.search.slice(1),
-      headers: Object.fromEntries(Object.entries(req.headers).map(([name, value]) => [name, Array.isArray(value) ? value.join(", ") : value])),
-      body: bodyText(req),
-      requestContext: { http: { method: req.method } },
-    });
+    const [rawPath = "/", ...query] = (req.originalUrl ?? req.url ?? "/").split("?");
+    const headers = Object.fromEntries(Object.entries(req.headers).map(([name, value]) => [name, Array.isArray(value) ? value.join(", ") : value]));
+    let result;
+    try {
+      result = await core({
+        rawPath: rawPath || "/",
+        rawQueryString: query.join("?"),
+        headers,
+        body: bodyText(req, headers),
+        requestContext: { http: { method: req.method } },
+      });
+    } catch (err) {
+      console.error(err);
+      result = { statusCode: 500, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Internal Server Error" }) };
+    }
     res.status(result.statusCode);
     for (const [name, value] of Object.entries(result.headers)) res.set(name, value);
     res.send(result.body);
   };
 }
 
-function bodyText(req: GcpRequest): string {
+// Prefers the raw bytes; a parsed body is written back in the form its content type names.
+function bodyText(req: GcpRequest, headers: Record<string, string | undefined>): string {
   if (req.rawBody) return Buffer.from(req.rawBody).toString("utf8");
   if (typeof req.body === "string") return req.body;
-  return req.body && typeof req.body === "object" && Object.keys(req.body).length ? JSON.stringify(req.body) : "";
+  if (req.body === undefined || req.body === null || typeof req.body !== "object") return "";
+  if (/^application\/x-www-form-urlencoded/i.test(headers["content-type"] ?? "")) {
+    return new URLSearchParams(Object.entries(req.body).map(([key, value]): [string, string] => [key, String(value)])).toString();
+  }
+  return Array.isArray(req.body) || Object.keys(req.body).length ? JSON.stringify(req.body) : "";
 }

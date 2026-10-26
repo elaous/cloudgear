@@ -66,7 +66,6 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       },
     },
   },
-  // Describes how a GCP app is written to the config; there are no GCP deployers yet.
   gcp: {
     options: {
       "@gcp.GCS": { keys: { versioning: oneOf("true", "false") } },
@@ -103,8 +102,7 @@ export function capability<K extends "cdn" | "api" | "schedule">(provider: strin
   return found as NonNullable<ProviderProfile[K]>;
 }
 
-// A function reaching a store of another provider needs credentials for it. Each mechanism
-// (a key, workload identity federation, a signed URL) registers under "<function provider>-><store provider>".
+// Registered under "<function provider>-><store provider>".
 export interface CrossProviderAccess {
   describe: string;
 }

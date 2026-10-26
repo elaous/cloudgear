@@ -453,8 +453,9 @@ cannot change `key_algorithm`. Add a key by extending `options` in
 
 Each entry in the config names its own provider through its `type`
 (`@aws.S3`, `@gcp.GCS`, `@gcp.CloudFunction`). The top-level `provider` is the
-router's, and so the functions': a `BlobStore` MAY use any provider, so an app
-can have functions on GCP and a bucket on AWS and another on GCS:
+router's provider, and every function runs there. A `BlobStore` MAY use any
+provider, so an app can have functions on GCP, a bucket on AWS and another on
+GCS:
 
 ```ts
 const archive = new BlobStore("aws", "://archive");
@@ -493,7 +494,11 @@ provisioned yet: `generate` warns, and the function gets no credentials for the
 store. A mechanism (a stored key, workload identity federation, a signed URL)
 registers under `"<function provider>-><store provider>"` in
 `CROSS_PROVIDER_ACCESS`, and a deployer per provider is added to `DEPLOYERS` in
-`src/cli.ts`.
+`src/cli.ts`. `apply` and `destroy` use the deployers of the providers in the
+planned actions, so removing the last GCP entry lets `destroy` run with AWS
+alone. The GCP adapter never trusts a caller identity sent in the request,
+because nothing authenticates callers before it runs; the router's API domain
+needs provider `aws`.
 
 ## Debugging
 
@@ -605,7 +610,7 @@ Requirements the analyzer enforces:
   works. The routed function may share a module with the router: inside
   Lambda `listen()` does nothing.
 - `new BlobStore(...)` MUST be assigned to a variable, with literal arguments
-  (including the options' `path`), and use the router's provider.
+  (including the options' `path`); it MAY use any provider (see Hybrid clouds).
 
 Directives go in a comment on the declaration line or the line above it:
 
@@ -614,8 +619,9 @@ Directives go in a comment on the declaration line or the line above it:
 
 Each function is bundled with `Bun.build` into
 `.cloudgear/build/<name>/index.mjs`: the function's module, its whole import
-tree and the `node_modules` it reaches, wrapped in the provider's handler
-adapter. Bundles target the Node.js Lambda runtime.
+tree and the `node_modules` it reaches, wrapped in the router's provider's
+handler adapter (Lambda for `aws`, a Cloud Functions HTTP function for `gcp`).
+Bundles target Node.js.
 
 The output is `cloudgear.prototxt`, protobuf text format for the
 `cloudgear.Config` message in `src/config/cloudgear.proto`:

@@ -475,6 +475,9 @@ export function analyzeApp(entryPath: string): AppModel {
       const cert = certOf(routerCert, "the router's cert", at);
       if (cert === cdnCert) throw new Error(`${at}: the router and the CDN cannot share a Cert; give each its own domain`);
       subdomain(cert, at, "the API");
+      if (provider !== "aws") {
+        throw new Error(`${at}: serving the router on a Cert's domain uses API Gateway, which needs provider "aws", but the router uses "${provider}"`);
+      }
       if (cert.region && cert.region !== routerRegion) {
         throw new Error(`${at}: the router's Cert must be in the function region (${routerRegion ?? "the deploy region"}), but it says ${cert.region}`);
       }

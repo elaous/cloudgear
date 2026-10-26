@@ -419,10 +419,4 @@ describe("generate", () => {
       generate({ entry: fixture("env-collision.ts"), configPath: path.join(dir, "y.prototxt"), buildDir: path.join(dir, "b") }),
     ).rejects.toThrow(/same env var CLOUDGEAR_BLOB_A_B/);
   });
-
-  test("rejects resources whose provider differs from the router's", async () => {
-    await expect(
-      generate({ entry: fixture("mixed-provider.ts"), configPath: path.join(dir, "x.prototxt"), buildDir: path.join(dir, "b") }),
-    ).rejects.toThrow(/uses provider "gcp" but the router uses "aws"/);
-  });
 });

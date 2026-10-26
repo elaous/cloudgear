@@ -6,7 +6,7 @@ import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
 import { fitName, sanitizeName } from "./names";
-import { crossProviderAccess, providerProfile, validateConfigOptions } from "./providers";
+import { capability, crossProviderAccess, providerProfile, validateConfigOptions } from "./providers";
 
 export interface GenerateOptions {
   entry: string;
@@ -42,6 +42,10 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   const project = sanitize(options.project ?? projectName(path.dirname(path.resolve(options.entry))));
   const configDir = path.dirname(path.resolve(options.configPath));
   const fromConfig = (file: string) => path.relative(configDir, path.resolve(file));
+
+  for (const fn of model.functions) {
+    if (fn.schedules.length) capability(model.provider, "schedule");
+  }
 
   const resourceProvider = new Map(model.resources.map((r) => [r.name, r.provider]));
   for (const fn of model.functions) {
@@ -92,7 +96,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       routes: fn.routes,
       provider: model.provider,
       // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
-      trustContext: model.authenticated === "iam" && !model.api,
+      trustContext: model.provider === "aws" && model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
     }));

@@ -6,13 +6,12 @@ import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { debug, errorSummary, isDebug } from "@cloudgear/debug";
 import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
-import { apply, endpointsFrom, hasEndpoints, type Drivers } from "./deploy/apply";
+import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
-import { formatPlan, hasChanges, plan } from "./deploy/plan";
+import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { generate } from "./generate";
-import { providerOfType } from "./providers";
 
 const USAGE = `Usage: cloudgear <command> [options]
 
@@ -115,7 +114,7 @@ async function main() {
           return;
         }
         try {
-          await apply(actions, state, await drivers(config, configPath, values.region), {
+          await apply(actions, state, await drivers(actions, config, configPath, values.region), {
             save: (s) => saveState(statePath, s),
             log: (message) => console.log(`cloudgear: ${message}`),
           });
@@ -201,9 +200,9 @@ function readConfig(configPath: string): CloudgearConfig {
   return decodeConfig(fs.readFileSync(configPath, "utf8"));
 }
 
-// Deployers come from every provider the config uses, each keyed by its resource types.
-async function drivers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
-  const providers = providersOf(config);
+// One deployer set per provider the planned actions touch.
+async function drivers(actions: PlannedAction[], config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
+  const providers = providersNeeded(actions);
   debug("cli", "providers", { providers });
   const all: Drivers = {};
   for (const provider of providers) {
@@ -217,17 +216,6 @@ async function drivers(config: CloudgearConfig, configPath: string, region: stri
 const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined) => Promise<Drivers>> = {
   aws: awsDeployers,
 };
-
-function providersOf(config: CloudgearConfig): string[] {
-  const types = [
-    ...config.resource.map((r) => r.type),
-    ...config.function.map((f) => f.type),
-    ...config.certificate.map((c) => `@${c.provider}.Certificate`),
-    ...(config.cdn ? [`@${config.cdn.provider}.CDN`] : []),
-    ...(config.api ? [`@${config.api.provider}.Api`] : []),
-  ];
-  return [...new Set(types.map(providerOfType))].sort();
-}
 
 async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
   // The router's own `region` option wins, then --region, then the environment.

@@ -109,4 +109,5 @@ export function validateConfigOptions(config: CloudgearConfig): void {
   for (const fn of config.function) check(fn.type, fn.name, fn.options);
   for (const certificate of config.certificate) check(providerProfile(config.provider).cdn.certificate, certificate.domain, certificate.options);
   if (config.cdn) check(providerProfile(config.cdn.provider).cdn.type, config.cdn.domain, config.cdn.options);
+  if (config.api?.via === "cloudfront") check(providerProfile(config.api.provider).cdn.type, config.api.domain, config.api.options);
 }

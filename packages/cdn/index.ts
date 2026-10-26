@@ -57,12 +57,17 @@ export class Cert {
 
 export interface CdnOptions {
   // The static site: served at "/" from this store's bucket (and path prefix, if it has one).
-  bucket: BlobStore;
+  // Exactly one of `bucket` and `router`.
+  bucket?: BlobStore;
+  // Serves the router's routes on the certificate's domain.
+  router?: { readonly provider: string };
+  // Runs a CloudFront Function per request to route same-path methods; literal only.
+  methodRouting?: "function";
   options?: ProviderOptions;
   driver?: CdnDriver;
 }
 
-// A CDN serving the bucket's static files on the certificate's domain. Like DNS and Cert it does
+// A CDN serving a bucket's static files on the certificate's domain. Like DNS and Cert it does
 // nothing at runtime except report what `cloudgear apply` deployed.
 export class CDN {
   private driverPromise?: Promise<CdnDriver>;
@@ -76,8 +81,17 @@ export class CDN {
     if (cert.provider !== provider) {
       throw new Error(`The CDN uses provider "${provider}" but its certificate uses "${cert.provider}"`);
     }
-    if (options.bucket.provider !== provider) {
+    if (!options.bucket === !options.router) {
+      throw new Error("A CDN serves either a bucket or a router: give exactly one of `bucket` and `router`");
+    }
+    if (options.bucket && options.bucket.provider !== provider) {
       throw new Error(`The CDN uses provider "${provider}" but its bucket uses "${options.bucket.provider}"`);
+    }
+    if (options.router && options.router.provider !== provider) {
+      throw new Error(`The CDN uses provider "${provider}" but its router uses "${options.router.provider}"`);
+    }
+    if (options.methodRouting && !options.router) {
+      throw new Error("methodRouting only applies to a CDN that serves a router");
     }
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }

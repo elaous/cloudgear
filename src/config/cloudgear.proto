@@ -26,6 +26,12 @@ message Api {
   string provider = 1;
   // Domain of the Certificate that serves the API.
   string domain = 2;
+  // "cloudfront" when a CDN serves the router; empty for API Gateway.
+  string via = 3;
+  // A CloudFront Function routes by method as well as path.
+  bool method_routing = 4;
+  // Provider settings of the CDN.
+  map<string, string> options = 5;
 }
 
 message Dns {

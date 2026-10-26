@@ -2,6 +2,7 @@ import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, 
 import { createHash } from "node:crypto";
 import { toEventBridgeCron } from "@cloudgear/functions";
 import { providerProfile, validateConfigOptions } from "../providers";
+import { conflictingGroups, groupRoutes, routeShape } from "../routes";
 import { stateKey, type State, type StateEntry } from "./state";
 
 export type Op = "create" | "update" | "replace" | "delete" | "forget" | "noop" | "dry";
@@ -48,6 +49,10 @@ export interface CdnComparable {
   bucket_region: string;
   path: string;
   options?: Record<string, string>;
+  // Router CDNs have no bucket; one behavior per path.
+  behaviors?: { pattern: string; methods: string[]; function: string }[];
+  // Set instead of behaviors when a CloudFront Function routes.
+  method_routes?: { method: string; path: string; function: string }[];
 }
 
 export interface ApiComparable {
@@ -235,7 +240,42 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     });
   }
 
-  if (config.api) {
+  if (config.api?.via === "cloudfront") {
+    const { api } = config;
+    const certificate = certificates.get(api.domain);
+    const certificateKey = certificateKeyOf(api.domain, "cdn");
+    const routed = config.function.filter((fn) => fn.route.length > 0);
+    const routes = routed.flatMap((fn) => fn.route.map((route) => ({ method: route.method, path: route.path, function: fn.physical_name })));
+    if (!api.method_routing && conflictingGroups(routes).length) {
+      throw new Error(`cloudgear config: paths reach different functions, which CloudFront cannot tell apart; set methodRouting on the CDN or use API Gateway`);
+    }
+    entries.push({
+      kind: "resource",
+      type: providerProfile(api.provider).cdn.type,
+      name: api.domain,
+      physical_name: api.domain,
+      dry: false,
+      spec: {
+        domain: api.domain,
+        dns_provider: certificate!.dns.provider,
+        dns_zone: certificate!.dns.zone,
+        bucket: "",
+        bucket_region: "",
+        path: "",
+        ...optionsSpec(api.options),
+        ...(api.method_routing
+          ? {
+              method_routes: routes
+                .map((route) => ({ method: route.method, path: routeShape(route.path), function: route.function }))
+                .sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
+            }
+          : { behaviors: groupRoutes(routes).map((group) => ({ pattern: group.pattern, methods: group.methods, function: group.functions[0]! })) }),
+      } satisfies CdnComparable,
+      source: api,
+      deps: [certificateKey, ...routed.map((fn) => stateKey(fn))],
+      refresh: true,
+    });
+  } else if (config.api) {
     const { api } = config;
     const certificate = certificates.get(api.domain);
     const certificateKey = certificateKeyOf(api.domain, "api");

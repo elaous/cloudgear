@@ -145,9 +145,14 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
   const cdn = distribution?.outputs.domain_name
     ? { domain: config.cdn!.domain, url: distribution.outputs.url ?? `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }
     : undefined;
-  const gateway = config.api && state.entries[stateKey({ type: "@aws.ApiGateway", name: config.api.domain })];
-  const api = gateway?.outputs.url
-    ? { domain: config.api!.domain, url: gateway.outputs.url, id: gateway.outputs.api_id }
-    : undefined;
+  const viaCloudFront = config.api?.via === "cloudfront";
+  const gateway = config.api && state.entries[stateKey({ type: viaCloudFront ? "@aws.CloudFront" : "@aws.ApiGateway", name: config.api.domain })];
+  const api = viaCloudFront
+    ? gateway?.outputs.domain_name
+      ? { domain: config.api!.domain, url: gateway.outputs.url ?? `https://${gateway.outputs.domain_name}`, id: gateway.outputs.id }
+      : undefined
+    : gateway?.outputs.url
+      ? { domain: config.api!.domain, url: gateway.outputs.url, id: gateway.outputs.api_id }
+      : undefined;
   return { provider: config.provider, routes, auth: config.authenticated, ...(cdn ? { cdn } : {}), ...(api ? { api } : {}) };
 }

@@ -78,6 +78,8 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
       throw Object.assign(new Error("not found"), { name: "NotFoundException" });
     },
     CreateDomainNameCommand: () => ({ DomainNameConfigurations: [{ ApiGatewayDomainName: "d-abc.execute-api.eu-west-1.amazonaws.com" }] }),
+    DescribeFunctionCommand: () => ({ ETag: "f1" }),
+    PublishFunctionCommand: (input) => ({ FunctionSummary: { FunctionMetadata: { FunctionARN: `arn:aws:cloudfront::1:function/${input.Name}` } } }),
     PutRuleCommand: (input) => ({ RuleArn: `arn:aws:events:eu-west-1:1:rule/${input.Name}` }),
     PutTargetsCommand: () => ({ FailedEntryCount: 0 }),
   };

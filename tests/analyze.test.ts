@@ -182,6 +182,60 @@ describe("analyzeApp", () => {
     test("public routes may skip the authenticate hook", () => {
       expect(() => analyzeApp(fixture("edge/authenticate-all-public.ts"))).not.toThrow();
     });
+
+    describe("a CDN serving the router", () => {
+      test("the CDN's domain serves the routes through CloudFront", () => {
+        const model = analyzeApp(fixture("edge/cdn-router.ts"));
+        expect(model.api).toMatchObject({ provider: "aws", domain: "api.example.com", via: "cloudfront" });
+        expect(model.api!.method_routing).toBeUndefined();
+        expect(model.cdn).toBeUndefined();
+        expect(model.certificates).toMatchObject([{ domain: "api.example.com", usage: "cdn" }]);
+      });
+
+      test("one function may take several methods of a path", () => {
+        expect(() => analyzeApp(fixture("edge/cdn-router.ts"))).not.toThrow();
+      });
+
+      test("a site CDN and a router CDN live side by side", () => {
+        const model = analyzeApp(fixture("edge/cdn-router-and-site.ts"));
+        expect(model.cdn).toMatchObject({ domain: "www.example.com", bucket: "my-site" });
+        expect(model.api).toMatchObject({ domain: "api.example.com", via: "cloudfront" });
+      });
+
+      test("different functions on one path stop generate and name the choices and their costs", () => {
+        expect(() => analyzeApp(fixture("edge/cdn-router-conflict.ts"))).toThrow(
+          /\/items is served by "createItem" and "items" \(GET, POST\)[\s\S]*pass \{ cert \} to the router[\s\S]*methodRouting: "function"[\s\S]*\$0\.10 per million/,
+        );
+      });
+
+      test("methodRouting accepts the conflict and is recorded", () => {
+        expect(analyzeApp(fixture("edge/cdn-router-method-routing.ts")).api).toMatchObject({ via: "cloudfront", method_routing: true });
+      });
+
+      test("methodRouting without a conflict is ignored with a warning", () => {
+        const model = analyzeApp(fixture("edge/cdn-router-unneeded-method-routing.ts"));
+        expect(model.api!.method_routing).toBeUndefined();
+        expect(model.warnings).toEqual([expect.stringMatching(/no path reaches several functions; no CloudFront Function will be created/)]);
+      });
+
+      test("warns that POST needs the payload hash header", () => {
+        expect(analyzeApp(fixture("edge/cdn-router.ts")).warnings).toEqual([expect.stringMatching(/POST requests through the CDN MUST carry an x-amz-content-sha256 header/)]);
+      });
+
+      test("jwtAuth reads its token from a header other than authorization", () => {
+        expect(analyzeApp(fixture("edge/cdn-router-jwt.ts")).jwt).toMatchObject({ header: "x-auth-token" });
+      });
+
+      test.each([
+        ["edge/cdn-router-and-cert.ts", /through API Gateway \(a cert\) or through a CDN, not both/],
+        ["edge/cdn-router-and-bucket.ts", /serves either a bucket or a router, not both/],
+        ["edge/cdn-router-jwt-authorization.ts", /jwtAuth needs a header other than "authorization"/],
+        ["edge/cdn-router-iam-none.ts", /needs authenticated: "iam"/],
+        ["edge/cdn-router-foreign.ts", /the CDN's router must be the app's FunctionRouter/],
+      ])("rejects %s", (file, error) => {
+        expect(() => analyzeApp(fixture(file))).toThrow(error);
+      });
+    });
   });
 
   test("regions come from the router's and each store's options", () => {

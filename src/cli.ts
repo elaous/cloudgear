@@ -121,7 +121,7 @@ async function main() {
     case "invalidate": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
-      const distribution = Object.values(state.entries).find((entry) => entry.type === "@aws.CloudFront");
+      const distribution = Object.values(state.entries).find((entry) => entry.type === "@aws.CloudFront" && entry.name !== config.api?.domain);
       if (!distribution?.outputs.id) throw new Error("No CDN has been deployed; run `cloudgear apply` first");
       const paths = args.length ? args : ["/*"];
       for (const p of paths) if (!p.startsWith("/")) throw new Error(`Invalidation path "${p}" must start with "/"`);

@@ -272,23 +272,25 @@ export class FunctionRouter {
     return Response.json({ error: "Too many requests" }, { status: 429, headers: { "retry-after": String(retryAfter) } });
   }
 
-  private async handlerOf(route: CompiledRoute): Promise<Handler | undefined> {
-    if (!route.fn && route.script) {
-      try {
-        const loaded = (await import(route.script)).default;
-        if (typeof loaded === "function") route.fn = loaded;
-      } catch (err) {
-        console.error(err);
-      }
+  private async handlerOf(route: CompiledRoute): Promise<{ fn?: (...args: any[]) => unknown; error?: string }> {
+    if (route.fn) return { fn: route.fn };
+    let loaded: unknown;
+    try {
+      loaded = (await import(route.script!)).default;
+    } catch (err) {
+      console.error(err);
+      return { error: "Route script failed to load" };
     }
-    return route.fn;
+    if (typeof loaded !== "function") return { error: "Route script has no default export function" };
+    route.fn = loaded as (...args: any[]) => unknown;
+    return { fn: route.fn };
   }
 
   private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request, original?: Request): Promise<Response> {
     debug("router", `dispatching ${route.key} in ${this.mode} mode`, () => ({ inputKeys: Object.keys(input) }));
     if (this.mode === "local") {
-      const fn = await this.handlerOf(route);
-      if (!fn) return Response.json({ error: "Route script has no default export function" }, { status: 500 });
+      const { fn, error } = await this.handlerOf(route);
+      if (!fn) return Response.json({ error }, { status: 500 });
       const lead = [...(original ? [original] : []), ...(route.response ? [response] : [])];
       const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context, lead));
       debug("router", `local ${route.key} -> ${result.status}`);
@@ -391,7 +393,7 @@ function findUp(dir: string, relativeFile: string): string | undefined {
 }
 
 const THIS_FILE = fileURLToPath(import.meta.url);
-const STACK_FILE = /(?:\(|\s)((?:file:\/\/)?\/[^\s():]+):\d+:\d+\)?\s*$/;
+const STACK_FILE = /(?:\(|\bat\s+)((?:file:\/\/)?\/.+?):\d+:\d+\)?\s*$/;
 
 // "./x" and "../x" resolve against the file that called `url`; "/x" and "x" against its project root.
 function scriptPath(script: string): string {
@@ -402,7 +404,11 @@ function scriptPath(script: string): string {
     if (!file || file === THIS_FILE) continue;
     if (script.startsWith("./") || script.startsWith("../")) return path.resolve(path.dirname(file), script);
     const manifest = findUp(path.dirname(file), "package.json");
-    return path.join(manifest ? path.dirname(manifest) : path.dirname(file), script.replace(/^\/+/, ""));
+    const root = manifest ? path.dirname(manifest) : path.dirname(file);
+    const resolved = path.join(root, script.replace(/^\/+/, ""));
+    const fromRoot = path.relative(root, resolved);
+    if (fromRoot === ".." || fromRoot.startsWith(`..${path.sep}`)) throw new Error(`Route script "${script}" leaves the project`);
+    return resolved;
   }
-  return path.resolve(script);
+  throw new Error(`Cannot tell which file called url() for the script "${script}"; pass a function instead`);
 }

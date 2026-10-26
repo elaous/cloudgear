@@ -9,7 +9,6 @@ import {
   matchPath,
   parseBody,
   response,
-  type Handler,
   type OriginalRequest,
   type RequestContext,
   type HttpResult,
@@ -20,6 +19,7 @@ import {
 export interface FunctionUrlEvent {
   rawPath: string;
   rawQueryString?: string;
+  cookies?: string[];
   headers?: Record<string, string | undefined>;
   body?: string;
   isBase64Encoded?: boolean;
@@ -126,6 +126,7 @@ function leadArguments(options: HandlerOptions, makeRequest: () => Request): unk
 
 // The URL host is the one the function URL received; a CDN does not forward the viewer's.
 function requestFromEvent(event: FunctionUrlEvent, headers: Record<string, string>): Request {
+  if (event.cookies?.length) headers = { ...headers, cookie: event.cookies.join("; ") };
   const method = event.requestContext.http.method.toUpperCase();
   const query = event.rawQueryString ? `?${event.rawQueryString}` : "";
   const body = !event.body || method === "GET" || method === "HEAD" ? undefined : event.isBase64Encoded ? Buffer.from(event.body, "base64") : event.body;
@@ -145,7 +146,8 @@ function resolveInput(
       throw new Error("Malformed invoke payload: expected { input, context }");
     }
     const context = trustContext && typeof payload.context === "object" && payload.context !== null ? payload.context : {};
-    return { input: payload.input, context, original: isOriginalRequest(payload.request) ? deserializeRequest(payload.request) : undefined };
+    const original = trustContext && isOriginalRequest(payload.request) ? deserializeRequest(payload.request) : undefined;
+    return { input: payload.input, context, original };
   }
 
   const method = event.requestContext.http.method.toUpperCase();

@@ -83,8 +83,10 @@ on its own. The function is named after the script's path from the project root
 (`/api/v/[slug].ts` is `api-v-slug`). Because the router cannot see the
 script's types, route params are checked by `generate` and not by the compiler,
 and a route without `{ name }` is named `"METHOD /path"`. In local mode the
-router imports the script on its first request and answers 500 if it has no
-default function.
+router imports the script on its first request and answers 500 if it fails to
+load or has no default function. A `./x` path is relative to the file that calls
+`.url` at run time too, so `.url` MUST be called from the file the path is
+written for, and not through a helper in another file.
 
 #### Request, response and files
 
@@ -121,15 +123,25 @@ export default async function (request: Request, response, { slug }: { slug: str
 - `include` is a file, a directory (all its files) or an array of them, from the
   project root, that MUST exist when `generate` runs. They are packaged with
   the function at the same relative paths, so the function reads them relative
-  to its working directory (`dist/index.html` above); they are part of the
-  bundle's hash, so a change redeploys the function. `include` MUST NOT leave
-  the project. Lambda accepts packages up to 50 MB.
+  to its working directory (`dist/index.html` above); in local mode that is the
+  process's working directory, so the app SHOULD start from the project root.
+  They are part of the bundle's hash, so a change redeploys the function. An
+  `include` MUST NOT leave the project, contain a symbolic link, be the project
+  root, `.cloudgear` or `index.mjs`. `generate` refuses more than 250 MB
+  (Lambda's unzipped limit) and warns above 40 MB, since Lambda takes a zipped
+  package of up to 50 MB directly.
 - All routes of one function MUST give the same `include`, `request` and
   `response`. They are not available for providers other than `aws` yet.
 - Behind the router in remote mode, the router forwards the original request
-  (method, URL, headers and body) to a function that asked for it. Called
+  (method, URL, headers and body) to a function that asked for it, including
+  its credential headers (`authorization`, `cookie`, the token header). The
+  function trusts that request only when it trusts the router, that is with
+  `authenticated: "iam"` and no `cert` or CDN; otherwise, and when called
   directly through a cert or a CDN, the request is rebuilt from the Function
-  URL event, so its host is the function URL's and not the viewer's.
+  URL event (its cookies joined into `cookie`), so its host is the function
+  URL's and not the viewer's. A Lambda payload is limited to 6 MB, and a
+  forwarded body travels twice, as input and in the request. A scheduled run
+  gets a synthetic `POST https://schedule.invalid/` request.
 
 ### Runtime: `FunctionRouter`
 

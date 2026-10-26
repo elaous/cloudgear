@@ -30,10 +30,10 @@ describe("routes handled by a script file at runtime", () => {
   test("a script without a default function, or a missing one, answers 500", async () => {
     const quiet = spyOn(console, "error").mockImplementation(() => {});
     try {
-      for (const route of ["/named", "/absent"]) {
+      for (const [route, error] of [["/named", "Route script has no default export function"], ["/absent", "Route script failed to load"]] as const) {
         const res = await router.fetch(new Request(`http://localhost${route}`));
         expect(res.status).toBe(500);
-        expect(await res.json()).toEqual({ error: "Route script has no default export function" });
+        expect(await res.json()).toEqual({ error });
       }
     } finally {
       quiet.mockRestore();

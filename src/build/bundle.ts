@@ -29,15 +29,29 @@ export interface BundleResult {
 
 export const INCLUDED_DIR = "files";
 
-// Hash of the bundle file and of each included file's path and content, in path order.
-export function hashBundle(file: string, filesDir: string, rels: string[]): string {
+// Where an included file lives under the files directory; a path from a config MUST stay inside it.
+export function includedPath(filesDir: string, rel: string): string {
+  const resolved = path.resolve(filesDir, rel);
+  const within = path.relative(filesDir, resolved);
+  if (!within || within === ".." || within.startsWith(`..${path.sep}`) || path.isAbsolute(within)) {
+    throw new Error(`Included file "${rel}" is outside the function's files`);
+  }
+  return resolved;
+}
+
+// Hash of the bundle and of each included file's path and content, in path order.
+export function hashContents(index: Uint8Array, files: { rel: string; data: Uint8Array }[]): string {
   const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(fs.readFileSync(file));
-  for (const rel of [...rels].sort()) {
+  hasher.update(index);
+  for (const { rel, data } of [...files].sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
     hasher.update(`\0${rel}\0`);
-    hasher.update(fs.readFileSync(path.join(filesDir, rel)));
+    hasher.update(data);
   }
   return hasher.digest("hex");
+}
+
+export function hashBundle(file: string, filesDir: string, rels: string[]): string {
+  return hashContents(fs.readFileSync(file), rels.map((rel) => ({ rel, data: fs.readFileSync(includedPath(filesDir, rel)) })));
 }
 
 const ADAPTERS: Record<string, string> = {

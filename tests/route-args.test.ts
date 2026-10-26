@@ -4,8 +4,9 @@ import path from "node:path";
 import { describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
 import { FunctionRouter, response } from "@cloudgear/functions";
 import { createHandler } from "../packages/functions/drivers/aws";
+import { deserializeRequest, serializeRequest } from "../packages/functions/http";
 import { analyzeApp } from "../src/analyze/app";
-import { INCLUDED_DIR, hashBundle } from "../src/build/bundle";
+import { INCLUDED_DIR, hashBundle, includedPath } from "../src/build/bundle";
 import { decodeConfig, encodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
 import { applyAll, baseConfig, emptyState, fakeAws, fn } from "./helpers";
@@ -41,6 +42,13 @@ describe("analyzing request, response and include", () => {
     ["bad-response.ts", /route response must be the `response` helper imported from @cloudgear\/functions/],
     ["bad-request.ts", /route request must be the literal true or false/],
     ["mixed.ts", /give it different include, request or response settings/],
+    ["bad-root.ts", /include "\." must name a file or directory below the project root/],
+    ["bad-reserved.ts", /include "index\.mjs" would replace the function's index\.mjs/],
+    ["bad-link.ts", /include "linked" contains a symbolic link/],
+    ["bad-escape.ts", /include "escape" resolves outside the project/],
+    ["bad-generated.ts", /include ".cloudgear\/build" is generated output/],
+    ["collide.ts", /Two functions are named "api-a-b"/],
+    ["bad-lead.ts", /path param\(s\) "slug" missing from input type/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });
@@ -58,6 +66,39 @@ describe("the router in local mode", () => {
     expect(res.status).toBe(201);
     expect(res.headers.get("x-slug")).toBe("hello");
     expect(await res.json()).toEqual({ slug: "hello", method: "POST", path: "/v/hello", query: "?x=1", body: "payload", respond: "function" });
+  });
+
+  test("a script that fails to load, or has no default function, answers 500 with its own message", async () => {
+    const quiet = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const router = new FunctionRouter("aws", { mode: "local" })
+        .url("GET", "/absent", "./fixtures/router/scripts/handlers/absent.ts")
+        .url("GET", "/named", "./fixtures/router/scripts/handlers/named.ts");
+      expect(await (await router.fetch(new Request("http://localhost/absent"))).json()).toEqual({ error: "Route script failed to load" });
+      expect(await (await router.fetch(new Request("http://localhost/named"))).json()).toEqual({ error: "Route script has no default export function" });
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  test("a script path that leaves the project is refused", () => {
+    expect(() => new FunctionRouter("aws").url("GET", "/x", "/../../outside.ts")).toThrow(/leaves the project/);
+  });
+
+  test("a caller whose directory has spaces still resolves its scripts", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear with space-"));
+    try {
+      fs.writeFileSync(path.join(dir, "package.json"), '{ "name": "spaced" }');
+      fs.writeFileSync(path.join(dir, "h.ts"), "export default () => ({ ok: true });");
+      fs.writeFileSync(
+        path.join(dir, "router.ts"),
+        `import { FunctionRouter } from ${JSON.stringify(path.join(import.meta.dir, "..", "packages", "functions", "router.ts"))};\nexport const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/h", "/h.ts").url("GET", "/rel", "./h.ts");\n`,
+      );
+      const { router } = await import(path.join(dir, "router.ts"));
+      for (const route of ["/h", "/rel"]) expect(await (await router.fetch(new Request(`http://localhost${route}`))).json()).toEqual({ ok: true });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("a path from the project root reaches the same script", async () => {
@@ -168,6 +209,33 @@ describe("the Lambda adapter", () => {
     expect(await seen!.text()).toBe("orig");
   });
 
+  test("ignores a forwarded request unless the function trusts the router", async () => {
+    let seen: Request | undefined;
+    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true });
+    await handler(
+      event({
+        headers: { "content-type": "application/vnd.cloudgear.invoke+json", host: "real.example" },
+        body: JSON.stringify({ input: {}, context: {}, request: { method: "GET", url: "https://forged.example/", headers: { authorization: "victim" } } }),
+      }),
+    );
+    expect(seen!.url).toBe("https://real.example/v/hello?x=1");
+    expect(seen!.headers.get("authorization")).toBeNull();
+  });
+
+  test("a malformed forwarded request falls back to the one received", async () => {
+    let seen: Request | undefined;
+    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true, trustContext: true });
+    await handler(event({ headers: { "content-type": "application/vnd.cloudgear.invoke+json", host: "real.example" }, body: JSON.stringify({ input: {}, request: { method: 5 } }) }));
+    expect(seen!.url).toBe("https://real.example/v/hello?x=1");
+  });
+
+  test("the cookies of a Function URL event become the cookie header", async () => {
+    let seen: Request | undefined;
+    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true });
+    await handler(event({ cookies: ["a=1", "b=2"] }));
+    expect(seen!.headers.get("cookie")).toBe("a=1; b=2");
+  });
+
   test("a function without the flags gets only input and context", async () => {
     let count = -1;
     const handler = createHandler(async (...a: unknown[]) => ((count = a.length), {}), routes);
@@ -180,6 +248,25 @@ describe("the Lambda adapter", () => {
     const handler = createHandler(async (...a: unknown[]) => ((first = a[0]), {}), routes, { request: true });
     await handler({ source: "aws.events", time: "2026-01-01T00:00:00Z" });
     expect(first).toBeInstanceOf(Request);
+  });
+});
+
+describe("forwarding a request", () => {
+  test("a body-less request has no body, a bodied one round trips, hop-by-hop headers are dropped", async () => {
+    const get = await serializeRequest(new Request("https://a.example/x?y=1", { headers: { "x-a": "1" } }));
+    expect(get).toEqual({ method: "GET", url: "https://a.example/x?y=1", headers: { "x-a": "1" } });
+    const head = await serializeRequest(new Request("https://a.example/x", { method: "HEAD" }));
+    expect(head.body).toBeUndefined();
+    const post = await serializeRequest(new Request("https://a.example/x", { method: "POST", body: "payload", headers: { connection: "close" } }));
+    expect(post.headers.connection).toBeUndefined();
+    const back = deserializeRequest(post);
+    expect(back.method).toBe("POST");
+    expect(await back.text()).toBe("payload");
+  });
+
+  test("an included file path from a config cannot leave the files directory", () => {
+    expect(includedPath("/build/files", "dist/index.html")).toBe("/build/files/dist/index.html");
+    for (const bad of ["../x", "/etc/passwd", "dist/../../x", ""]) expect(() => includedPath("/build/files", bad)).toThrow(/outside the function's files/);
   });
 });
 

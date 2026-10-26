@@ -11,7 +11,7 @@ import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
-import { INCLUDED_DIR, hashBundle } from "./build/bundle";
+import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -224,6 +224,7 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
   debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });
   if (!resolvedRegion) throw new Error("Set the router's region option, --region or AWS_REGION to deploy");
   const configDir = path.dirname(configPath);
+  const verified = new Map<string, { name: string; data: Uint8Array }[]>();
   // Credentials (for example GANDI_TOKEN) are read from the environment when the first record is written.
   if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") {
     console.warn("warning: CLOUDGEAR_DNS_DRIVER=memory is set; no real DNS records will be written");
@@ -235,14 +236,18 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
     readBundle: (fn) => {
       const file = path.resolve(configDir, fn.bundle.path);
       const filesDir = path.join(path.dirname(file), INCLUDED_DIR);
-      if (hashBundle(file, filesDir, fn.include ?? []) !== fn.bundle.sha256) {
+      const index = new Uint8Array(fs.readFileSync(file));
+      const files = (fn.include ?? []).map((rel) => ({ name: rel, data: new Uint8Array(fs.readFileSync(includedPath(filesDir, rel))) }));
+      if (hashContents(index, files.map((f) => ({ rel: f.name, data: f.data }))) !== fn.bundle.sha256) {
         throw new Error(`${fn.bundle.path} does not match the config's sha256; re-run \`cloudgear generate\``);
       }
-      return new Uint8Array(fs.readFileSync(file));
+      verified.set(fn.physical_name, files);
+      return index;
     },
     readIncluded: (fn) => {
-      const filesDir = path.join(path.dirname(path.resolve(configDir, fn.bundle.path)), INCLUDED_DIR);
-      return (fn.include ?? []).map((rel) => ({ name: rel, data: new Uint8Array(fs.readFileSync(path.join(filesDir, rel))) }));
+      const files = verified.get(fn.physical_name);
+      if (!files) throw new Error(`${fn.physical_name}: its bundle has not been verified yet`);
+      return files;
     },
   });
 }

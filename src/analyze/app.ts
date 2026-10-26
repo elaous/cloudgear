@@ -136,9 +136,11 @@ export function analyzeApp(entryPath: string): AppModel {
 
   const packages = new PackageNames();
   const isAppFile = (file: SourceFile) => !file.isDeclarationFile() && !file.isInNodeModules() && !packages.isCloudgear(file.getFilePath());
+  const scanned = new Set<SourceFile>();
   for (let added = true; added; ) {
     added = false;
-    for (const file of project.getSourceFiles().filter(isAppFile)) {
+    for (const file of project.getSourceFiles().filter((f) => isAppFile(f) && !scanned.has(f))) {
+      scanned.add(file);
       for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
         const script = scriptOf(call);
         if (script && !project.getSourceFile(script) && fs.existsSync(script)) {
@@ -1003,7 +1005,7 @@ function readRouteOptions(options: Node | undefined, at: string, callerFile: str
       for (const item of items) {
         for (const file of expandInclude(stringLiteral(item, `${at}: route include`), callerFile, at)) byRel.set(file.rel, file);
       }
-      result.include = [...byRel.values()].sort((a, b) => a.rel.localeCompare(b.rel));
+      result.include = [...byRel.values()].sort((a, b) => (a.rel < b.rel ? -1 : 1));
     }
   }
   return result;
@@ -1206,7 +1208,8 @@ function resolveRoutePath(spec: string, callerFile: string): string {
 function scriptOf(call: CallExpression): string | undefined {
   const callee = call.getExpression();
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "url") return undefined;
-  const script = call.getArguments()[2];
+  const [method, , script] = call.getArguments();
+  if (!(method && Node.isStringLiteral(method) && (METHODS as readonly string[]).includes(method.getLiteralText().toUpperCase()))) return undefined;
   if (!script || !(Node.isStringLiteral(script) || Node.isNoSubstitutionTemplateLiteral(script))) return undefined;
   return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
 }
@@ -1217,15 +1220,25 @@ function scriptNameOf(scriptFile: string, callerFile: string): string {
   return rel.replace(/[^A-Za-z0-9_]+/g, "-").replace(/^-+|-+$/g, "") || "script";
 }
 
+const outside = (rel: string) => rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+
 function expandInclude(spec: string, callerFile: string, at: string): { rel: string; abs: string }[] {
   const root = projectRootOf(callerFile);
   const abs = resolveRoutePath(spec, callerFile);
   const rel = path.relative(root, abs);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`${at}: include "${spec}" is outside the project`);
+  if (rel === "") throw new Error(`${at}: include "${spec}" must name a file or directory below the project root`);
+  if (outside(rel)) throw new Error(`${at}: include "${spec}" is outside the project`);
+  if (rel === ".cloudgear" || rel.startsWith(`.cloudgear${path.sep}`)) throw new Error(`${at}: include "${spec}" is generated output`);
   if (!fs.existsSync(abs)) throw new Error(`${at}: include "${spec}" not found (paths start at ${relative(root)})`);
-  const files = (dir: string): string[] =>
-    fs.statSync(dir).isDirectory() ? fs.readdirSync(dir).flatMap((entry) => files(path.join(dir, entry))) : [dir];
-  return files(abs).map((file) => ({ rel: path.relative(root, file).split(path.sep).join("/"), abs: file }));
+  if (outside(path.relative(fs.realpathSync(root), fs.realpathSync(abs)))) throw new Error(`${at}: include "${spec}" resolves outside the project`);
+  const files = (entry: string): string[] => {
+    const stat = fs.lstatSync(entry);
+    if (stat.isSymbolicLink()) throw new Error(`${at}: include "${spec}" contains a symbolic link (${relative(entry)}); include the real files`);
+    return stat.isDirectory() ? fs.readdirSync(entry).flatMap((name) => files(path.join(entry, name))) : [entry];
+  };
+  const found = files(abs).map((file) => ({ rel: path.relative(root, file).split(path.sep).join("/"), abs: file }));
+  if (found.some((f) => f.rel === "index.mjs")) throw new Error(`${at}: include "${spec}" would replace the function's index.mjs`);
+  return found;
 }
 
 function functionNode(decl: Node) {

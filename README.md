@@ -258,9 +258,10 @@ new CDN("aws", apiCert, { router });
 `apply` creates a distribution for the CDN's domain whose origins are the
 functions' IAM-protected function URLs. It signs requests to them with an origin
 access control of type Lambda, adds one behavior per path (`/items/{id}` becomes
-`/items/*`), and allows only that distribution to call each function. Caching is
-off for these behaviors, and a path that matches no behavior reaches the
-first function, which answers 404. A site `CDN` and a router `CDN` MAY coexist,
+`/items/*`, and a literal path also gets its trailing-slash variant), and allows
+only that distribution to call each function. Caching is off for these
+behaviors, plain HTTP is refused (they are HTTPS only), and a path that matches
+no behavior reaches the first function, which answers 404. A site `CDN` and a router `CDN` MAY coexist,
 each with its own `Cert`.
 
 | | API Gateway (`cert`) | CDN (`router`) |
@@ -273,14 +274,20 @@ each with its own `Cert`.
 | Site and API on one domain | no | no; the CDN serves one or the other |
 | Deploy time | seconds | minutes per distribution update |
 
+Route changes reach CloudFront's edges over a few minutes, and requests for the
+changed routes MAY get a 404 or a 5xx meanwhile. Moving a domain between `cert`
+and a CDN stops at the old CNAME: remove that DNS record first, or use another
+domain.
+
 A router MUST NOT have both a `cert` and a CDN. With a CDN, functions are
 called directly like with a `cert`: the router's `authenticate` hook and
 `rateLimit` do not run (see the rules below), and `authenticated` MUST be
 `"iam"`.
 
 CloudFront routes by path only. When different functions serve the same path
-for different methods, `cloudgear generate` stops and lists the paths with the
-options. Give those paths one function that handles every method, serve the
+for different methods, or a literal path such as `POST /items/new` hides methods
+of the param path that covers it (`GET /items/{id}`), `cloudgear generate` stops
+and lists the paths with the options. Give those paths one function that handles every method, serve the
 router through API Gateway, or set `methodRouting: "function"` on the CDN:
 
 ```ts
@@ -288,7 +295,8 @@ new CDN("aws", apiCert, { router, methodRouting: "function" });
 ```
 
 `apply` then publishes a CloudFront Function that picks the function by method
-and path on every request and answers 404 for anything else. CloudFront charges
+and path on every request (a `HEAD` request goes to the `GET` route unless the
+path has a `HEAD` route) and answers 404 for anything else. CloudFront charges
 for its invocations (about $0.10 per million after 2 million free a month; check
 current pricing) and every request pays a little latency. The function is only
 created when some path needs it; otherwise `generate` warns that the option has

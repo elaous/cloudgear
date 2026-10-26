@@ -17,7 +17,7 @@ import {
   UpdateDistributionCommand,
   UpdateFunctionCommand as UpdateEdgeFunctionCommand,
 } from "@aws-sdk/client-cloudfront";
-import { AddPermissionCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
+import { AddPermissionCommand, GetPolicyCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyCommand } from "@aws-sdk/client-s3";
 import type { DnsDriver } from "@cloudgear/dns";
 import { fitName } from "../../names";
@@ -46,12 +46,12 @@ const ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac";
 const DEPLOY_ATTEMPTS = 180;
 const POLL_MS = 10_000;
 const CLOUDFRONT = "cloudfront.amazonaws.com";
+const MAX_FUNCTION_BYTES = 10 * 1024;
 const ALL_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"];
 
 interface FunctionOrigin {
   physical: string;
   host: string;
-  arn: string;
 }
 
 export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
@@ -63,8 +63,8 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       const fn = entry.deps
         .map((key) => context.entry(key))
         .find((e) => e?.type === "@aws.Lambda" && e.physical_name === name);
-      if (!fn?.outputs.url || !fn.outputs.arn) throw new Error(`Function "${name}" has no URL yet; apply it first`);
-      origins.set(name, { physical: name, host: new URL(fn.outputs.url).host, arn: fn.outputs.arn });
+      if (!fn?.outputs.url) throw new Error(`Function "${name}" has no URL yet; apply it first`);
+      origins.set(name, { physical: name, host: new URL(fn.outputs.url).host });
     }
     return origins;
   }
@@ -142,37 +142,44 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       { Action: "lambda:InvokeFunction", kind: "invoke", InvokedViaFunctionUrl: true },
     ];
     for (const { kind, ...permission } of permissions) {
+      const statementId = `cloudgear-cdn-${tag(domain)}-${kind}`;
+      const grant = () =>
+        deps.lambda.send(new AddPermissionCommand({ FunctionName: functionName, StatementId: statementId, Principal: CLOUDFRONT, SourceArn: distributionArn, ...permission }));
       try {
-        await deps.lambda.send(
-          new AddPermissionCommand({
-            FunctionName: functionName,
-            StatementId: `cloudgear-cdn-${tag(domain)}-${kind}`,
-            Principal: CLOUDFRONT,
-            SourceArn: distributionArn,
-            ...permission,
-          }),
-        );
+        await grant();
       } catch (err) {
         const e = err as { name?: string; message?: string };
         if (!(e.name === "ResourceConflictException" && /statement id.*already exists/i.test(e.message ?? ""))) throw err;
+        if (await grantsSource(functionName, statementId, distributionArn)) continue;
+        await removeStatement(functionName, statementId);
+        await grant();
       }
+    }
+  }
+
+  async function grantsSource(functionName: string, statementId: string, sourceArn: string): Promise<boolean> {
+    const { Policy } = await deps.lambda.send(new GetPolicyCommand({ FunctionName: functionName }));
+    const statements: { Sid?: string; Condition?: { ArnLike?: Record<string, string> } }[] = [].concat(JSON.parse(Policy).Statement ?? []);
+    return statements.some((s) => s.Sid === statementId && s.Condition?.ArnLike?.["AWS:SourceArn"] === sourceArn);
+  }
+
+  async function removeStatement(functionName: string, statementId: string) {
+    try {
+      await deps.lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: statementId }));
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ResourceNotFoundException") throw err;
     }
   }
 
   async function revokeDistribution(functionName: string, domain: string) {
-    for (const kind of ["url", "invoke"]) {
-      try {
-        await deps.lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: `cloudgear-cdn-${tag(domain)}-${kind}` }));
-      } catch (err) {
-        if ((err as { name?: string }).name !== "ResourceNotFoundException") throw err;
-      }
-    }
+    for (const kind of ["url", "invoke"]) await removeStatement(functionName, `cloudgear-cdn-${tag(domain)}-${kind}`);
   }
 
   // Publishes the routing function; returns its live ARN.
-  async function publishRouteFunction(spec: CdnComparable, known?: string): Promise<{ name: string; arn: string }> {
+  async function publishRouteFunction(spec: CdnComparable, outputs: Record<string, string>): Promise<string> {
     const name = fitName(`cloudgear-${tag(spec.domain)}-routes`, 64);
     const code = Buffer.from(routeFunctionCode(spec.method_routes ?? []));
+    if (code.length > MAX_FUNCTION_BYTES) throw new Error(`The routing function for ${spec.domain} is ${code.length} bytes; CloudFront Functions allow ${MAX_FUNCTION_BYTES}. Serve fewer routes through the CDN`);
     const config = { Comment: `cloudgear: ${spec.domain}`, Runtime: "cloudfront-js-2.0" as const };
     const exists = async () => {
       try {
@@ -182,7 +189,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         throw err;
       }
     };
-    let etag = known ? await exists() : undefined;
+    let etag = outputs.route_function ? await exists() : undefined;
     if (etag) {
       await deps.cloudfront.send(new UpdateEdgeFunctionCommand({ Name: name, IfMatch: etag, FunctionConfig: config, FunctionCode: code }));
     } else {
@@ -194,9 +201,10 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         await deps.cloudfront.send(new UpdateEdgeFunctionCommand({ Name: name, IfMatch: etag, FunctionConfig: config, FunctionCode: code }));
       }
     }
+    outputs.route_function = name;
     etag = await exists();
     const published = await deps.cloudfront.send(new PublishFunctionCommand({ Name: name, IfMatch: etag }));
-    return { name, arn: published.FunctionSummary.FunctionMetadata.FunctionARN };
+    return published.FunctionSummary.FunctionMetadata.FunctionARN;
   }
 
   async function removeRouteFunction(name: string) {
@@ -238,9 +246,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     let routeFunctionArn: string | undefined;
     if (spec.method_routes?.length) {
       deps.log("publishing the routing function");
-      const published = await publishRouteFunction(spec, outputs.route_function);
-      outputs.route_function = published.name;
-      routeFunctionArn = published.arn;
+      routeFunctionArn = await publishRouteFunction(spec, outputs);
     }
 
     const config = (reference: string, enabled = true) =>
@@ -444,8 +450,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
   const toFunction = {
     CachePolicyId: CACHING_DISABLED,
     OriginRequestPolicyId: ALL_VIEWER_EXCEPT_HOST,
-    ViewerProtocolPolicy: "redirect-to-https",
-    Compress: true,
+    ViewerProtocolPolicy: "https-only",
   };
   const behaviors = (spec.behaviors ?? []).map((behavior) => ({
     PathPattern: behavior.pattern,

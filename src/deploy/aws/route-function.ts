@@ -1,4 +1,4 @@
-import { groupRoutes, routeShape } from "../../routes";
+import { routeShape } from "../../routes";
 
 export interface MethodRoute {
   method: string;
@@ -17,8 +17,8 @@ function pathRegex(shape: string): string {
 
 // Viewer-request CloudFront Function source selecting the origin by method and path.
 export function routeFunctionCode(routes: MethodRoute[]): string {
-  const specificity = new Map(groupRoutes(routes.map((r) => ({ ...r }))).map((group, index) => [group.shape, index]));
-  const ordered = [...routes].sort((a, b) => (specificity.get(routeShape(a.path)) ?? 0) - (specificity.get(routeShape(b.path)) ?? 0) || a.method.localeCompare(b.method));
+  const literal = (path: string) => routeShape(path).replace(/\{\}/g, "").length;
+  const ordered = [...routes].sort((a, b) => literal(b.path) - literal(a.path) || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
   const table = ordered.map((route) => ({ method: route.method, regex: pathRegex(routeShape(route.path)), origin: originIdOf(route.function) }));
   return `import cf from 'cloudfront';
 
@@ -26,14 +26,19 @@ var ROUTES = ${JSON.stringify(table)}.map(function (route) {
   return { method: route.method, regex: new RegExp(route.regex), origin: route.origin };
 });
 
+function find(method, uri) {
+  for (var i = 0; i < ROUTES.length; i++) {
+    if (ROUTES[i].method === method && ROUTES[i].regex.test(uri)) return ROUTES[i];
+  }
+  return null;
+}
+
 function handler(event) {
   var request = event.request;
-  for (var i = 0; i < ROUTES.length; i++) {
-    var route = ROUTES[i];
-    if (route.method === request.method && route.regex.test(request.uri)) {
-      cf.selectRequestOriginById(route.origin);
-      return request;
-    }
+  var route = find(request.method, request.uri) || (request.method === 'HEAD' ? find('GET', request.uri) : null);
+  if (route) {
+    cf.selectRequestOriginById(route.origin);
+    return request;
   }
   return {
     statusCode: 404,

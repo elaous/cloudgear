@@ -2,7 +2,7 @@ import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, 
 import { createHash } from "node:crypto";
 import { toEventBridgeCron } from "@cloudgear/functions";
 import { capability, providerOfType, validateConfigOptions } from "../providers";
-import { conflictingGroups, groupRoutes, routeShape } from "../routes";
+import { behaviorsFor, conflictingGroups, routeShape } from "../routes";
 import { stateKey, type State, type StateEntry } from "./state";
 
 export type Op = "create" | "update" | "replace" | "delete" | "forget" | "noop" | "dry";
@@ -269,7 +269,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
                 .map((route) => ({ method: route.method, path: routeShape(route.path), function: route.function }))
                 .sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
             }
-          : { behaviors: groupRoutes(routes).map((group) => ({ pattern: group.pattern, methods: group.methods, function: group.functions[0]! })) }),
+          : { behaviors: behaviorsFor(routes) }),
       } satisfies CdnComparable,
       source: api,
       deps: [certificateKey, ...routed.map((fn) => stateKey(fn))],

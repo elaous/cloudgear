@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test, setDefaultTimeout } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,7 +13,7 @@ import { decodeConfig, encodeConfig } from "../src/config/schema";
 import { endpointsFrom } from "../src/deploy/apply";
 import { routeFunctionCode } from "../src/deploy/aws/route-function";
 import { plan, type CdnComparable } from "../src/deploy/plan";
-import { groupRoutes, routeShape } from "../src/routes";
+import { behaviorsFor, conflictingGroups, groupRoutes, routeShape } from "../src/routes";
 import { applyAll, baseConfig, emptyState, fakeAws, fn } from "./helpers";
 
 setDefaultTimeout(30_000);
@@ -48,17 +49,33 @@ const conflictConfig = (methodRouting: boolean): CloudgearConfig =>
   routerCdnConfig({ function: [listItems, createItem], api: { provider: "aws", domain: DOMAIN, via: "cloudfront", ...(methodRouting ? { method_routing: true } : {}) } });
 
 describe("route grouping", () => {
-  test("params become wildcards, the trailing slash is ignored and literal-heavy patterns go first", () => {
+  const routes = [
+    { method: "GET", path: "/items/{id}", function: "item" },
+    { method: "GET", path: "/items", function: "items" },
+    { method: "POST", path: "/items/", function: "items" },
+    { method: "GET", path: "/items/{id}/parts", function: "parts" },
+  ];
+
+  test("params become wildcards and the trailing slash is ignored when grouping", () => {
     expect(routeShape("/a/{x}/b/")).toBe("/a/{}/b");
     expect(routeShape("/")).toBe("/");
-    const groups = groupRoutes([
+    expect(groupRoutes(routes).find((g) => g.pattern === "/items")).toMatchObject({ methods: ["GET", "POST"], functions: ["items"] });
+  });
+
+  test("behaviors go literal-heavy first, exact before wildcard, and cover the trailing slash", () => {
+    expect(behaviorsFor(routes).map((b) => b.pattern)).toEqual(["/items/*/parts/", "/items/*/parts", "/items/", "/items/*", "/items"]);
+    expect(behaviorsFor([{ method: "GET", path: "/", function: "root" }]).map((b) => b.pattern)).toEqual(["/"]);
+  });
+
+  test("a literal path hiding methods of the param path that covers it is a conflict", () => {
+    const overlap = [
+      { method: "POST", path: "/items/new", function: "fresh" },
       { method: "GET", path: "/items/{id}", function: "item" },
-      { method: "GET", path: "/items", function: "items" },
-      { method: "POST", path: "/items/", function: "items" },
-      { method: "GET", path: "/items/{id}/parts", function: "parts" },
-    ]);
-    expect(groups.map((g) => g.pattern)).toEqual(["/items/*/parts", "/items/*", "/items"]);
-    expect(groups.find((g) => g.pattern === "/items")).toMatchObject({ methods: ["GET", "POST"], functions: ["items"] });
+    ];
+    expect(conflictingGroups(overlap)).toMatchObject([{ pattern: "/items/* and /items/new", methods: ["GET", "POST"], functions: ["fresh", "item"] }]);
+    expect(conflictingGroups([...overlap, { method: "GET", path: "/items/new", function: "fresh" }])).toEqual([]);
+    expect(conflictingGroups(overlap.map((r) => ({ ...r, function: "same" })))).toEqual([]);
+    expect(conflictingGroups([{ method: "GET", path: "/items/new", function: "fresh" }, { method: "GET", path: "/items/{id}", function: "item" }])).toEqual([]);
   });
 });
 
@@ -73,6 +90,7 @@ describe("planning a CDN that serves the router", () => {
     const spec = plan(routerCdnConfig(), emptyState()).find((a) => a.key === CDN_KEY)!.desired!.spec as unknown as CdnComparable;
     expect(spec.bucket).toBe("");
     expect(spec.behaviors).toEqual([
+      { pattern: "/items/", methods: ["GET", "POST"], function: "app-items" },
       { pattern: "/items/*", methods: ["GET"], function: "app-item" },
       { pattern: "/items", methods: ["GET", "POST"], function: "app-items" },
     ]);
@@ -120,10 +138,13 @@ describe("applying a CDN that serves the router", () => {
       OriginAccessControlId: "oac-lambda",
       CustomOriginConfig: { OriginProtocolPolicy: "https-only" },
     });
+    const all = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"];
     expect(config.CacheBehaviors.Items.map((b: any) => [b.PathPattern, b.TargetOriginId, b.AllowedMethods.Items])).toEqual([
+      ["/items/", "cloudgear-fn-app-items", all],
       ["/items/*", "cloudgear-fn-app-item", ["GET", "HEAD"]],
-      ["/items", "cloudgear-fn-app-items", ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]],
+      ["/items", "cloudgear-fn-app-items", all],
     ]);
+    expect(config.CacheBehaviors.Items.every((b: any) => b.ViewerProtocolPolicy === "https-only" && b.Compress === undefined)).toBe(true);
     expect(config.DefaultCacheBehavior).toMatchObject({ TargetOriginId: "cloudgear-fn-app-item", CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" });
     expect(config.DefaultCacheBehavior.FunctionAssociations).toBeUndefined();
 
@@ -187,6 +208,51 @@ describe("applying a CDN that serves the router", () => {
     expect(aws.of("DeleteOriginAccessControlCommand")).toEqual([]);
   });
 
+  test("a permission left by an earlier distribution is replaced, one for this distribution is kept", async () => {
+    const conflict = () => Object.assign(new Error("The statement id (cloudgear-cdn) provided already exists."), { name: "ResourceConflictException" });
+    const run = async (sourceArn: string) => {
+      const added = new Set<string>();
+      return applyAll(
+        routerCdnConfig({ function: [items] }),
+        emptyState(),
+        fakeAws({
+          AddPermissionCommand: (input) => {
+            if (input.Principal !== "cloudfront.amazonaws.com" || added.has(input.StatementId)) return {};
+            added.add(input.StatementId);
+            throw conflict();
+          },
+          GetPolicyCommand: () => ({
+            Policy: JSON.stringify({
+              Statement: ["url", "invoke"].map((kind) => ({
+                Sid: `cloudgear-cdn-${createHash("sha256").update(DOMAIN).digest("hex").slice(0, 12)}-${kind}`,
+                Condition: { ArnLike: { "AWS:SourceArn": sourceArn } },
+              })),
+            }),
+          }),
+        }),
+      );
+    };
+    const stale = await run("arn:aws:cloudfront::1:distribution/OLD");
+    expect(stale.of("RemovePermissionCommand")).toHaveLength(2);
+    expect(stale.of("AddPermissionCommand").filter((i) => i.Principal === "cloudfront.amazonaws.com")).toHaveLength(4);
+    const current = await run("arn:aws:cloudfront::1:distribution/E1");
+    expect(current.of("RemovePermissionCommand")).toEqual([]);
+    expect(current.of("AddPermissionCommand").filter((i) => i.Principal === "cloudfront.amazonaws.com")).toHaveLength(2);
+  });
+
+  test("a failed publish still records the routing function for cleanup", async () => {
+    const state = emptyState();
+    await expect(applyAll(conflictConfig(true), state, fakeAws({ PublishFunctionCommand: () => { throw new Error("publish failed"); } }))).rejects.toThrow("publish failed");
+    expect(state.entries[CDN_KEY]!.outputs.route_function).toMatch(/^cloudgear-.*-routes$/);
+  });
+
+  test("a routing table beyond the CloudFront Function size limit is refused", async () => {
+    const many = (method: string, name: string) =>
+      fn({ name, physical_name: `app-${name}`, route: Array.from({ length: 300 }, (_, i) => ({ method, path: `/resource-number-${i}/{id}`, name: `${name}${i}` })) });
+    const config = routerCdnConfig({ function: [many("GET", "reader"), many("POST", "writer")], api: { provider: "aws", domain: DOMAIN, via: "cloudfront", method_routing: true } });
+    await expect(applyAll(config, emptyState())).rejects.toThrow(/allow 10240/);
+  });
+
   test("destroying removes the distribution, the routing function, the access control and the permissions", async () => {
     const state = emptyState();
     await applyAll(conflictConfig(true), state);
@@ -207,6 +273,18 @@ describe("the routing function", () => {
     const handler = new Function("selected", `${source}\nreturn handler;`)(selected) as (event: unknown) => any;
     return { selected, run: (method: string, uri: string) => handler({ request: { method, uri } }) };
   };
+
+  test("a HEAD request goes to the GET route unless the path has a HEAD route", () => {
+    const { selected, run } = compile([
+      { method: "GET", path: "/items", function: "list" },
+      { method: "GET", path: "/files", function: "files" },
+      { method: "HEAD", path: "/files", function: "headFiles" },
+    ]);
+    run("HEAD", "/items");
+    run("HEAD", "/files");
+    expect(selected).toEqual(["cloudgear-fn-list", "cloudgear-fn-headFiles"]);
+    expect(run("HEAD", "/other")).toMatchObject({ statusCode: 404 });
+  });
 
   test("selects the origin of the function for each method and path", () => {
     const { selected, run } = compile([
@@ -262,7 +340,7 @@ describe("generating for a CDN that serves the router", () => {
       expect(config.cdn).toBeUndefined();
       expect(fs.readFileSync(path.join(dir, "build", "items", "entry.ts"), "utf8")).toContain("trustContext: false");
       const spec = plan(config, emptyState()).find((a) => a.key === CDN_KEY)!.desired!.spec as unknown as CdnComparable;
-      expect(spec.behaviors!.map((b) => b.pattern)).toEqual(["/items/*", "/items"]);
+      expect(spec.behaviors!.map((b) => b.pattern)).toEqual(["/items/", "/items/*", "/items"]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

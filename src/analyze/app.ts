@@ -13,7 +13,7 @@ import {
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
 import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
-import { conflictingGroups, groupRoutes } from "../routes";
+import { behaviorsFor, conflictingGroups } from "../routes";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -491,7 +491,7 @@ export function analyzeApp(entryPath: string): AppModel {
     if (routerCert !== undefined && routerCdnExpr) {
       throw new Error(`${where(router)}: serve the router through API Gateway (a cert) or through a CDN, not both`);
     }
-    const directCalls = (at: string, how: string, advice: string) => {
+    const directCalls = (at: string, how: string, advice: string, domainOf: string) => {
       if (hasOption(routerOptions, "authenticate") && !jwtSettings) {
         const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
         if (open) {
@@ -501,7 +501,7 @@ export function analyzeApp(entryPath: string): AppModel {
         }
       }
       if (hasOption(routerOptions, "rateLimit")) {
-        warnings.push(`${at}: rateLimit does not apply to routes served on ${how === "a cert on the router" ? "the cert's domain" : "the CDN's domain"}`);
+        warnings.push(`${at}: rateLimit does not apply to routes served on ${domainOf}`);
       }
     };
     if (routerCert !== undefined) {
@@ -515,7 +515,7 @@ export function analyzeApp(entryPath: string): AppModel {
       if (cert.region && cert.region !== routerRegion) {
         throw new Error(`${at}: the router's Cert must be in the function region (${routerRegion ?? "the deploy region"}), but it says ${cert.region}`);
       }
-      directCalls(at, "a cert on the router", "drop the cert");
+      directCalls(at, "a cert on the router", "drop the cert", "the cert's domain");
       cert.usage = "api";
       api = { provider: "aws", domain: cert.domain };
     }
@@ -549,7 +549,7 @@ export function analyzeApp(entryPath: string): AppModel {
           `${where(router)}: with a CDN, jwtAuth needs a header other than "authorization" (for example { header: "x-auth-token" }); CloudFront origin access control signs requests to functions with that header`,
         );
       }
-      directCalls(where(router), "a CDN", "drop the CDN");
+      directCalls(where(router), "a CDN", "drop the CDN", "the CDN's domain");
 
       const routes = [...functions.values()].flatMap((fn) => fn.routes.map((r) => ({ method: r.method, path: r.path, function: fn.name })));
       const conflicts = conflictingGroups(routes);
@@ -569,9 +569,10 @@ export function analyzeApp(entryPath: string): AppModel {
       if (methodRouting === "function" && !conflicts.length) {
         warnings.push(`${at}: methodRouting is set but no path reaches several functions; no CloudFront Function will be created`);
       }
-      const groups = groupRoutes(routes);
-      if (groups.length > 24) {
-        warnings.push(`${at}: ${groups.length} distinct paths; a CloudFront distribution allows 25 behaviors by default, so request a quota increase or use methodRouting`);
+      const behaviors = methodRouting === "function" && conflicts.length ? 0 : behaviorsFor(routes).length;
+      const origins = new Set(routes.map((r) => r.function)).size;
+      if (behaviors > 25 || origins > 25) {
+        warnings.push(`${at}: ${behaviors} behaviors and ${origins} origins; a CloudFront distribution allows 25 of each by default, so request a quota increase`);
       }
       const bodied = new Set(routes.map((r) => r.method).filter((m) => m === "POST" || m === "PUT"));
       if (bodied.size) {

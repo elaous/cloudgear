@@ -333,7 +333,8 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   }
   // Nothing deployed (for example after destroy): stay in local mode.
   if (Object.keys(parsed.routes).length === 0) return null;
-  return { routes: parsed.routes, auth: parsed.auth, ...(parsed.api ? { api: { domain: parsed.api.domain } } : {}) };
+  const apiDomain = typeof parsed.api?.domain === "string" ? parsed.api.domain : undefined;
+  return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain } } : {}) };
 }
 
 // Stops at the nearest package.json so a parent project's endpoints are never picked up.

@@ -239,6 +239,7 @@ describe("analyzeApp", () => {
         ["edge/cdn-router-jwt-authorization.ts", /jwtAuth needs a header other than "authorization"/],
         ["edge/cdn-router-iam-none.ts", /needs authenticated: "iam"/],
         ["edge/cdn-router-foreign.ts", /the CDN's router must be the app's FunctionRouter/],
+        ["edge/cdn-router-overlap.ts", /\/items\/\* and \/items\/new is served by "fresh" and "item" \(GET, POST\)/],
       ])("rejects %s", (file, error) => {
         expect(() => analyzeApp(fixture(file))).toThrow(error);
       });

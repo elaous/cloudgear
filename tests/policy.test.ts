@@ -43,6 +43,33 @@ describe("@policy on a static method of an exported class", () => {
     ]);
   });
 
+  test("@policy works on an instance method reached through an exported instance", async () => {
+    const model = analyzeApp(fixture("instance.ts"));
+    expect(model.functions.map((f) => [f.name, f.exportName, f.member])).toEqual([["api-read", "api", "read"]]);
+    expect([...model.functions[0]!.uses.values()]).toEqual([{ resource: "data", path: "", accesses: new Set(["read"]) }]);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-instance-"));
+    await generate({ entry: fixture("instance.ts"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "app" });
+    const script = `
+      const { handler } = await import(${JSON.stringify(path.join(dir, "b/api-read/index.mjs"))});
+      const res = await handler({ rawPath: "/read", rawQueryString: "key=a", requestContext: { http: { method: "GET" } }, headers: {} });
+      console.log(res.body);
+    `;
+    const proc = Bun.spawnSync(["node", "--input-type=module", "-e", script], {
+      env: { ...process.env, CLOUDGEAR_BLOB_DRIVER: "memory", AWS_LAMBDA_FUNCTION_NAME: "x" },
+      cwd: dir,
+    });
+    expect(proc.stderr.toString()).toBe("");
+    expect(JSON.parse(proc.stdout.toString())).toEqual({ greeting: "hello", found: false });
+  });
+
+  test("the receiver picks the instance when a class has several, and the instance may live in another file", () => {
+    const model = analyzeApp(fixture("two-instances-ok.ts"));
+    expect(model.functions.map((f) => [f.exportName, f.member])).toEqual([["b", "read"]]);
+    const other = analyzeApp(fixture("other-file/main.ts"));
+    expect(other.functions.map((f) => [f.file, f.exportName, f.member])).toEqual([["tests/fixtures/router/policy/other-file/main.ts", "api", "read"]]);
+  });
+
   test("a function that does more than its policy allows is refused", () => {
     expect(() => analyzeApp(fixture("exceeds.ts"))).toThrow(/needs permissions\.Put on "data", which its @policy does not allow/);
   });
@@ -74,6 +101,9 @@ describe("@policy on a static method of an exported class", () => {
     ["empty.ts", /lists no permissions/],
     ["unknown-store.ts", /@policy needs a BlobStore variable/],
     ["instance-method.ts", /must be exported so it can be bundled on its own/],
+    ["instance-unexported.ts", /must be exported so it can be bundled on its own.*no exported instance of Api/],
+    ["two-instances.ts", /routed through two different instances \(a, b\)/],
+    ["alias.ts", /the receiver must be an exported instance variable itself \(one of api\)/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });

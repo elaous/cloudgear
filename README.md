@@ -396,9 +396,11 @@ export class Jobs {
 new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * * * *` });
 ```
 
-- `@schedule` goes on a `static` method of an exported class and makes it a
-  function of its own, with no route and no function URL; `@schedule` and the
-  `schedule` option MAY be combined and repeated, and an app MAY have no
+- `@schedule` goes on a method of a class and makes it a function of its own,
+  with no route and no function URL. A `static` method needs an exported class;
+  an instance method needs exactly one exported instance of its class
+  (`export const jobs = new Jobs()`). `@schedule` and the `schedule` option MAY
+  be combined and repeated, and an app MAY have no
   routes at all. Both are read by `generate`, so the value MUST be a literal
   `cron` template without `${}`; they do nothing at runtime.
 - On AWS each expression becomes an EventBridge rule (`@aws.Schedule`) that
@@ -488,8 +490,12 @@ to every operation for being passed around; the granted accesses (plus any
 direct calls) are used instead.
 
 Alternatively declare a function's permissions with `@policy`, a method
-decorator. TypeScript only decorates class members, so the routed function is
-a `static` method of an exported class:
+decorator. TypeScript decorates class members, so the routed function is a
+method of a class, either `static` on an exported class or an instance method
+reached through an exported instance (`export const api = new Api(...)`, routed
+as `api.read`; the receiver MUST be that exported variable itself, not an alias
+or property, and the instance MAY live in another module; with several
+instances of one class, each routed method belongs to one):
 
 ```ts
 import { BlobStore, permissions, policy } from "@cloudgear/blob";

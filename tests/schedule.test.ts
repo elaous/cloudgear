@@ -90,6 +90,26 @@ describe("schedules in source", () => {
     expect(jobs.ping!.schedules).toEqual([]);
   });
 
+  test("@schedule on an instance method uses the class's exported instance, and the bundle keeps `this`", async () => {
+    const model = analyzeApp(fixture("instance.ts"));
+    expect(model.functions.map((f) => [f.name, f.exportName, f.member, f.schedules])).toEqual([["jobs-tick", "jobs", "tick", ["*/5 * * * *"]]]);
+    const { dir } = await generated(fixture("instance.ts"));
+    const script = `
+      const { handler } = await import(${JSON.stringify(path.join(dir, "b/jobs-tick/index.mjs"))});
+      const event = { source: "aws.events" };
+      await handler(event);
+      console.log((await handler(event)).body);
+    `;
+    const proc = Bun.spawnSync(["node", "--input-type=module", "-e", script], { cwd: dir, env: { ...process.env, AWS_LAMBDA_FUNCTION_NAME: "x" } });
+    expect(proc.stderr.toString()).toBe("");
+    expect(JSON.parse(proc.stdout.toString())).toEqual({ runs: 2 });
+  });
+
+  test("an instance method that is routed and scheduled is one function", () => {
+    const model = analyzeApp(fixture("instance-routed.ts"));
+    expect(model.functions.map((f) => [f.name, f.exportName, f.routes.length, f.schedules])).toEqual([["jobs-tick", "jobs", 1, ["0 3 * * *"]]]);
+  });
+
   test("an app may have only scheduled functions", () => {
     const model = analyzeApp(fixture("only-scheduled.ts"));
     expect(model.functions.map((f) => [f.name, f.routes, f.schedules])).toEqual([["Jobs-tick", [], ["*/5 * * * *"]]]);
@@ -107,7 +127,8 @@ describe("schedules in source", () => {
     ["both-days.ts", /cannot restrict both day-of-month and day-of-week/],
     ["substitution.ts", /cannot contain \${} substitutions/],
     ["options-variable.ts", /route options must be an object literal/],
-    ["instance-method.ts", /@schedule applies to a static method of an exported class/],
+    ["instance-method.ts", /"run" must be exported so it can be bundled on its own.*no exported instance of Jobs/],
+    ["instance-two.ts", /2 exported instances of Jobs \(first, second\)/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });

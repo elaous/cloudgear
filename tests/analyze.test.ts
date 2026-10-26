@@ -307,7 +307,7 @@ describe("analyzeApp", () => {
     ["options-variable.ts", /FunctionRouter options must be an object literal/],
     ["duplicate-route-names.ts", /route name "same" is already used by GET \/a/],
     ["route-name-variable.ts", /route name must be a string literal/],
-    ["unexported-object.ts", /must be exported so it can be bundled on its own \(a named function, or a method of an exported object\)/],
+    ["unexported-object.ts", /must be exported so it can be bundled on its own \(a named function, a method of an exported object/],
     ["grant-unknown-access.ts", /unknown access "execute" in grant\(\)/],
     ["grant-empty.ts", /grant\(store, \.\.\.\) needs at least one access/],
     ["store-path-invalid.ts", /Invalid blob path "a\/\.\.\/b"/],

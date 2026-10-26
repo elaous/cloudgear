@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { debug, errorSummary, timed } from "@cloudgear/debug";
 import {
   INVOKE_CONTENT_TYPE,
@@ -87,7 +88,9 @@ interface CompiledRoute {
   name: string;
   public: boolean;
   matcher: ReturnType<typeof compilePath>;
-  fn: Handler;
+  fn?: Handler;
+  // Absolute path of the module whose default export handles the route.
+  script?: string;
 }
 
 interface Endpoints {
@@ -116,21 +119,26 @@ export class FunctionRouter {
     }
   }
 
+  // `script` is a path, relative to the file calling `url`, of a module whose default export handles the route.
+  url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
   url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
     method: Method | Lowercase<Method>,
     path: P,
     fn: Handler<I, O>,
-    options: RouteOptions = {},
-  ): this {
+    options?: RouteOptions,
+  ): this;
+  url(method: Method | Lowercase<Method>, path: string, handler: Handler | string, options: RouteOptions = {}): this {
     const route = { method: assertMethod(method), path };
     const key = routeKey(route);
     if (this.routes.some((r) => r.key === key)) throw new Error(`Route "${key}" is already registered`);
-    const name = options.name ?? (fn.name || key);
+    const script = typeof handler === "string" ? scriptPath(handler) : undefined;
+    const fn = typeof handler === "string" ? undefined : handler;
+    const name = options.name ?? (fn?.name || key);
     if (!name) throw new Error(`Route "${key}": name must not be empty`);
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
-    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn: fn as Handler });
+    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn, script });
     return this;
   }
 
@@ -245,10 +253,24 @@ export class FunctionRouter {
     return Response.json({ error: "Too many requests" }, { status: 429, headers: { "retry-after": String(retryAfter) } });
   }
 
+  private async handlerOf(route: CompiledRoute): Promise<Handler | undefined> {
+    if (!route.fn && route.script) {
+      try {
+        const loaded = (await import(route.script)).default;
+        if (typeof loaded === "function") route.fn = loaded;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    return route.fn;
+  }
+
   private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request): Promise<Response> {
     debug("router", `dispatching ${route.key} in ${this.mode} mode`, () => ({ inputKeys: Object.keys(input) }));
     if (this.mode === "local") {
-      const result = await timed("router", `local call ${route.key}`, () => invoke(route.fn, input, context));
+      const fn = await this.handlerOf(route);
+      if (!fn) return Response.json({ error: "Route script has no default export function" }, { status: 500 });
+      const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context));
       debug("router", `local ${route.key} -> ${result.status}`);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
     }
@@ -344,4 +366,18 @@ function findUp(dir: string, relativeFile: string): string | undefined {
     if (fs.existsSync(candidate)) return candidate;
     if (fs.existsSync(path.join(current, "package.json")) || path.dirname(current) === current) return undefined;
   }
+}
+
+const THIS_FILE = fileURLToPath(import.meta.url);
+const STACK_FILE = /(?:\(|\s)((?:file:\/\/)?\/[^\s():]+):\d+:\d+\)?\s*$/;
+
+// Relative script paths resolve against the file that called `url`, like an import.
+function scriptPath(script: string): string {
+  const frames = (new Error().stack ?? "").split("\n").slice(1);
+  for (const frame of frames) {
+    const found = STACK_FILE.exec(frame)?.[1];
+    const file = found?.startsWith("file://") ? fileURLToPath(found) : found;
+    if (file && file !== THIS_FILE) return path.resolve(path.dirname(file), script);
+  }
+  return path.resolve(script);
 }

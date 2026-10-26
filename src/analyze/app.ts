@@ -7,6 +7,7 @@ import {
   type CallExpression,
   type ClassDeclaration,
   type NewExpression,
+  type SourceFile,
   type Symbol as MorphSymbol,
   type VariableDeclaration,
 } from "ts-morph";
@@ -129,9 +130,21 @@ export function analyzeApp(entryPath: string): AppModel {
   project.resolveSourceFileDependencies();
 
   const packages = new PackageNames();
-  const localFiles = project
-    .getSourceFiles()
-    .filter((file) => !file.isDeclarationFile() && !file.isInNodeModules() && !packages.isCloudgear(file.getFilePath()));
+  const isAppFile = (file: SourceFile) => !file.isDeclarationFile() && !file.isInNodeModules() && !packages.isCloudgear(file.getFilePath());
+  for (let added = true; added; ) {
+    added = false;
+    for (const file of project.getSourceFiles().filter(isAppFile)) {
+      for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const script = scriptOf(call);
+        if (script && !project.getSourceFile(script) && fs.existsSync(script)) {
+          project.addSourceFileAtPath(script);
+          project.resolveSourceFileDependencies();
+          added = true;
+        }
+      }
+    }
+  }
+  const localFiles = project.getSourceFiles().filter(isAppFile);
   const isLocal = (node: Node) => localFiles.includes(node.getSourceFile());
 
   const warnings: string[] = [];
@@ -217,10 +230,23 @@ export function analyzeApp(entryPath: string): AppModel {
     const routePath = stringLiteral(pathArg, `${where(call)}: route path`);
     if (!fnArg) throw new Error(`${where(call)}: missing function argument`);
 
-    const decl = resolveSymbol(fnArg.getSymbol())?.getDeclarations()[0];
-    const fnNode = decl && functionNode(decl);
+    const scriptFile = scriptOf(call);
+    const scriptText = Node.isStringLiteral(fnArg) || Node.isNoSubstitutionTemplateLiteral(fnArg) ? fnArg.getLiteralText() : undefined;
+    let decl: Node | undefined;
+    if (scriptText !== undefined) {
+      const file = scriptFile && project.getSourceFile(scriptFile);
+      if (!file) throw new Error(`${where(call)}: script "${scriptText}" not found; the path is relative to this file`);
+      decl = file.getExportedDeclarations().get("default")?.[0];
+    } else {
+      decl = resolveSymbol(fnArg.getSymbol())?.getDeclarations()[0];
+    }
+    const fnNode = decl && (functionNode(decl) ?? (scriptText !== undefined && (Node.isArrowFunction(decl) || Node.isFunctionExpression(decl)) ? decl : undefined));
     if (!decl || !fnNode || !isLocal(decl)) {
-      throw new Error(`${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`);
+      throw new Error(
+        scriptText !== undefined
+          ? `${where(call)}: script "${scriptText}" must export a function as its default export`
+          : `${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`,
+      );
     }
     const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined);
     checkPathParams(routePath, fnNode, where(call));
@@ -229,7 +255,7 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     const routeOptions = readRouteOptions(call.getArguments()[3], where(call));
     publicRoutes.set(`${method} ${routePath}`, routeOptions.public);
-    const routeName = routeOptions.name ?? (fn.declaredName || `${method} ${routePath}`);
+    const routeName = routeOptions.name ?? ((scriptFile ? "" : fn.declaredName) || `${method} ${routePath}`);
     const clashing = routeNames.get(routeName);
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
@@ -733,7 +759,7 @@ export function analyzeApp(entryPath: string): AppModel {
       name: target.member
         ? `${target.exportName}-${target.member}`
         : target.exportName === "default"
-          ? path.basename(decl.getSourceFile().getFilePath(), ".ts")
+          ? path.parse(decl.getSourceFile().getFilePath()).name
           : target.exportName,
       declaredName: declaredNameOf(decl),
       file: target.file ?? relative(decl.getSourceFile().getFilePath()),
@@ -1115,6 +1141,15 @@ function exportTargetOf(decl: Node, instanceExport: InstanceExport, receiver?: N
   const member = decl.getName();
   if (!exportName || !/^[A-Za-z_$][\w$]*$/.test(member)) return undefined;
   return { exportName, member };
+}
+
+// `.url(method, path, "./script.ts")`: the absolute path of the script, whether or not it exists.
+function scriptOf(call: CallExpression): string | undefined {
+  const callee = call.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "url") return undefined;
+  const script = call.getArguments()[2];
+  if (!script || !(Node.isStringLiteral(script) || Node.isNoSubstitutionTemplateLiteral(script))) return undefined;
+  return path.resolve(path.dirname(call.getSourceFile().getFilePath()), script.getLiteralText());
 }
 
 function functionNode(decl: Node) {

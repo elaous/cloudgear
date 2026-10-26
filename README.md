@@ -59,6 +59,31 @@ the status or headers. Thrown errors are logged and answered with a generic
 `.url()` type-checks route path params against the function's input type, so
 `.url("GET", "/x/{id}", fn)` fails to compile when `fn`'s input has no `id`.
 
+Instead of a function, the third argument MAY be the path of a script file whose
+default export is the handler:
+
+```ts
+new FunctionRouter("aws")
+  .url("GET", "/hello", "./handlers/hello.ts")
+  .url("POST", "/items/{id}", "./handlers/save.ts", { name: "saveItem" });
+```
+
+```ts
+// handlers/save.ts
+export default async function ({ id }: { id: string }) {
+  return { id };
+}
+```
+
+The path MUST be a string literal and is relative to the file that calls `.url`,
+like an import. `generate` analyzes the script like any routed function (its
+`BlobStore` use, `@policy` and input type) and bundles it on its own; the
+function is named after the file. Because the router cannot see the script's
+types, route params are checked by `generate` and not by the compiler, and a
+route without `{ name }` is named `"METHOD /path"`. In local mode the router
+imports the script on its first request and answers 500 if it has no default
+function.
+
 ### Runtime: `FunctionRouter`
 
 `new FunctionRouter(provider, options)` takes `authenticated: "iam" | "none"`

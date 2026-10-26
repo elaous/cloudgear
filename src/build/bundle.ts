@@ -17,7 +17,7 @@ export interface BundleRequest {
   // Files copied next to the bundle, at their paths from the project root.
   include?: { rel: string; abs: string }[];
   passRequest?: boolean;
-  passResponse?: boolean;
+  responseKind?: "helper" | "writer";
   outDir: string;
 }
 
@@ -76,7 +76,7 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
   const authPath = req.jwt ? Bun.resolveSync("@cloudgear/functions/auth", path.dirname(source)) : "";
   const handlerOptions = `{ trustContext: ${req.trustContext}${
     req.jwt ? `, authenticate: jwtAuth(${JSON.stringify(req.jwt.settings)}), anonymous: ${req.jwt.anonymous}` : ""
-  }${req.passRequest ? ", request: true" : ""}${req.passResponse ? ", response: true" : ""} }`;
+  }${req.passRequest ? ", request: true" : ""}${req.responseKind ? `, response: ${JSON.stringify(req.responseKind)}` : ""} }`;
   fs.writeFileSync(
     entry,
     [

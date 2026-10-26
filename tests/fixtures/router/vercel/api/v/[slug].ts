@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 type Respond = (body: unknown, init?: { status?: number; headers?: Record<string, string> }) => unknown;
 
-export default async function (request: Request, response: Respond, { slug }: { slug: string }) {
+export default async function (request: { query: { slug: string }; method: string }, response: Respond) {
   const html = fs.readFileSync("dist/index.html", "utf8").trim();
-  return response({ slug, method: request.method, path: new URL(request.url).pathname, html }, { status: 201, headers: { "x-slug": slug } });
+  return response({ slug: request.query.slug, method: request.method, html }, { status: 201, headers: { "x-slug": request.query.slug } });
 }

@@ -2,9 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, spyOn, test, setDefaultTimeout } from "bun:test";
-import { FunctionRouter, response } from "@cloudgear/functions";
+import { FunctionRouter, VercelResponse, response } from "@cloudgear/functions";
 import { createHandler } from "../packages/functions/drivers/aws";
-import { deserializeRequest, serializeRequest } from "../packages/functions/http";
+import { serializeRequest } from "../packages/functions/http";
 import { analyzeApp } from "../src/analyze/app";
 import { INCLUDED_DIR, hashBundle, includedPath } from "../src/build/bundle";
 import { decodeConfig, encodeConfig } from "../src/config/schema";
@@ -24,9 +24,9 @@ describe("analyzing request, response and include", () => {
       name: "api-v-slug",
       file: "tests/fixtures/router/vercel/api/v/[slug].ts",
       exportName: "default",
-      inputType: "{ slug: string }",
+      inputType: undefined,
       passRequest: true,
-      passResponse: true,
+      responseKind: "helper",
       routes: [{ method: "GET", path: "/v/{slug}", name: "GET /v/{slug}" }],
     });
     expect(only!.include.map((f) => f.rel)).toEqual(["dist/index.html"]);
@@ -39,7 +39,7 @@ describe("analyzing request, response and include", () => {
   test.each([
     ["bad-include.ts", /include "dist\/nope\.html" not found/],
     ["bad-outside.ts", /include "\.\.\/\.\.\/analyze\.test\.ts" is outside the project/],
-    ["bad-response.ts", /route response must be the `response` helper imported from @cloudgear\/functions/],
+    ["bad-response.ts", /route response must be `response` or `VercelResponse`, imported from @cloudgear\/functions/],
     ["bad-request.ts", /route request must be the literal true or false/],
     ["mixed.ts", /give it different include, request or response settings/],
     ["bad-root.ts", /include "\." must name a file or directory below the project root/],
@@ -48,24 +48,54 @@ describe("analyzing request, response and include", () => {
     ["bad-escape.ts", /include "escape" resolves outside the project/],
     ["bad-generated.ts", /include ".cloudgear\/build" is generated output/],
     ["collide.ts", /Two functions are named "api-a-b"/],
-    ["bad-lead.ts", /path param\(s\) "slug" missing from input type/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
   });
 });
 
 describe("the router in local mode", () => {
-  const call = async (router: FunctionRouter, init?: RequestInit) => {
-    const res = await router.fetch(new Request("http://localhost/v/hello?x=1", init));
-    return { status: res.status, headers: res.headers, body: await res.json() };
-  };
+  const echo = "./fixtures/router/vercel/api/echo.ts";
 
-  test("passes the request, then the response helper, before the input", async () => {
-    const router = new FunctionRouter("aws", { mode: "local" }).url("POST", "/v/{slug}", "./fixtures/router/vercel/api/echo.ts", { request: true, response });
-    const res = await router.fetch(new Request("http://localhost/v/hello?x=1", { method: "POST", body: "payload" }));
+  test("a function that asked for the request gets a Vercel-style one, then the response helper, then the context", async () => {
+    const router = new FunctionRouter("aws", { mode: "local" }).url("POST", "/v/{slug}", echo, { request: true, response });
+    const res = await router.fetch(new Request("http://localhost/v/hello?x=1", { method: "POST", body: JSON.stringify({ k: 1 }), headers: { "content-type": "application/json", cookie: "a=b" } }));
     expect(res.status).toBe(201);
     expect(res.headers.get("x-slug")).toBe("hello");
-    expect(await res.json()).toEqual({ slug: "hello", method: "POST", path: "/v/hello", query: "?x=1", body: "payload", respond: "function" });
+    expect(await res.json()).toEqual({ slug: "hello", x: "1", method: "POST", url: "/v/hello?x=1", body: { k: 1 }, cookie: "b" });
+  });
+
+  test("a VercelResponse writer replaces the return value as the output", async () => {
+    const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/w/{slug}", "./fixtures/router/vercel/api/writer.ts", { request: true, response: VercelResponse });
+    const res = await router.fetch(new Request("http://localhost/w/hello"));
+    expect(res.status).toBe(202);
+    expect(res.headers.get("x-written")).toBe("yes");
+    expect(await res.json()).toEqual({ slug: "hello" });
+  });
+
+  test("a path from the project root reaches the same script", async () => {
+    const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/v/{slug}", "tests/fixtures/router/vercel/api/echo.ts", { request: true, response });
+    expect(await (await router.fetch(new Request("http://localhost/v/hello"))).json()).toMatchObject({ slug: "hello", method: "GET" });
+  });
+
+  test("without the flags a function gets its input and the context", async () => {
+    const seen: unknown[][] = [];
+    const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/v/{slug}", async (...args: unknown[]) => (seen.push(args), {}));
+    await router.fetch(new Request("http://localhost/v/hello?x=1"));
+    expect(seen[0]).toHaveLength(2);
+    expect(seen[0]![0]).toMatchObject({ slug: "hello", x: "1" });
+  });
+
+  test("with only the request, or only a response, the arguments are (request, context) and (input, response, context)", async () => {
+    const seen: Record<string, unknown[]> = {};
+    const record = (name: string) => async (...args: unknown[]) => ((seen[name] = args), {});
+    const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/a/{id}", record("request"), { request: true }).url("GET", "/b/{id}", record("response"), { response });
+    await router.fetch(new Request("http://localhost/a/1"));
+    await router.fetch(new Request("http://localhost/b/1"));
+    expect(seen.request).toHaveLength(2);
+    expect(seen.request![0]).toMatchObject({ method: "GET", query: { id: "1" } });
+    expect(seen.response).toHaveLength(3);
+    expect(seen.response![0]).toMatchObject({ id: "1" });
+    expect(seen.response![1]).toBe(response);
   });
 
   test("a script that fails to load, or has no default function, answers 500 with its own message", async () => {
@@ -99,37 +129,6 @@ describe("the router in local mode", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  test("a path from the project root reaches the same script", async () => {
-    const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/v/{slug}", "tests/fixtures/router/vercel/api/echo.ts", { request: true, response });
-    expect((await call(router)).body).toMatchObject({ slug: "hello", method: "GET" });
-  });
-
-  test("a function without the flags still gets only its input", async () => {
-    const seen: unknown[][] = [];
-    const router = new FunctionRouter("aws", { mode: "local" }).url("GET", "/v/{slug}", async (...args: unknown[]) => {
-      seen.push(args);
-      return {};
-    });
-    await call(router);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toHaveLength(2);
-    expect(seen[0]![0]).toMatchObject({ slug: "hello", x: "1" });
-  });
-
-  test("with only request, or only response, the other slot is left out", async () => {
-    const seen: Record<string, unknown[]> = {};
-    const record = (name: string) => async (...args: unknown[]) => ((seen[name] = args), {});
-    const router = new FunctionRouter("aws", { mode: "local" })
-      .url("GET", "/a/{id}", record("request"), { request: true })
-      .url("GET", "/b/{id}", record("response"), { response });
-    await router.fetch(new Request("http://localhost/a/1"));
-    await router.fetch(new Request("http://localhost/b/1"));
-    expect(seen.request![0]).toBeInstanceOf(Request);
-    expect(seen.request![1]).toMatchObject({ id: "1" });
-    expect(seen.response![0]).toBe(response);
-    expect(seen.response![1]).toMatchObject({ id: "1" });
   });
 
   test("remote calls forward the original request for a route that asked for it", async () => {
@@ -168,72 +167,65 @@ describe("the Lambda adapter", () => {
     ...over,
   });
   const routes = [{ method: "POST" as const, path: "/v/{slug}" }];
+  const invokeEvent = (payload: unknown, host = "real.example") =>
+    event({ headers: { "content-type": "application/vnd.cloudgear.invoke+json", host }, body: JSON.stringify(payload) });
 
-  test("builds the request from a direct call and passes the response helper after it", async () => {
-    let args: unknown[] = [];
-    const handler = createHandler(async (...a: unknown[]) => ((args = a), { ok: true }), routes, { request: true, response: true });
-    const result = await handler(event());
-    expect(result.statusCode).toBe(200);
-    const [request, helper, input] = args as [Request, unknown, Record<string, unknown>];
-    expect(request.method).toBe("POST");
-    expect(request.url).toBe("https://abc.lambda-url.eu-west-1.on.aws/v/hello?x=1");
-    expect(request.headers.get("x-token")).toBe("t");
-    expect(await request.text()).toBe("hi");
+  test("builds the Vercel-style request from a direct call, then passes the response helper and the context", async () => {
+    let args: any[] = [];
+    const handler = createHandler(async (...a: unknown[]) => ((args = a), { ok: true }), routes, { request: true, response: "helper" });
+    expect((await handler(event())).statusCode).toBe(200);
+    const [request, helper, context] = args;
+    expect(request).toMatchObject({ method: "POST", url: "/v/hello?x=1", query: { slug: "hello", x: "1" }, body: "hi" });
+    expect(request.headers["x-token"]).toBe("t");
     expect(helper).toBe(response);
-    expect(input).toMatchObject({ slug: "hello", x: "1" });
+    expect(context).toEqual({});
+  });
+
+  test("a VercelResponse writer's output is the function's response", async () => {
+    const handler = createHandler(async (_request: unknown, res: VercelResponse) => void res.status(201).json({ done: true }), routes, { request: true, response: "writer" });
+    const result = await handler(event());
+    expect(result.statusCode).toBe(201);
+    expect(JSON.parse(result.body)).toEqual({ done: true });
+    expect(result.headers["content-type"]).toContain("application/json");
+  });
+
+  test("parses a JSON body, repeated query keys and cookies", async () => {
+    let seen: any;
+    const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true });
+    await handler(event({ rawQueryString: "k=1&k=2", headers: { "content-type": "application/json" }, body: '{"a":1}', cookies: ["a=1", "b=2"] }));
+    expect(seen.body).toEqual({ a: 1 });
+    expect(seen.query.k).toEqual(["1", "2"]);
+    expect(seen.cookies).toEqual({ a: "1", b: "2" });
   });
 
   test("decodes a base64 body for the request", async () => {
-    let seen = "";
-    const handler = createHandler(async (request: Request) => ((seen = await request.text()), {}), routes, { request: true });
+    let seen: any;
+    const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true });
     await handler(event({ body: Buffer.from("binary-ish").toString("base64"), isBase64Encoded: true }));
-    expect(seen).toBe("binary-ish");
+    expect(seen.body).toBe("binary-ish");
   });
 
   test("uses the request the router forwarded in an invoke payload", async () => {
-    let seen: Request | undefined;
-    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true, trustContext: true });
-    await handler(
-      event({
-        headers: { "content-type": "application/vnd.cloudgear.invoke+json", host: "fn.invalid" },
-        body: JSON.stringify({
-          input: { slug: "hello" },
-          context: {},
-          request: { method: "PUT", url: "https://api.example.com/v/hello", headers: { "x-original": "1" }, body: Buffer.from("orig").toString("base64") },
-        }),
-      }),
-    );
-    expect(seen!.method).toBe("PUT");
-    expect(seen!.url).toBe("https://api.example.com/v/hello");
-    expect(seen!.headers.get("x-original")).toBe("1");
-    expect(await seen!.text()).toBe("orig");
+    let seen: any;
+    const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true, trustContext: true });
+    await handler(invokeEvent({ input: { slug: "hello" }, context: {}, request: { method: "POST", url: "https://api.example.com/v/hello?y=2", headers: { "x-original": "1" }, body: Buffer.from("orig").toString("base64") } }, "fn.invalid"));
+    expect(seen).toMatchObject({ method: "POST", url: "/v/hello?y=2", query: { slug: "hello", y: "2" }, body: "orig" });
+    expect(seen.headers["x-original"]).toBe("1");
   });
 
   test("ignores a forwarded request unless the function trusts the router", async () => {
-    let seen: Request | undefined;
-    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true });
-    await handler(
-      event({
-        headers: { "content-type": "application/vnd.cloudgear.invoke+json", host: "real.example" },
-        body: JSON.stringify({ input: {}, context: {}, request: { method: "GET", url: "https://forged.example/", headers: { authorization: "victim" } } }),
-      }),
-    );
-    expect(seen!.url).toBe("https://real.example/v/hello?x=1");
-    expect(seen!.headers.get("authorization")).toBeNull();
+    let seen: any;
+    const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true });
+    await handler(invokeEvent({ input: {}, context: {}, request: { method: "GET", url: "https://forged.example/forged", headers: { authorization: "victim" } } }));
+    expect(seen.url).toBe("/v/hello?x=1");
+    expect(seen.headers.authorization).toBeUndefined();
   });
 
   test("a malformed forwarded request falls back to the one received", async () => {
-    let seen: Request | undefined;
-    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true, trustContext: true });
-    await handler(event({ headers: { "content-type": "application/vnd.cloudgear.invoke+json", host: "real.example" }, body: JSON.stringify({ input: {}, request: { method: 5 } }) }));
-    expect(seen!.url).toBe("https://real.example/v/hello?x=1");
-  });
-
-  test("the cookies of a Function URL event become the cookie header", async () => {
-    let seen: Request | undefined;
-    const handler = createHandler(async (request: Request) => ((seen = request), {}), routes, { request: true });
-    await handler(event({ cookies: ["a=1", "b=2"] }));
-    expect(seen!.headers.get("cookie")).toBe("a=1; b=2");
+    let seen: any;
+    const handler = createHandler(async (request: unknown) => ((seen = request), {}), routes, { request: true, trustContext: true });
+    await handler(invokeEvent({ input: {}, request: { method: 5 } }));
+    expect(seen.url).toBe("/v/hello?x=1");
   });
 
   test("a function without the flags gets only input and context", async () => {
@@ -243,11 +235,11 @@ describe("the Lambda adapter", () => {
     expect(count).toBe(2);
   });
 
-  test("a scheduled run gets a synthetic request in the request slot", async () => {
-    let first: unknown;
+  test("a scheduled run gets a synthetic request whose body is the schedule input", async () => {
+    let first: any;
     const handler = createHandler(async (...a: unknown[]) => ((first = a[0]), {}), routes, { request: true });
     await handler({ source: "aws.events", time: "2026-01-01T00:00:00Z" });
-    expect(first).toBeInstanceOf(Request);
+    expect(first.body).toEqual({ scheduledTime: "2026-01-01T00:00:00Z" });
   });
 });
 
@@ -259,9 +251,7 @@ describe("forwarding a request", () => {
     expect(head.body).toBeUndefined();
     const post = await serializeRequest(new Request("https://a.example/x", { method: "POST", body: "payload", headers: { connection: "close" } }));
     expect(post.headers.connection).toBeUndefined();
-    const back = deserializeRequest(post);
-    expect(back.method).toBe("POST");
-    expect(await back.text()).toBe("payload");
+    expect(Buffer.from(post.body!, "base64").toString()).toBe("payload");
   });
 
   test("an included file path from a config cannot leave the files directory", () => {
@@ -276,13 +266,13 @@ describe("generating and deploying included files", () => {
     try {
       const { config } = await generate({ entry: fixture("main.ts"), configPath: path.join(dir, "cloudgear.prototxt"), buildDir: path.join(dir, "build") });
       const [only] = config.function;
-      expect(only).toMatchObject({ name: "api-v-slug", include: ["dist/index.html"], pass_request: true, pass_response: true });
+      expect(only).toMatchObject({ name: "api-v-slug", include: ["dist/index.html"], pass_request: true, response_arg: "helper" });
       const bundleDir = path.join(dir, "build", "api-v-slug");
       expect(fs.readFileSync(path.join(bundleDir, INCLUDED_DIR, "dist", "index.html"), "utf8")).toBe("<html>ok</html>\n");
-      expect(fs.readFileSync(path.join(bundleDir, "entry.ts"), "utf8")).toContain("request: true, response: true");
+      expect(fs.readFileSync(path.join(bundleDir, "entry.ts"), "utf8")).toContain('request: true, response: "helper"');
       expect(hashBundle(path.join(bundleDir, "index.mjs"), path.join(bundleDir, INCLUDED_DIR), ["dist/index.html"])).toBe(only!.bundle.sha256);
       expect(hashBundle(path.join(bundleDir, "index.mjs"), path.join(bundleDir, INCLUDED_DIR), [])).not.toBe(only!.bundle.sha256);
-      expect(decodeConfig(encodeConfig(config)).function[0]).toMatchObject({ include: ["dist/index.html"], pass_request: true, pass_response: true });
+      expect(decodeConfig(encodeConfig(config)).function[0]).toMatchObject({ include: ["dist/index.html"], pass_request: true, response_arg: "helper" });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

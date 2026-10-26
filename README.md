@@ -90,16 +90,16 @@ written for, and not through a helper in another file.
 
 #### Request, response and files
 
-A function that does not import cloudgear can still get the request and the
-response helper, and files, through the route's options:
+A function that does not import cloudgear can still get a Vercel-style request
+and a response writer, and files, through the route's options:
 
 ```ts
-import { FunctionRouter, response } from "@cloudgear/functions";
+import { FunctionRouter, VercelResponse } from "@cloudgear/functions";
 
 new FunctionRouter("aws").url("GET", "/v/{slug}", "/api/v/[slug].ts", {
   include: "dist/index.html",
   request: true,
-  response,
+  response: VercelResponse,
 });
 ```
 
@@ -107,19 +107,28 @@ new FunctionRouter("aws").url("GET", "/v/{slug}", "/api/v/[slug].ts", {
 // api/v/[slug].ts
 import fs from "node:fs";
 
-export default async function (request: Request, response, { slug }: { slug: string }) {
-  const html = fs.readFileSync("dist/index.html", "utf8");
-  return response({ slug, url: request.url, html }, { status: 200, headers: { "x-slug": slug } });
+export default async function (request, response) {
+  response.status(200).json({ slug: request.query.slug, html: fs.readFileSync("dist/index.html", "utf8") });
 }
 ```
 
-- `request: true` passes the original `Request` as the first argument.
-- `response` MUST be the `response` helper imported from `@cloudgear/functions`.
-  It is passed after the request (or first without it) and returns what the
-  function can return to set the status and headers.
-- The input (body, query and path params) and the context follow, so the
-  arguments are `(request?, response?, input, context)`. Path params are
-  checked against the input's type, whichever position it is in.
+- `request: true` (default `false`) hands the function a request like
+  `IncomingMessage & { query, cookies, body }` instead of its input. `query`
+  holds the query string and the path params, `cookies` the parsed cookies and
+  `body` the parsed body (JSON and form bodies as objects, anything else as
+  text). The request is also a readable stream of the raw body.
+- `response` (default none) is given as the import itself, and the function
+  receives it after its first argument: `response`, the helper (the function
+  returns its output, as usual, built with `response(body, { status, headers })`),
+  or `VercelResponse`, a writer like `ServerResponse & { send, json, status,
+  redirect }` (the function writes to it and returns nothing; a returned value
+  is used only if nothing was written). The writer supports `setHeader`,
+  `getHeader`, `removeHeader`, `writeHead`, `write`, `end`, `send`, `json`,
+  `status` and `redirect`, and its output is text.
+- So the arguments are `(request or input, response?, context)`. Without
+  `request` the function takes its input, and `generate` checks the route's path
+  params against its type; with `request` it does not, since they are in
+  `request.query`.
 - `include` is a file, a directory (all its files) or an array of them, from the
   project root, that MUST exist when `generate` runs. They are packaged with
   the function at the same relative paths, so the function reads them relative
@@ -141,7 +150,8 @@ export default async function (request: Request, response, { slug }: { slug: str
   URL event (its cookies joined into `cookie`), so its host is the function
   URL's and not the viewer's. A Lambda payload is limited to 6 MB, and a
   forwarded body travels twice, as input and in the request. A scheduled run
-  gets a synthetic `POST https://schedule.invalid/` request.
+  gets a synthetic `POST https://schedule.invalid/` request whose body is the
+  schedule input.
 
 ### Runtime: `FunctionRouter`
 

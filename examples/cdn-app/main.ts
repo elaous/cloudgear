@@ -15,10 +15,13 @@ export class Local {
   }
 }
 
-const dns = new DNS("gandi", "cdn.example.com");
-const cert = new Cert("aws", dns);
-const cdn = new CDN("aws", dns, { cert, bucket });
+const siteDns = new DNS("gandi", "www.example.com", { zone: "example.com" });
+const siteCert = new Cert("aws", siteDns);
+const cdn = new CDN("aws", siteCert, { bucket });
 
-const router = new FunctionRouter("aws", { cdn, authenticated: "iam" });
+const apiDns = new DNS("gandi", "api.example.com", { zone: "example.com" });
+const apiCert = new Cert("aws", apiDns);
+
+const router = new FunctionRouter("aws", { cert: apiCert, authenticated: "iam" });
 router.url("GET", "/objects/{param}", Local.getObjects, { name: "getObjects", public: true });
 router.listen();

@@ -1,4 +1,4 @@
-import { FunctionRouter } from "@cloudgear/functions";
+import { FunctionRouter, jwtAuth } from "@cloudgear/functions";
 import { BlobStore } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
 import { CDN, Cert } from "@cloudgear/cdn";
@@ -6,7 +6,7 @@ import { CDN, Cert } from "@cloudgear/cdn";
 const site = new BlobStore("aws", "://my-site");
 const dns = new DNS("aws", "www.example.org");
 const cert = new Cert("aws", dns);
-export const cdn = new CDN("aws", dns, { cert, bucket: site });
+export const cdn = new CDN("aws", cert, { bucket: site });
 
 export async function f() {
   return {};

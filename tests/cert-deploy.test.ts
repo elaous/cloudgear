@@ -12,7 +12,7 @@ import { emptyState, fakeAws } from "./helpers";
 
 setDefaultTimeout(30_000);
 
-const entry = path.join(import.meta.dir, "fixtures", "router", "cdn", "cert-only.ts");
+const entry = path.join(import.meta.dir, "fixtures", "router", "edge", "cert-only.ts");
 const KEY = "@aws.Certificate.example.com";
 const issued = (status: string) => () => ({
   Certificate: {
@@ -42,7 +42,7 @@ describe("deploying an app with a Cert and no CDN", () => {
 
     expect(plan(config, state).every((a) => a.op === "noop")).toBe(true);
 
-    const removal = plan({ ...config, certificate: undefined, dns: undefined, function: [] }, state);
+    const removal = plan({ ...config, certificate: [], function: [] }, state);
     expect(removal.map((a) => [a.key, a.op])).toContainEqual([KEY, "delete"]);
     await apply(removal, state, aws.drivers, { save: () => {} });
     expect(aws.names()).toContain("DeleteCertificateCommand");

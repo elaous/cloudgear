@@ -31,6 +31,7 @@ export const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearC
   function: [fn()],
   invoker: [],
   authenticated: "iam",
+  certificate: [],
   ...overrides,
 });
 
@@ -39,6 +40,7 @@ export const emptyState = (): State => ({ version: 1, project: "app", provider: 
 // Records every SDK command and answers with canned responses.
 export function fakeAws(overrides: Record<string, (input: any, attempt: number) => any> = {}, dns: MemoryDnsDriver | null = new MemoryDnsDriver(), onDns?: (provider: string, zone: string) => void) {
   const calls: { name: string; input: any }[] = [];
+  let integrationCounter = 0;
   const counts = new Map<string, number>();
   const sleeps: number[] = [];
   const logs: string[] = [];
@@ -67,6 +69,15 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
       throw Object.assign(new Error("no policy"), { name: "NoSuchBucketPolicy" });
     },
     CreateInvalidationCommand: () => ({ Invalidation: { Id: "I1" } }),
+    CreateApiCommand: () => ({ ApiId: "api1", ApiEndpoint: "https://api1.execute-api.eu-west-1.amazonaws.com" }),
+    GetIntegrationsCommand: () => ({ Items: [] }),
+    GetRoutesCommand: () => ({ Items: [] }),
+    CreateIntegrationCommand: () => ({ IntegrationId: `int-${++integrationCounter}` }),
+    GetApiMappingsCommand: () => ({ Items: [] }),
+    GetDomainNameCommand: () => {
+      throw Object.assign(new Error("not found"), { name: "NotFoundException" });
+    },
+    CreateDomainNameCommand: () => ({ DomainNameConfigurations: [{ ApiGatewayDomainName: "d-abc.execute-api.eu-west-1.amazonaws.com" }] }),
     PutRuleCommand: (input) => ({ RuleArn: `arn:aws:events:eu-west-1:1:rule/${input.Name}` }),
     PutTargetsCommand: () => ({ FailedEntryCount: 0 }),
   };
@@ -83,7 +94,7 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
   const drivers = awsDrivers({
     region: "eu-west-1",
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
-    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client },
+    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client },
     dns: dns ? (provider, zone) => (onDns?.(provider, zone), dns) : undefined,
     sleep: async () => void sleeps.push(0),
     log: (message) => void logs.push(message),

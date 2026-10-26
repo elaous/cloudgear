@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { analyzeApp, orderBySpecificity } from "../src/analyze/app";
+import { analyzeApp } from "../src/analyze/app";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
 
@@ -102,44 +102,51 @@ describe("analyzeApp", () => {
     expect(model.functions[0]!.routes[0]!.name).toBe("impl");
   });
 
-  describe("DNS, certificate and CDN", () => {
-    test("reads the declarations and turns routes into CloudFront behaviors", () => {
-      const model = analyzeApp(fixture("cdn/app.ts"));
-      expect(model.dns).toEqual({ provider: "gandi", domain: "cdn.example.com", zone: "example.com" });
-      expect(model.certificate).toEqual({ domain: "cdn.example.com" });
-      expect(model.cdn).toMatchObject({ provider: "aws", domain: "cdn.example.com", bucket: "my-site", path: "web/" });
-      // fewest wildcards first, then longest; methods merged per path for the same function
-      expect(model.cdn!.behaviors).toEqual([
-        { pathPattern: "/health", function: "health", methods: ["GET"] },
-        { pathPattern: "/users/*/profile", function: "nested", methods: ["GET"] },
-        { pathPattern: "/objects/*", function: "getObject", methods: ["GET", "HEAD", "PUT"] },
-      ]);
+  describe("DNS, certificate, CDN and API domain", () => {
+    test("each Cert carries its own DNS, and the CDN and the router take one each", () => {
+      const model = analyzeApp(fixture("edge/app.ts"));
+      expect(model.certificates).toEqual([
+        { domain: "www.example.com", dns: { provider: "gandi", domain: "www.example.com", zone: "example.com" }, usage: "cdn" },
+        { domain: "api.example.com", dns: { provider: "gandi", domain: "api.example.com", zone: "example.com" }, usage: "api" },
+      ].map((c) => expect.objectContaining(c)));
+      expect(model.cdn).toMatchObject({ provider: "aws", domain: "www.example.com", bucket: "my-site", path: "web/" });
+      expect(model.api).toEqual({ provider: "aws", domain: "api.example.com" });
       expect(model.warnings).toEqual([]);
     });
 
-    test("a CDN that is not handed to the router only serves the bucket", () => {
-      const model = analyzeApp(fixture("cdn/bucket-only.ts"));
-      expect(model.cdn).toMatchObject({ domain: "www.example.org", bucket: "my-site", path: "", behaviors: [] });
-      expect(model.dns).toMatchObject({ provider: "aws", zone: "example.org" });
+    test("a CDN on its own only serves the bucket, and a Cert needs neither", () => {
+      const model = analyzeApp(fixture("edge/bucket-only.ts"));
+      expect(model.cdn).toMatchObject({ domain: "www.example.org", bucket: "my-site", path: "" });
+      expect(model.api).toBeUndefined();
+      expect(model.certificates).toMatchObject([{ domain: "www.example.org", dns: { provider: "aws", zone: "example.org" }, usage: "cdn" }]);
+      const certOnly = analyzeApp(fixture("edge/cert-only.ts"));
+      expect(certOnly.certificates).toMatchObject([{ domain: "example.com", usage: "" }]);
+      expect(certOnly.cdn).toBeUndefined();
+    });
+
+    test("a Cert's region and options are read", () => {
+      const model = analyzeApp(fixture("edge/api-region.ts"));
+      expect(model.certificates[0]).toMatchObject({ domain: "api.example.com", region: "eu-central-1", usage: "api", options: { key_algorithm: "EC_prime256v1" } });
     });
 
     test("apps without any of them have no edge model", () => {
       const model = analyzeApp(path.join(exampleDir, "main.ts"));
-      expect(model.dns).toBeUndefined();
+      expect(model.certificates).toEqual([]);
       expect(model.cdn).toBeUndefined();
+      expect(model.api).toBeUndefined();
     });
 
-    test("warns about a dry bucket and about a rate limit the CDN bypasses", () => {
-      expect(analyzeApp(fixture("cdn/dry-bucket.ts")).warnings).toEqual([
+    test("warns about a dry bucket and about a rate limit the API domain bypasses", () => {
+      expect(analyzeApp(fixture("edge/dry-bucket.ts")).warnings).toEqual([
         expect.stringMatching(/bucket "existing-site" is dry, but the CDN adds one statement to its bucket policy/),
       ]);
-      expect(analyzeApp(fixture("cdn/authenticate-all-public.ts")).warnings).toEqual([
-        expect.stringMatching(/rateLimit does not apply to routes served through the CDN/),
+      expect(analyzeApp(fixture("edge/authenticate-all-public.ts")).warnings).toEqual([
+        expect.stringMatching(/rateLimit does not apply to routes served on the cert's domain/),
       ]);
     });
 
-    test("a jwtAuth authenticate is read for the functions to verify tokens themselves", () => {
-      const model = analyzeApp(fixture("cdn/jwt-ok.ts"));
+    test("a jwtAuth authenticate is read for the functions to verify tokens themselves, even on Authorization", () => {
+      const model = analyzeApp(fixture("edge/jwt-ok.ts"));
       expect(model.jwt).toEqual({
         issuer: "https://login.example.com",
         audience: ["app", "web"],
@@ -147,82 +154,32 @@ describe("analyzeApp", () => {
         clockToleranceSeconds: 5,
       });
       expect(Object.fromEntries(model.functions.map((f) => [f.name, f.anonymous]))).toEqual({ health: true, me: false });
-      expect(analyzeApp(fixture("cdn/authenticate-all-public.ts")).jwt).toBeUndefined();
+      expect(analyzeApp(fixture("edge/authenticate-all-public.ts")).jwt).toBeUndefined();
+      expect(analyzeApp(fixture("edge/jwt-authorization.ts")).jwt).toMatchObject({ header: "authorization" });
     });
 
     test.each([
-      ["cdn/jwt-authorization.ts", /jwtAuth needs a header other than "authorization"/],
-      ["cdn/jwt-mixed.ts", /"both" serves both public and protected routes/],
-      ["cdn/jwt-variable.ts", /jwtAuth issuer must be a string literal/],
-      ["cdn/method-conflict.ts", /CloudFront cannot route by method: GET \/foo\/\{param\} \(getFoo\) and POST \/foo\/\{param\} \(createFoo\) share the path "\/foo\/\*"/],
-      ["cdn/authenticate-bypass.ts", /authenticate hook does not run for "GET \/me"; mark it \{ public: true \} or drop the cdn/],
-      ["cdn/authenticated-none.ts", /needs authenticated: "iam"/],
-      ["cdn/apex.ts", /zone apex, which cannot be a CNAME/],
-      ["cdn/other-dns.ts", /Only one DNS per app is supported/],
-      ["cdn/no-cdn-declared.ts", /the router's cdn needs a CDN declared with new CDN/],
-      ["cdn/missing-bucket.ts", /the CDN's bucket must be a BlobStore variable/],
+      ["edge/jwt-mixed.ts", /"both" serves both public and protected routes/],
+      ["edge/jwt-variable.ts", /jwtAuth issuer must be a string literal/],
+      ["edge/authenticate-bypass.ts", /authenticate hook does not run for "GET \/me"; mark it \{ public: true \}, use jwtAuth, or drop the cert/],
+      ["edge/apex-site.ts", /zone apex, which cannot be a CNAME; serve the site from a subdomain/],
+      ["edge/apex-api.ts", /zone apex, which cannot be a CNAME; serve the API from a subdomain/],
+      ["edge/no-cert-declared.ts", /the router's cert needs a Cert declared with new Cert/],
+      ["edge/shared-cert.ts", /the router and the CDN cannot share a Cert/],
+      ["edge/same-domain-twice.ts", /a certificate for "api.example.com" is already declared/],
+      ["edge/cdn-cert-region.ts", /a CDN needs its certificate in us-east-1, but the Cert says eu-west-1/],
+      ["edge/missing-bucket.ts", /the CDN's bucket must be a BlobStore variable/],
     ])("rejects %s", (file, error) => {
       expect(() => analyzeApp(fixture(file))).toThrow(error);
     });
 
-    test("nested parameter routes are ordered so the longer one is matched first", () => {
-      const model = analyzeApp(fixture("cdn/nested-params.ts"));
-      expect(model.cdn!.behaviors.map((b) => b.pathPattern)).toEqual(["/users/*/posts/*", "/users/*"]);
-    });
-
-    test("orderBySpecificity puts every pattern after those it would swallow", () => {
-      expect(orderBySpecificity(["/a/*", "/a/*/b/*", "/a/b", "/*/z"])).toEqual(["/a/b", "/*/z", "/a/*/b/*", "/a/*"]);
-      expect(orderBySpecificity(["/x/*", "/x/y/*", "/x/y/z"])).toEqual(["/x/y/z", "/x/y/*", "/x/*"]);
-      expect(orderBySpecificity(["/b", "/a"])).toEqual(["/b", "/a"]);
-    });
-
-    test("orderBySpecificity does not confuse a literal x with a wildcard", () => {
-      expect(orderBySpecificity(["/x*", "/x*x*"])).toEqual(["/x*x*", "/x*"]);
-      expect(orderBySpecificity(["/x*x*", "/x*"])).toEqual(["/x*x*", "/x*"]);
-    });
-
-    test("orderBySpecificity compiles each pattern once instead of in its inner loop", () => {
-      const patterns = Array.from({ length: 200 }, (_, i) => `/api/v${i}/*/items/*`);
-      const NativeRegExp = RegExp;
-      let compiled = 0;
-      globalThis.RegExp = new Proxy(NativeRegExp, {
-        construct(target, args, newTarget) {
-          compiled++;
-          return Reflect.construct(target, args, newTarget);
-        },
-      });
-      try {
-        expect(orderBySpecificity(patterns)).toHaveLength(200);
-      } finally {
-        globalThis.RegExp = NativeRegExp;
-      }
-      expect(compiled).toBe(200);
-    });
-
-    test("two-parameter routes would capture asset paths and are rejected", () => {
-      expect(() => analyzeApp(fixture("cdn/two-params.ts"))).toThrow(/becomes "\/\*\/\*", which would capture the static site's \/assets\/app\.js/);
-    });
-
-    test("a route that would take over the static site's own pages is rejected", () => {
-      expect(() => analyzeApp(fixture("cdn/catch-all.ts"))).toThrow(/GET \/\{slug\} becomes "\/\*", which would capture the static site's \//);
-    });
-
-    test("path characters CloudFront does not allow are rejected", () => {
-      expect(() => analyzeApp(fixture("cdn/bad-chars.ts"))).toThrow(/CloudFront path patterns allow only letters, digits/);
-    });
-
-    test("warns when more behaviors than the default quota are needed", () => {
-      const warnings = analyzeApp(fixture("cdn/many-routes.ts")).warnings;
-      expect(warnings).toEqual([expect.stringMatching(/26 CloudFront behaviors exceed the default quota of 25/)]);
-    });
-
     test("warns when a function uses files the CDN makes public", () => {
-      const warnings = analyzeApp(fixture("cdn/shared-bucket.ts")).warnings;
+      const warnings = analyzeApp(fixture("edge/shared-bucket.ts")).warnings;
       expect(warnings).toEqual([expect.stringMatching(/"readPrivate" also uses the CDN's bucket "my-site" under "private\/"; files there are public through the CDN/)]);
     });
 
     test("public routes may skip the authenticate hook", () => {
-      expect(() => analyzeApp(fixture("cdn/authenticate-all-public.ts"))).not.toThrow();
+      expect(() => analyzeApp(fixture("edge/authenticate-all-public.ts"))).not.toThrow();
     });
   });
 
@@ -390,7 +347,7 @@ describe("generate", () => {
 
   test("with a CDN and jwtAuth the bundles verify tokens, except for public functions", async () => {
     const buildDir = path.join(dir, "jwt-build");
-    await generate({ entry: fixture("cdn/jwt-ok.ts"), configPath: path.join(dir, "jwt.prototxt"), buildDir, project: "jwt" });
+    await generate({ entry: fixture("edge/jwt-ok.ts"), configPath: path.join(dir, "jwt.prototxt"), buildDir, project: "jwt" });
     const script = `
       const call = async (name, headers) => {
         const { handler } = await import(${JSON.stringify(buildDir)} + "/" + name + "/index.mjs");

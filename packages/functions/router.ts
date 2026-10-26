@@ -42,6 +42,7 @@ export interface EndpointsFile {
   auth?: EndpointAuth;
   // The deployed CDN, written by `cloudgear apply`; read by `CDN.url()`.
   cdn?: { domain: string; url: string; id?: string };
+  api?: { domain: string; url: string; id?: string };
 }
 
 export interface RateLimit {
@@ -69,9 +70,9 @@ export interface FunctionRouterOptions {
   // Establishes who is calling. Return null for 401; every route requires it unless `public`.
   // The result reaches functions as `context.auth`, and only when `authenticated` is "iam".
   authenticate?: Authenticator;
-  // A CDN (from @cloudgear/cdn) serving this router's routes from its own domain. `cloudgear generate`
-  // reads it: the CDN then sends each route to its function. Routes through it skip `authenticate`.
-  cdn?: { readonly domain: string };
+  // A Cert (from @cloudgear/cdn): routes are also served on its domain through API Gateway.
+  // Requests there reach functions directly and skip `authenticate`; `generate` reads it.
+  cert?: { readonly domain: string };
   // Provider settings for every function; literals only.
   functionOptions?: ProviderOptions;
   // Per-process counters: instances of a serverless app do not share them.
@@ -202,8 +203,8 @@ export class FunctionRouter {
     const endpoints = remote ? this.loadEndpoints() : null;
     if (remote && !endpoints) throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
     const local = this.server?.url.origin;
-    const cdn = remote && this.options.cdn ? `https://${this.options.cdn.domain}` : undefined;
-    if (cdn) return Object.fromEntries(this.routes.map((route) => [route.name, `${cdn}${route.path}`]));
+    const api = remote && this.options.cert ? `https://${this.options.cert.domain}` : undefined;
+    if (api) return Object.fromEntries(this.routes.map((route) => [route.name, `${api}${route.path}`]));
     if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
     const urls: Record<string, string> = {};
     for (const route of this.routes) {

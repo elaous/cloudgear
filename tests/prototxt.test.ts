@@ -6,6 +6,7 @@ const config: CloudgearConfig = {
   project: "app",
   provider: "aws",
   resource: [{ name: "myblob", type: "@aws.S3", physical_name: "myblob", dry: true, source: "server/api.ts:6" }],
+  certificate: [],
   function: [
     {
       name: "foo",

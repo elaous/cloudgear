@@ -95,7 +95,7 @@ describe("cloudgear CLI", () => {
 
 describe("cloudgear CLI with a CDN", () => {
   let dir: string;
-  const cdnEntry = path.join(root, "tests", "fixtures", "router", "cdn", "app.ts");
+  const cdnEntry = path.join(root, "tests", "fixtures", "router", "edge", "app.ts");
   const config = () => path.join(dir, "cloudgear.prototxt");
   const run = (...args: string[]) => {
     const proc = Bun.spawnSync(["bun", path.join(root, "src", "cli.ts"), ...args, "--config", config()], {

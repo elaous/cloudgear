@@ -6,7 +6,8 @@ import { stateKey } from "../state";
 import type { SendClient } from "./index";
 
 export interface CertificateDeps {
-  acm: SendClient;
+  acm: (region: string) => SendClient;
+  region: string;
   dns: (provider: string, zone: string) => Promise<DnsDriver>;
   sleep: (ms: number) => Promise<void>;
   log: (message: string) => void;
@@ -17,15 +18,15 @@ const ISSUE_ATTEMPTS = 180;
 const POLL_MS = 10_000;
 const FAILED = new Set(["FAILED", "VALIDATION_TIMED_OUT", "REVOKED", "INACTIVE", "EXPIRED"]);
 
-// ACM certificates for CloudFront live in us-east-1; the caller passes a client for that region.
 export function sameTarget(a: string | undefined, b: string | undefined): boolean {
   const normalize = (value: string | undefined) => (value ?? "").trim().toLowerCase().replace(/\.$/, "");
   return normalize(a) === normalize(b);
 }
 
 export function certificateDriver(deps: CertificateDeps): Driver {
+  const regionOfArn = (arn: string) => arn.split(":")[3] || deps.region;
   const describe = async (arn: string) =>
-    (await deps.acm.send(new DescribeCertificateCommand({ CertificateArn: arn }))).Certificate as
+    (await deps.acm(regionOfArn(arn)).send(new DescribeCertificateCommand({ CertificateArn: arn }))).Certificate as
       | { Status?: string; DomainValidationOptions?: { ResourceRecord?: { Name: string; Value: string } }[] }
       | undefined;
 
@@ -68,15 +69,16 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     async create(entry, context) {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};
-      // Fail before requesting anything if the CDN could not take over the domain's record later.
-      if (spec.for_cdn && !context.entry(stateKey({ type: "@aws.CloudFront", name: spec.domain }))) {
+      const taken = ["@aws.CloudFront", "@aws.ApiGateway"].some((type) => context.entry(stateKey({ type, name: spec.domain })));
+      // Fail before requesting anything if the endpoint could not take over the domain's record later.
+      if (spec.for_endpoint && !taken) {
         const record = await (await deps.dns(spec.dns_provider, spec.dns_zone)).get(spec.domain, "CNAME");
         if (record) {
           throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
         }
       }
       try {
-        const requested = await deps.acm.send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS", KeyAlgorithm: spec.options?.key_algorithm as never }));
+        const requested = await deps.acm(spec.region || deps.region).send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS", KeyAlgorithm: spec.options?.key_algorithm as never }));
         const arn: string = requested.CertificateArn;
         outputs.arn = arn;
         deps.log(`requested a certificate for ${spec.domain}`);
@@ -107,7 +109,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       // CloudFront releases the certificate a little after its distribution is gone.
       for (let attempt = 0; ; attempt++) {
         try {
-          await deps.acm.send(new DeleteCertificateCommand({ CertificateArn: current.outputs.arn }));
+          await deps.acm(regionOfArn(current.outputs.arn)).send(new DeleteCertificateCommand({ CertificateArn: current.outputs.arn }));
           return;
         } catch (err) {
           const name = (err as { name?: string }).name;

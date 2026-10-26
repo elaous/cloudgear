@@ -134,10 +134,9 @@ Where the router runs:
   `credentials`. Name that role with `--invoker`.
 - **AWS (ECS, Lambda, EC2).** The default provider chain works; name the
   task or instance role with `--invoker`.
-- **Static frontend on S3 behind CloudFront.** The page calls your app's
-  URL, which runs the router. Calling the function URLs straight from
-  CloudFront is possible later with an origin access control for Lambda URLs;
-  that comes with the CDN support, not with this release.
+- **Static frontend on S3 behind CloudFront.** The page calls the router's own
+  domain (a `Cert` handed to `FunctionRouter`, served through API Gateway; see
+  Domains), or your app's URL that runs the router.
 
 #### End-user authentication
 
@@ -163,7 +162,7 @@ export function me(input: unknown, context: RequestContext) {
 ```
 
 `jwtAuth` verifies `Authorization: Bearer <jwt>` (or the bare token in
-`header`, see Identity behind a CDN) against the issuer's JWKS
+`header`, see Identity on the API domain) against the issuer's JWKS
 (`<issuer>/.well-known/jwks.json`, or `jwksUri`), accepts only asymmetric
 algorithms, and checks issuer, expiry and, when given, audience. Always set
 `audience`: without it any token from the issuer is accepted. Missing or
@@ -198,10 +197,11 @@ which takes the first `X-Forwarded-For` address; enable that only behind a
 proxy that sets or overwrites the header, because otherwise clients choose
 their own identity.
 
-### Domain, certificate and CDN
+### Domains: certificates, CDN and API
 
-Serve a site and the API from one domain of your own. Declare the pieces and
-hand the CDN to the router:
+A site and an API each get a domain of their own. Declare a `DNS` and a `Cert`
+per domain, give one `Cert` to a `CDN` for the static site and another to the
+router for its routes:
 
 ```ts
 import { BlobStore } from "@cloudgear/blob";
@@ -210,24 +210,38 @@ import { CDN, Cert } from "@cloudgear/cdn";
 import { FunctionRouter } from "@cloudgear/functions";
 
 const site = new BlobStore("aws", "://my-site", { path: "/web" }); // the static files
-const dns = new DNS("gandi", "cdn.example.com", { zone: "example.com" });
-const cert = new Cert("aws", dns);
-const cdn = new CDN("aws", dns, { cert, bucket: site });
+const siteDns = new DNS("gandi", "www.example.com", { zone: "example.com" });
+const siteCert = new Cert("aws", siteDns);
+const cdn = new CDN("aws", siteCert, { bucket: site });
 
-const router = new FunctionRouter("aws", { cdn })
+const apiDns = new DNS("gandi", "api.example.com", { zone: "example.com" });
+const apiCert = new Cert("aws", apiDns);
+
+const router = new FunctionRouter("aws", { cert: apiCert })
   .url("GET", "/objects/{param}", functions.getObjects);
-router.listen(); // { getObjects: "https://cdn.example.com/objects/{param}" }
+router.listen(); // { getObjects: "https://api.example.com/objects/{param}" }
 ```
 
-`cloudgear apply` then: requests an ACM certificate (in `us-east-1`, where
-CloudFront needs it) and writes its validation record through `dns`; waits
-until it is issued; creates a CloudFront distribution for `cdn.example.com`
-with the bucket (under its `path`, if any) as the default origin and one
-behavior per route pointing at that route's function; allows only that
-distribution to read the bucket and call the functions; and points
-`cdn.example.com` at the distribution. Deletes run in the opposite order. A
-`create` that fails part-way keeps what it made in state, and the next `apply`
-resumes from there.
+`cloudgear apply` then:
+
+- **Certificates:** requests an ACM certificate per `Cert`, writes its
+  validation record through the `Cert`'s `DNS`, and waits until it is issued. A
+  CDN's certificate is issued in `us-east-1`, where CloudFront needs it; the
+  router's in the function region (the router's `region` option, else
+  `--region`), which API Gateway needs.
+- **CDN:** creates a CloudFront distribution for the CDN's domain with the
+  bucket (under its `path`, if any) as its origin, allows only that
+  distribution to read the bucket, and points the domain at it.
+- **API:** creates an API Gateway HTTP API with one route per `.url(...)`
+  (`GET /objects/{param}` and so on), each integrated with its function (payload
+  format 2.0), allows API Gateway to invoke them, adds a `$default` stage, a
+  regional custom domain with the router's certificate and an API mapping, and
+  points the domain at it.
+
+Deletes run in the opposite order, and a `create` that fails part-way keeps
+what it made in state, so the next `apply` resumes from there. Functions keep
+their IAM-protected function URLs, which the router uses in remote mode; the
+API domain is a second, public way to reach them.
 
 DNS providers (`new DNS(provider, domain, { zone })`): `"gandi"` (LiveDNS; set
 `GANDI_TOKEN` to a personal access token, or the legacy `GANDI_API_KEY`) and
@@ -238,46 +252,42 @@ state. `zone` defaults to the last two labels of the domain (three for common
 suffixes like `co.uk`); set it for anything else, and make it the zone that
 actually holds the records (a delegated subzone shadows its parent). Each
 state entry remembers its own DNS provider and zone, so removing the
-declarations still cleans up through the right zone. The domain MUST be a subdomain of its zone, because the
-apex cannot be a CNAME. Add a provider with `registerDnsDriver`, like blob
-drivers.
+declarations still cleans up through the right zone. A CDN's or router's
+domain MUST be a subdomain of its zone, because the apex cannot be a CNAME.
+Add a provider with `registerDnsDriver`, like blob drivers.
 
 Rules the analyzer enforces:
 
-- One `DNS`, one `Cert` and one `CDN` per app, each assigned to a variable
-  with literal arguments, and the `Cert` and `CDN` MUST use that `DNS`.
-- A `Cert` needs no `CDN`: declare only `DNS` and `Cert` to get a validated
-  certificate (it may then cover the zone apex, which a CDN cannot serve).
-  Like `BlobStore` and `DNS`, `Cert` has drivers: `cert.status()` asks AWS
-  Certificate Manager (`us-east-1`) for the newest certificate of the domain
-  and returns `{ state: "none" | "pending" | "issued" | "failed", id? }`.
-  Register another with `registerCertDriver()`, or set
-  `CLOUDGEAR_CERT_DRIVER=memory` for tests.
+- An app MAY declare any number of `DNS` and `Cert`s, one `DNS` per `Cert`,
+  each assigned to a variable with literal arguments; two `Cert`s MUST NOT
+  cover the same domain. At most one `CDN`, and at most one router `cert`.
+- The CDN and the router MUST NOT share a `Cert`: each serves its own domain.
+- A `Cert` needs neither: declare only `DNS` and `Cert` to get a validated
+  certificate (it may then cover the zone apex). `new Cert(provider, dns, {
+  region })` sets the region of a certificate that nothing uses; for a CDN it
+  MUST be `us-east-1` and for the router it MUST be the function region.
 - `DNS`, `Cert` and `CDN` do nothing at runtime except report what `apply`
-  deployed. `cert.status()` and `cdn.status()` ask the provider (live) and
-  return `{ state, id?, ... }` (`CDN` states: `none`, `deploying`, `deployed`).
-  `await cdn.url()` returns the distribution's own URL (`https://d111.cloudfront.net`;
-  the custom domain is `cdn.domain`): it reads the `cdn` entry that `apply`
-  writes into `.cloudgear/endpoints.json` and otherwise asks the provider
-  (`CloudFront` by alias), and throws until the CDN is deployed. Register
-  drivers with `registerCdnDriver()`, or use `CLOUDGEAR_CDN_DRIVER=memory`.
-  `status()` and `url()` are for the app that deploys or serves from the router
-  (a local process or Vercel). Inside a Lambda there is no endpoints file and
-  its role cannot list distributions, so pass the URL in as configuration there.
-- `examples/cdn-app` is a complete app: DNS, certificate, CDN and a routed
+  deployed. `cert.status()` asks the provider (ACM, in the `Cert`'s region) and
+  returns `{ state: "none" | "pending" | "issued" | "failed", id? }`.
+  `cdn.status()` returns the same shape with `none`, `deploying` or `deployed`.
+  `await cdn.url()` returns the distribution's own URL
+  (`https://d111.cloudfront.net`; the custom domain is `cdn.domain`): it reads
+  the `cdn` entry that `apply` writes into `.cloudgear/endpoints.json` and
+  otherwise asks the provider (`CloudFront` by alias), and throws until the
+  CDN is deployed. Register drivers with `registerCertDriver()` and
+  `registerCdnDriver()`, or use `CLOUDGEAR_CERT_DRIVER=memory` and
+  `CLOUDGEAR_CDN_DRIVER=memory`. `status()` and `url()` are for the app that
+  deploys or serves from the router (a local process or Vercel). Inside a
+  Lambda there is no endpoints file and its role cannot list distributions, so
+  pass the URL in as configuration there.
+- `examples/cdn-app` is a complete app: two domains, a CDN and a routed
   function with a `@policy`.
-- The router's `cdn` MUST be that `CDN`, and CloudFront reaches functions
-  through an origin access control, so the router MUST be `authenticated:
-  "iam"` (the default).
-- CloudFront picks a behavior by path only. Two routes that share a path
-  (`GET /foo/{param}` and `POST /foo/{param}`) can use the same function but not
-  different ones; give them different paths. Path params become `*`.
-- Requests through the CDN reach functions directly, so the router's
+- Requests on the router's domain reach functions directly, so the router's
   `authenticate` hook and `rateLimit` do not run for them. `generate` refuses
   a router that has a custom `authenticate` unless every route is
   `{ public: true }`, and warns about `rateLimit`. With
   `authenticate: jwtAuth({...})` the functions verify tokens themselves
-  (see Identity behind a CDN).
+  (see Identity on the API domain).
 - A `dry` bucket is not created or deleted, but the CDN still adds one
   statement to its bucket policy (and removes it again), which `generate`
   warns about. The CDN's bucket policy statement only allows `s3:GetObject`
@@ -285,34 +295,29 @@ Rules the analyzer enforces:
   the bucket, a missing file is answered with 403 rather than 404. The bucket
   (or its `path`) is public through the CDN, so
   `generate` also warns when a function uses the same files.
-- Routes become CloudFront path patterns. Patterns are ordered so a longer one
-  is matched before one that would swallow it (`/users/*/posts/*` before
-  `/users/*`, because CloudFront's `*` also matches `/`). A route that would
-  capture the site's own paths (`/`, `/index.html`, `/favicon.ico`,
-  `/assets/*`, `/static/*`; so `/{slug}` and `/{a}/{b}` are rejected) is
-  rejected: put API routes under a fixed prefix. Patterns allow only letters, digits and
-  `_ - . * $ / ~ " ' @ : +`, and more than 25 behaviors exceeds CloudFront's
-  default quota (a warning). An exact pattern like `/items` does not match
-  `/items/`, which then goes to the site.
-- Anyone can reach functions through the CDN with their own requests, so
-  functions behind it never trust a caller identity (`context.auth` is not
+- API Gateway routes are `METHOD /path` with `{param}` segments, as in
+  `.url`. A route belongs to the one function it is registered with. HTTP APIs
+  allow up to 300 routes, and the routes are open (`AuthorizationType: NONE`):
+  protect them with `jwtAuth`, or keep the router off the public domain.
+- Anyone can reach functions through the API domain with their own requests,
+  so functions behind it never trust a caller identity (`context.auth` is not
   populated), and the router's invoke protocol still ignores method and path
   matching there. This is why a custom `authenticate` needs every route to be
   public.
 
-#### Identity behind a CDN
+#### Identity on the API domain
 
-With a CDN and `authenticate: jwtAuth({...})`, `generate` reads the literal
-settings (`issuer`, `audience`, `jwksUri`, `clockToleranceSeconds`, `header`)
-and bakes the same verification into each function's bundle. Every request,
-whether from a viewer or from the router, then carries a token that the
-function checks, and `context.auth` is the verified principal. Rules:
+With a router `cert` and `authenticate: jwtAuth({...})`, `generate` reads the
+literal settings (`issuer`, `audience`, `jwksUri`, `clockToleranceSeconds`,
+`header`) and bakes the same verification into each function's bundle. Every
+request, whether from a caller of the domain or from the router, then carries a
+token that the function checks, and `context.auth` is the verified principal.
+Rules:
 
-- `header` MUST be set to something other than `authorization` (for example
-  `{ header: "x-auth-token" }`): CloudFront's origin access control signs
-  requests to functions with `Authorization`, so it may replace the viewer's.
-  The header holds the bare token (a `Bearer ` prefix is tolerated). The
-  frontend MUST send it; the router forwards it on remote calls.
+- `header` defaults to `authorization` (`Bearer <jwt>`), which API Gateway
+  passes through. Any other header holds the bare token (a `Bearer ` prefix is
+  tolerated); the router forwards a non-`authorization` header on remote calls,
+  because `Authorization` carries the router's own signature there.
 - Options MUST be string, string-array or number literals.
 - A function whose routes are all `{ public: true }` skips verification. A
   function with both public and protected routes is refused: give each its own
@@ -321,26 +326,21 @@ function checks, and `context.auth` is the verified principal. Rules:
   `context` sent in the request.
 - HEAD requests are served by the GET route, without a body.
 
-cloudgear never overwrites a DNS record it does not own: if the domain
+cloudgear never overwrites a DNS record it does not own: if a domain
 already has a record pointing elsewhere, `apply` stops before the certificate
-is requested, and `destroy` only removes the record while it still points at the
-distribution cloudgear created. The certificate's validation record is left in
-place on destroy, because ACM shares it between certificates for a domain.
+is requested, and `destroy` only removes a record while it still points at what
+cloudgear created. A certificate's validation record is left in place on
+destroy, because ACM shares it between certificates for a domain.
 
 `cloudgear invalidate [path...]` clears the CDN's cache (`/*` by default).
 Uploading the site's files is not part of cloudgear yet.
 
 Things that have not been checked against real services: all of the
-CloudFront, ACM, Route 53 and Gandi calls are tested against fakes only. The
-Gandi driver's URLs, authentication, field names, status codes and TTL bounds
-were checked against Gandi's published LiveDNS reference (api.gandi.net/docs/livedns),
-but never against a live account. AWS
-documents that a POST or PUT through CloudFront to a Lambda function URL needs
-the client to send `x-amz-content-sha256` (the SHA-256 of the body), and an
-origin access control may replace the `Authorization` header with its own
-signature; check both before relying on this for write routes or per-user
-tokens. The S3 origin uses the regional bucket domain of the bucket's own
-`region` (see Regions).
+CloudFront, ACM, API Gateway, Route 53 and Gandi calls are tested against
+fakes only. The Gandi driver's URLs, authentication, field names, status codes
+and TTL bounds were checked against Gandi's published LiveDNS reference
+(api.gandi.net/docs/livedns), but never against a live account. The S3 origin
+uses the regional bucket domain of the bucket's own `region` (see Regions).
 
 ### Runtime: `BlobStore`
 
@@ -409,7 +409,7 @@ new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * 
   `cron(0/15 * * * ? *)`). Seconds are not supported, and day-of-month and
   day-of-week MUST NOT both be restricted.
 - The function is called with `{ scheduledTime, rule }` and no `context.auth`;
-  token verification behind a CDN does not apply to it. A run that ends
+  token verification on the API domain does not apply to it. A run that ends
   in a 5xx is thrown, so Lambda records it and, as for any asynchronous
   invocation, retries it up to twice (set the function's maximum retry
   attempts to 0 for at most one run); a 4xx result counts as a success. Scheduled runs do not happen under `listen()`.
@@ -634,7 +634,7 @@ Where each moving part lives, since several are called across packages:
 | Cert drivers (`acm`, `memory`) | `packages/cdn/cert-driver.ts`, `packages/cdn/drivers/` | `Cert.status()` |
 | CDN drivers (`cloudfront`, `memory-cdn`) | `packages/cdn/cdn-driver.ts`, `packages/cdn/drivers/` | `CDN.status()`, `CDN.url()` |
 | `policy`, `permissions` | `packages/blob/index.ts` | apps; `src/analyze/app.ts` |
-| certificate and CloudFront drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts` | `awsDrivers` |
+| certificate, CloudFront and API Gateway drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts`, `apigateway.ts` | `awsDrivers` |
 | schedule driver (EventBridge) | `src/deploy/aws/schedule.ts` | `awsDrivers` |
 | `cron`, `schedule` | `packages/functions/cron.ts` | apps; `src/analyze/app.ts`, `src/deploy/plan.ts` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |

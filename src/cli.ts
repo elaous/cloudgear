@@ -6,10 +6,10 @@ import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { debug, errorSummary, isDebug } from "@cloudgear/debug";
 import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
-import { apply, endpointsFrom, hasEndpoints, type Drivers } from "./deploy/apply";
+import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
-import { formatPlan, hasChanges, plan } from "./deploy/plan";
+import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { generate } from "./generate";
 
@@ -114,7 +114,7 @@ async function main() {
           return;
         }
         try {
-          await apply(actions, state, await drivers(config, configPath, values.region), {
+          await apply(actions, state, await drivers(actions, config, configPath, values.region), {
             save: (s) => saveState(statePath, s),
             log: (message) => console.log(`cloudgear: ${message}`),
           });
@@ -200,8 +200,24 @@ function readConfig(configPath: string): CloudgearConfig {
   return decodeConfig(fs.readFileSync(configPath, "utf8"));
 }
 
-async function drivers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
-  if (config.provider !== "aws") throw new Error(`Provider "${config.provider}" has no deploy drivers yet`);
+// One deployer set per provider the planned actions touch.
+async function drivers(actions: PlannedAction[], config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
+  const providers = providersNeeded(actions);
+  debug("cli", "providers", { providers });
+  const all: Drivers = {};
+  for (const provider of providers) {
+    const factory = DEPLOYERS[provider];
+    if (!factory) throw new Error(`Provider "${provider}" has no deploy drivers yet; the config can be planned but not applied`);
+    Object.assign(all, await factory(config, configPath, region));
+  }
+  return all;
+}
+
+const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined) => Promise<Drivers>> = {
+  aws: awsDeployers,
+};
+
+async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
   // The router's own `region` option wins, then --region, then the environment.
   const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });

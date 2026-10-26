@@ -6,7 +6,7 @@ import { analyzeApp } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
 import { fitName, sanitizeName } from "./names";
-import { providerProfile, validateConfigOptions } from "./providers";
+import { capability, crossProviderAccess, providerProfile, validateConfigOptions } from "./providers";
 
 export interface GenerateOptions {
   entry: string;
@@ -38,15 +38,24 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     warnings: model.warnings.length,
   }));
   const profile = providerProfile(model.provider);
+  const warnings = [...model.warnings];
   const project = sanitize(options.project ?? projectName(path.dirname(path.resolve(options.entry))));
   const configDir = path.dirname(path.resolve(options.configPath));
   const fromConfig = (file: string) => path.relative(configDir, path.resolve(file));
 
-  for (const resource of model.resources) {
-    if (resource.provider !== model.provider) {
-      throw new Error(
-        `${resource.file}:${resource.line}: BlobStore "${resource.name}" uses provider "${resource.provider}" but the router uses "${model.provider}"`,
-      );
+  for (const fn of model.functions) {
+    if (fn.schedules.length) capability(model.provider, "schedule");
+  }
+
+  const resourceProvider = new Map(model.resources.map((r) => [r.name, r.provider]));
+  for (const fn of model.functions) {
+    for (const use of fn.uses.values()) {
+      const storeProvider = resourceProvider.get(use.resource);
+      if (storeProvider && storeProvider !== model.provider && !crossProviderAccess(model.provider, storeProvider)) {
+        warnings.push(
+          `${fn.file}: "${fn.name}" (${model.provider}) uses BlobStore "${use.resource}" (${storeProvider}); cross-provider access is not provisioned yet, so the function gets no credentials for it`,
+        );
+      }
     }
   }
 
@@ -87,7 +96,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       routes: fn.routes,
       provider: model.provider,
       // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
-      trustContext: model.authenticated === "iam" && !model.api,
+      trustContext: model.provider === "aws" && model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
     }));
@@ -107,7 +116,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       permission: used.map((use) => ({
         resource: use.resource,
         path: use.path,
-        action: [...new Set([...use.accesses].flatMap((a) => profile.blobStore.actions[a]))].sort(),
+        action: [...new Set([...use.accesses].flatMap((a) => providerProfile(resourceProvider.get(use.resource) ?? model.provider).blobStore.actions[a]))].sort(),
       })),
       env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
       reserved_concurrency: reservedConcurrency,
@@ -121,7 +130,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     provider: model.provider,
     resource: model.resources.map((r) => ({
       name: r.name,
-      type: profile.blobStore.type,
+      type: providerProfile(r.provider).blobStore.type,
       physical_name: r.name,
       dry: r.dry,
       source: `${fromConfig(r.file)}:${r.line}`,
@@ -133,6 +142,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     authenticated: model.authenticated,
     region: model.region,
     certificate: model.certificates.map((c) => ({
+      provider: c.provider,
       domain: c.domain,
       dns: c.dns,
       ...(c.usage ? { usage: c.usage } : {}),
@@ -155,7 +165,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));
   debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
-  return { config, warnings: model.warnings };
+  return { config, warnings: [...new Set(warnings)] };
 }
 
 function projectName(dir: string): string {

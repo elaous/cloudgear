@@ -76,6 +76,7 @@ interface Tally {
 export type Authentication = "iam" | "none";
 
 export interface CertificateModel {
+  provider: string;
   domain: string;
   dns: { provider: string; domain: string; zone: string };
   // What the certificate serves; decides the region it is issued in.
@@ -407,7 +408,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const region = readRegion(optionsArg, `${at}: Cert`);
       const clash = [...certificates.values()].find((c) => c.domain === dns.domain);
       if (clash) throw new Error(`${at}: a certificate for "${dns.domain}" is already declared`);
-      certificates.set(certExpr, { domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
+      certificates.set(certExpr, { provider: "aws", domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
     }
 
     const certOf = (node: Node | undefined, what: string, at: string): CertificateModel => {
@@ -474,6 +475,9 @@ export function analyzeApp(entryPath: string): AppModel {
       const cert = certOf(routerCert, "the router's cert", at);
       if (cert === cdnCert) throw new Error(`${at}: the router and the CDN cannot share a Cert; give each its own domain`);
       subdomain(cert, at, "the API");
+      if (provider !== "aws") {
+        throw new Error(`${at}: serving the router on a Cert's domain uses API Gateway, which needs provider "aws", but the router uses "${provider}"`);
+      }
       if (cert.region && cert.region !== routerRegion) {
         throw new Error(`${at}: the router's Cert must be in the function region (${routerRegion ?? "the deploy region"}), but it says ${cert.region}`);
       }

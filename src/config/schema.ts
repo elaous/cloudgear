@@ -23,6 +23,7 @@ export interface DnsSpec {
 export type Options = Record<string, string>;
 
 export interface CertificateSpec {
+  provider: string;
   domain: string;
   dns: DnsSpec;
   usage?: "cdn" | "api";
@@ -104,6 +105,7 @@ export function decodeConfig(text: string): CloudgearConfig {
     authenticated: raw.authenticated === "none" ? "none" : "iam",
     region: raw.region ? String(raw.region) : undefined,
     certificate: (raw.certificate ?? []).map((c: Record<string, any>) => ({
+      provider: String(c.provider ?? "aws"),
       domain: str(c, "domain"),
       dns: { provider: str(c.dns ?? {}, "provider"), domain: str(c.dns ?? {}, "domain"), zone: str(c.dns ?? {}, "zone") },
       ...(c.usage === "cdn" || c.usage === "api" ? { usage: c.usage } : {}),

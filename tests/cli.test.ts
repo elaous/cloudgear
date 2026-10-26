@@ -113,11 +113,13 @@ describe("cloudgear CLI with a CDN", () => {
   test("plan lists the certificate and CDN after what they depend on", () => {
     expect(run("generate", cdnEntry, "--project", "edge").err).toBe("");
     const plan = run("plan").out;
-    const order = ["@aws.Lambda getObject", "@aws.Certificate cdn.example.com", "@aws.CloudFront cdn.example.com"].map((entry) => plan.indexOf(`+ ${entry}`));
+    const at = (entry: string) => plan.indexOf(`+ ${entry}`);
+    const order = ["@aws.Lambda getObject", "@aws.Certificate api.example.com", "@aws.ApiGateway api.example.com", "@aws.Certificate www.example.com", "@aws.CloudFront www.example.com"].map(at);
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order[2]).toBeGreaterThan(order[0]!);
     expect(order[2]).toBeGreaterThan(order[1]!);
-    expect(plan).toContain("Plan: 6 to create");
+    expect(order[4]).toBeGreaterThan(order[3]!);
+    expect(plan).toContain("Plan: 8 to create");
   });
 
   test("invalidate before anything is deployed explains what to do", () => {

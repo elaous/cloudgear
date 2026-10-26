@@ -407,8 +407,10 @@ new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * 
   `cron(0/15 * * * ? *)`). Seconds are not supported, and day-of-month and
   day-of-week MUST NOT both be restricted.
 - The function is called with `{ scheduledTime, rule }` and no `context.auth`;
-  token verification behind a CDN does not apply to it. A run that fails is
-  thrown, so Lambda records it. Scheduled runs do not happen under `listen()`.
+  token verification behind a CDN does not apply to it. A run that ends
+  in a 5xx is thrown, so Lambda records it and, as for any asynchronous
+  invocation, retries it up to twice (set the function's maximum retry
+  attempts to 0 for at most one run); a 4xx result counts as a success. Scheduled runs do not happen under `listen()`.
 - Changing an expression or the function's name replaces the rule. The
   provider profile names the deployer type (`schedule.type` in
   `src/providers.ts`), so another provider's scheduler (Cloud Scheduler on GCP)

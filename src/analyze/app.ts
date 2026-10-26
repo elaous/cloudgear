@@ -240,7 +240,7 @@ export function analyzeApp(entryPath: string): AppModel {
   const byName = new Map<string, AnalyzedFunction>();
   for (const fn of functions.values()) {
     const clash = byName.get(fn.name);
-    if (clash) throw new Error(`Two routed functions are named "${fn.name}" (${clash.file}, ${fn.file}); rename one`);
+    if (clash) throw new Error(`Two functions are named "${fn.name}" (${clash.file}, ${fn.file}); rename one`);
     byName.set(fn.name, fn);
   }
 

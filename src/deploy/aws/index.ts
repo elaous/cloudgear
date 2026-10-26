@@ -13,6 +13,7 @@ import {
   PutFunctionConcurrencyCommand,
   RemovePermissionCommand,
   UpdateFunctionUrlConfigCommand,
+  DeleteFunctionUrlConfigCommand,
   CreateFunctionCommand,
   CreateFunctionUrlConfigCommand,
   DeleteFunctionCommand,
@@ -335,6 +336,12 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (spec.reserved_concurrency !== previous) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
         }
         const before = (current.spec.invokers as string[] | undefined) ?? [];
+        if (spec.scheduled_only && current.outputs.url) {
+          await ignore(lambda.send(new DeleteFunctionUrlConfigCommand({ FunctionName: entry.physical_name })), "ResourceNotFoundException");
+          if ((current.spec.auth ?? "iam") === "iam") await removeInvokers(entry.physical_name, before);
+          else await removePublic(entry.physical_name);
+          return { url: "" };
+        }
         if (!current.outputs.url) {
           if (!(entry.source as FunctionSpec).route.length) return {} as Record<string, string>;
           const url = await lambda.send(

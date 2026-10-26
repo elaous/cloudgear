@@ -34,6 +34,8 @@ describe("cron", () => {
     ["0 0 * * */2", "cron(0 0 ? * 1,3,5,7 *)"],
     ["0 0 * * *", "cron(0 0 * * ? *)"],
     ["  0   0 * * 0-6  ", "cron(0 0 * * ? *)"],
+    ["0 0 * * 7/2", "cron(0 0 ? * 1 *)"],
+    ["0 0 * * 5/2", "cron(0 0 ? * 1,6 *)"],
   ])("%s is %s on EventBridge", (expression, expected) => {
     expect(toEventBridgeCron(expression)).toBe(expected);
   });
@@ -50,6 +52,12 @@ describe("cron", () => {
     ["5-1 * * * *", /range/],
     ["*/0 * * * *", /step/],
     ["? * * * *", /minute "\?"/],
+    ["0 0 ? * *", /day-of-month "\?"/],
+    ["0 0 * * ?", /day-of-week "\?"/],
+    ["*/100 * * * *", /minute step in "\*\/100": expected 1-59/],
+    ["0 */25 * * *", /hour step/],
+    ["0 0 30 2 *", /February never has day 30/],
+    ["0 0 31 FEB *", /February never has day 31/],
     ["0 0 1 * 1", /cannot restrict both day-of-month and day-of-week/],
   ])("%s is rejected", (expression, error) => {
     expect(() => toEventBridgeCron(expression)).toThrow(error);
@@ -98,6 +106,7 @@ describe("schedules in source", () => {
     ["bad-cron.ts", /expected 5 fields/],
     ["both-days.ts", /cannot restrict both day-of-month and day-of-week/],
     ["substitution.ts", /cannot contain \${} substitutions/],
+    ["options-variable.ts", /route options must be an object literal/],
     ["instance-method.ts", /@schedule applies to a static method of an exported class/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);
@@ -205,7 +214,7 @@ describe("planning and deploying schedules", () => {
 
     const replaced = plan(scheduled(["*/15 * * * *"], { physical_name: "app-foo2" }), state);
     expect(replaced.find((a) => a.key.startsWith("@aws.Lambda"))!.op).toBe("replace");
-    expect(replaced.find((a) => a.key.startsWith("@aws.Schedule"))!.op).toBe("replace");
+    expect(replaced.filter((a) => a.key.startsWith("@aws.Schedule")).map((a) => a.op).sort()).toEqual(["create", "delete"]);
   });
 
   test("a rule target EventBridge rejects fails the apply and keeps the rule for the next one", async () => {
@@ -231,6 +240,24 @@ describe("planning and deploying schedules", () => {
     expect(aws.of("CreateFunctionUrlConfigCommand")).toHaveLength(1);
     expect(state.entries["@aws.Lambda.foo"]!.outputs.url).toMatch(/^https:/);
     expect(plan(routed, state).every((a) => a.op === "noop")).toBe(true);
+  });
+
+  test("two long function names that differ late and share a cron get different rules", () => {
+    const long = (suffix: string) => fn({ name: `long${suffix}`, physical_name: `${"x".repeat(60)}${suffix}`, permission: [], env: [], schedule: ["0 3 * * *"] });
+    const rules = plan(baseConfig({ resource: [], function: [long("a"), long("b")] }), emptyState()).filter((a) => a.type === "@aws.Schedule");
+    expect(new Set(rules.map((a) => a.desired!.physical_name)).size).toBe(2);
+    expect(rules.every((a) => a.desired!.physical_name.length <= 64)).toBe(true);
+  });
+
+  test("a routed function that becomes schedule-only loses its URL and permissions", async () => {
+    const state = emptyState();
+    const aws = fakeAws();
+    await applyAll(scheduled(["0 3 * * *"]), state, aws);
+    expect(state.entries["@aws.Lambda.foo"]!.outputs.url).toMatch(/^https:/);
+    await applyAll(scheduled(["0 3 * * *"], { route: [] }), state, aws);
+    expect(aws.of("DeleteFunctionUrlConfigCommand")).toEqual([{ FunctionName: "app-foo" }]);
+    expect(state.entries["@aws.Lambda.foo"]!.outputs.url).toBe("");
+    expect(plan(scheduled(["0 3 * * *"], { route: [] }), state).every((a) => a.op === "noop")).toBe(true);
   });
 
   test("a hand-edited invalid cron is rejected by plan", () => {

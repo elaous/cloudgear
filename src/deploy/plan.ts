@@ -148,7 +148,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
 
   for (const fn of config.function) {
     for (const cron of fn.schedule ?? []) {
-      const id = createHash("sha256").update(cron).digest("hex").slice(0, 8);
+      const id = createHash("sha256").update(`${fn.physical_name}\0${cron}`).digest("hex").slice(0, 8);
       entries.push({
         kind: "resource",
         type: providerProfile(config.provider).schedule.type,

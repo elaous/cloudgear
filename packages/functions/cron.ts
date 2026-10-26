@@ -34,17 +34,21 @@ export function normalizeCron(expression: string): string {
     );
   }
   fields.forEach((field, index) => parseField(field, FIELDS[index]!));
+  const [, , dayOfMonth, month] = fields as [string, string, string, string, string];
+  if (/^(2|FEB)$/i.test(month) && /^\d+$/.test(dayOfMonth) && Number(dayOfMonth) > 29) {
+    throw new Error(`Invalid cron "${expression.trim()}": February never has day ${dayOfMonth}`);
+  }
   return fields.join(" ");
 }
 
 function parseField(field: string, spec: FieldSpec): void {
   for (const part of field.split(",")) {
-    const match = /^(\*|\?|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)(?:\/(\d+))?$/.exec(part);
-    if (!match || (match[1] === "?" && (match[2] || !["day-of-month", "day-of-week"].includes(spec.name)))) {
-      throw new Error(`Invalid cron ${spec.name} "${field}"`);
+    const match = /^(\*|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)(?:\/(\d+))?$/.exec(part);
+    if (!match) throw new Error(`Invalid cron ${spec.name} "${field}"`);
+    if (match[2] !== undefined && (Number(match[2]) < 1 || Number(match[2]) > spec.max)) {
+      throw new Error(`Invalid cron ${spec.name} step in "${field}": expected 1-${spec.max}`);
     }
-    if (match[2] !== undefined && Number(match[2]) < 1) throw new Error(`Invalid cron ${spec.name} step in "${field}"`);
-    if (match[1] === "*" || match[1] === "?") continue;
+    if (match[1] === "*") continue;
     const [low, high] = match[1]!.split("-").map((value) => valueOf(value, spec, field));
     if (high !== undefined && low! > high) throw new Error(`Invalid cron ${spec.name} range "${field}"`);
   }
@@ -63,6 +67,7 @@ function valueOf(token: string, spec: FieldSpec, field: string): number {
 export function toEventBridgeCron(expression: string): string {
   const [minute, hour, dayOfMonth, month, dayOfWeek] = normalizeCron(expression).split(" ") as [string, string, string, string, string];
   const days = expandDaysOfWeek(dayOfWeek);
+  if (days?.size === 0) throw new Error(`Invalid cron "${expression}": day-of-week "${dayOfWeek}" matches no day`);
   const weekRestricted = days !== undefined && days.size < 7;
   const monthRestricted = dayOfMonth !== "*" && dayOfMonth !== "?";
   if (monthRestricted && weekRestricted) {
@@ -94,7 +99,7 @@ function expandDaysOfWeek(field: string): Set<number> | undefined {
       return named >= 0 ? named : Number(token);
     }) as [number, number | undefined];
     const from = range === "*" ? 0 : first;
-    const to = range === "*" ? 6 : step && last === undefined ? 6 : (last ?? first);
+    const to = range === "*" ? 6 : step && last === undefined ? 7 : (last ?? first);
     for (let day = from; day <= to; day += Number(step ?? 1)) days.add(day % 7);
   }
   return days;

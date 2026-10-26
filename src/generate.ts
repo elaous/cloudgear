@@ -90,7 +90,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
-    if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.passResponse)) {
+    if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.responseKind)) {
       throw new Error(`${fn.file}: include, request and response are not supported for provider "${model.provider}" yet`);
     }
     const includedBytes = fn.include.reduce((sum, file) => sum + fs.statSync(file.abs).size, 0);
@@ -112,7 +112,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       include: fn.include,
       passRequest: fn.passRequest,
-      passResponse: fn.passResponse,
+      responseKind: fn.responseKind,
       outDir: options.buildDir,
     }));
     debug("generate", `bundled ${fn.name}`, () => ({ file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size }));
@@ -139,7 +139,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       schedule: fn.schedules.length ? fn.schedules : undefined,
       include: fn.include.length ? fn.include.map((f) => f.rel) : undefined,
       pass_request: fn.passRequest || undefined,
-      pass_response: fn.passResponse || undefined,
+      response_arg: fn.responseKind,
     });
   }
 

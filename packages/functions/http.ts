@@ -1,3 +1,5 @@
+import { VercelRequest, VercelResponse, type VercelRequestQuery } from "./vercel";
+
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
 
@@ -42,6 +44,10 @@ export interface HttpResult {
   status: number;
   headers: Record<string, string>;
   body: string;
+  // The body is base64 of binary content.
+  base64?: boolean;
+  // Set-Cookie values, which cannot be joined into one header.
+  cookies?: string[];
 }
 
 export function response<T>(
@@ -144,15 +150,52 @@ export async function serializeRequest(req: Request): Promise<OriginalRequest> {
   return { method: req.method, url: req.url, headers, ...(bytes.length ? { body: Buffer.from(bytes).toString("base64") } : {}) };
 }
 
-export function deserializeRequest(original: OriginalRequest): Request {
-  const body = original.body ? Buffer.from(original.body, "base64") : undefined;
-  return new Request(original.url, { method: original.method, headers: original.headers, body });
+// Query (with path params), cookies and parsed body, as a Vercel function sees a request.
+export function vercelRequestFrom(
+  original: { method: string; url: string; headers: Record<string, string>; raw?: Uint8Array },
+  params: Record<string, string> = {},
+): VercelRequest {
+  const url = new URL(original.url);
+  const query: VercelRequestQuery = Object.create(null);
+  for (const [key, value] of url.searchParams) {
+    const earlier = query[key];
+    query[key] = earlier === undefined ? value : [...(Array.isArray(earlier) ? earlier : [earlier]), value];
+  }
+  const text = original.raw?.length ? new TextDecoder().decode(original.raw) : "";
+  const headers = Object.fromEntries(Object.entries(original.headers).map(([key, value]) => [key.toLowerCase(), value]));
+  return new VercelRequest({
+    method: original.method,
+    url: `${url.pathname}${url.search}`,
+    headers,
+    query: { ...query, ...params },
+    body: parseBody(text, headers["content-type"] ?? null),
+    raw: original.raw,
+  });
 }
 
-// `lead` goes before the input and context: the request and the response helper, when asked for.
-export async function invoke(fn: (...args: any[]) => unknown, input: unknown, context: RequestContext = {}, lead: unknown[] = []): Promise<HttpResult> {
+export function vercelRequestFromOriginal(original: OriginalRequest, params?: Record<string, string>): VercelRequest {
+  return vercelRequestFrom({ ...original, raw: original.body ? Buffer.from(original.body, "base64") : undefined }, params);
+}
+
+export type ResponseKind = "helper" | "writer";
+
+// With `request` the function takes it instead of the input; a `response` kind adds the helper or a
+// writer after it, and a writer replaces the return value as the output.
+export async function invoke(
+  fn: (...args: any[]) => unknown,
+  input: unknown,
+  context: RequestContext = {},
+  call: { request?: VercelRequest; response?: ResponseKind } = {},
+): Promise<HttpResult> {
+  const writer = call.response === "writer" ? new VercelResponse() : undefined;
+  const args = [call.request ?? input, ...(call.response === "helper" ? [response] : writer ? [writer] : []), context];
   try {
-    return toHttpResult(await fn(...lead, input, context));
+    const output = await fn(...args);
+    if (writer && (writer.writableEnded || output === undefined)) {
+      await writer.settled();
+      return writer.result();
+    }
+    return toHttpResult(output);
   } catch (err) {
     console.error(err);
     return toHttpResult(response({ error: "Internal Server Error" }, { status: 500 }));

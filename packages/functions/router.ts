@@ -14,14 +14,17 @@ import {
   response,
   routeKey,
   serializeRequest,
+  vercelRequestFrom,
   type Handler,
   type OriginalRequest,
+  type ResponseKind,
   type RequestContext,
   type Method,
   type PathParams,
   type Provider,
 } from "./http";
 import type { Authenticator } from "./auth";
+import { VercelResponse } from "./vercel";
 import type { CronSchedule } from "./cron";
 import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
 
@@ -39,10 +42,11 @@ export interface RouteOptions {
   options?: ProviderOptions;
   // Files or directories, from the project root, packaged with the function; literals only.
   include?: string | string[];
-  // Pass the original request to the function as its first argument.
+  // The function takes a Vercel-style request (query, cookies, body) instead of the input.
   request?: boolean;
-  // Pass the `response` helper after the request; give it the `response` import.
-  response?: typeof response;
+  // Hands the function a response after its first argument: the `response` helper (it returns its
+  // output) or `VercelResponse` (a writer; the function returns nothing). Give the import itself.
+  response?: typeof response | typeof VercelResponse;
   // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
   schedule?: CronSchedule | CronSchedule[];
 }
@@ -99,7 +103,7 @@ interface CompiledRoute {
   matcher: ReturnType<typeof compilePath>;
   fn?: (...args: any[]) => unknown;
   request: boolean;
-  response: boolean;
+  response?: ResponseKind;
   // Absolute path of the module whose default export handles the route.
   script?: string;
 }
@@ -132,12 +136,12 @@ export class FunctionRouter {
 
   // `script` is a path, relative to the file calling `url`, of a module whose default export handles the route.
   url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
-  // With `request` or `response` the function takes them before its input.
+  // With `request` the function takes a Vercel-style request instead of the input.
   url<P extends string>(
     method: Method | Lowercase<Method>,
     path: P,
     fn: (...args: any[]) => unknown,
-    options: RouteOptions & ({ request: true } | { response: typeof response }),
+    options: RouteOptions & ({ request: true } | { response: typeof response | typeof VercelResponse }),
   ): this;
   url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
     method: Method | Lowercase<Method>,
@@ -156,7 +160,7 @@ export class FunctionRouter {
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
-    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn, script, request: options.request === true, response: !!options.response });
+    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn, script, request: options.request === true, response: options.response === VercelResponse ? "writer" : options.response ? "helper" : undefined });
     return this;
   }
 
@@ -210,7 +214,7 @@ export class FunctionRouter {
       } catch {
         return Response.json({ error: "Malformed request body" }, { status: 400 });
       }
-      return this.dispatch(route, input, context, req, original);
+      return this.dispatch(route, input, context, req, original, params);
     }
     debug("router", pathMatched ? `method not allowed for ${req.method}` : `no route for ${req.method} ${url.pathname}`);
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
@@ -286,15 +290,17 @@ export class FunctionRouter {
     return { fn: route.fn };
   }
 
-  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request, original?: Request): Promise<Response> {
+  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request, original?: Request, params?: Record<string, string>): Promise<Response> {
     debug("router", `dispatching ${route.key} in ${this.mode} mode`, () => ({ inputKeys: Object.keys(input) }));
     if (this.mode === "local") {
       const { fn, error } = await this.handlerOf(route);
       if (!fn) return Response.json({ error }, { status: 500 });
-      const lead = [...(original ? [original] : []), ...(route.response ? [response] : [])];
-      const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context, lead));
+      const vercel = original ? vercelRequestFrom({ method: original.method, url: original.url, headers: Object.fromEntries(original.headers), raw: new Uint8Array(await original.arrayBuffer()) }, params) : undefined;
+      const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context, { request: vercel, response: route.response }));
       debug("router", `local ${route.key} -> ${result.status}`);
-      return new Response(result.body || null, { status: result.status, headers: result.headers });
+      const headers = new Headers(result.headers);
+      for (const cookie of result.cookies ?? []) headers.append("set-cookie", cookie);
+      return new Response((result.base64 ? Buffer.from(result.body, "base64") : result.body) || null, { status: result.status, headers });
     }
     const endpoints = this.loadEndpoints();
     const url = endpoints?.routes[route.key];

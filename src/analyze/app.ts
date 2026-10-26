@@ -54,9 +54,9 @@ export interface AnalyzedFunction {
   schedules: string[];
   // Files copied into the function's package, by path from the project root.
   include: { rel: string; abs: string }[];
-  // The function receives the original request and the response helper before its input.
+  // The function takes a Vercel-style request instead of its input, and a response after it.
   passRequest: boolean;
-  passResponse: boolean;
+  responseKind?: "helper" | "writer";
 }
 
 // Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
@@ -216,9 +216,11 @@ export function analyzeApp(entryPath: string): AppModel {
   const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
-  const isResponseHelper = (prop: Node) => {
+  const responseKindOf = (prop: Node): "helper" | "writer" | undefined => {
     const decl = valueDeclaration(prop);
-    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "response" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+    if (!decl || packages.nameOf(decl.getSourceFile().getFilePath()) !== "@cloudgear/functions") return undefined;
+    if (Node.isFunctionDeclaration(decl) && decl.getName() === "response") return "helper";
+    return Node.isClassDeclaration(decl) && decl.getName() === "VercelResponse" ? "writer" : undefined;
   };
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
@@ -260,9 +262,8 @@ export function analyzeApp(entryPath: string): AppModel {
           : `${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`,
       );
     }
-    const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), isResponseHelper);
-    const leading = Number(routeOptions.request) + Number(routeOptions.response);
-    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), leading);
+    const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), responseKindOf);
+    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request);
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
@@ -274,8 +275,8 @@ export function analyzeApp(entryPath: string): AppModel {
     extrasOf.set(fn, earlierExtras ?? { key: extras, at: where(call) });
     fn.include = routeOptions.include;
     fn.passRequest = routeOptions.request;
-    fn.passResponse = routeOptions.response;
-    checkPathParams(routePath, fnNode, where(call), leading);
+    fn.responseKind = routeOptions.response;
+    if (!routeOptions.request) checkPathParams(routePath, fnNode, where(call));
     publicRoutes.set(`${method} ${routePath}`, routeOptions.public);
     const routeName = routeOptions.name ?? ((scriptFile ? "" : fn.declaredName) || `${method} ${routePath}`);
     const clashing = routeNames.get(routeName);
@@ -760,7 +761,7 @@ export function analyzeApp(entryPath: string): AppModel {
     return `the receiver must be an exported instance variable itself (one of ${names.join(", ")}), not an alias or property`;
   }
 
-  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node, scriptName?: string, leadingParams = 0): AnalyzedFunction {
+  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node, scriptName?: string, hasInput = true): AnalyzedFunction {
     const existing = functions.get(decl);
     if (existing) {
       const again = receiver ? exportTargetOf(decl, instanceExport, receiver) : undefined;
@@ -776,7 +777,7 @@ export function analyzeApp(entryPath: string): AppModel {
         `${where(decl)}: "${label}" must be exported so it can be bundled on its own (a named function, a method of an exported object, a static method of an exported class, or a method of an exported instance of a class)${problem ? `: ${problem}` : ""}`,
       );
     }
-    const param = fnNode.getParameters()[leadingParams];
+    const param = hasInput ? fnNode.getParameters()[0] : undefined;
     const fn: AnalyzedFunction = {
       name: target.member
         ? `${target.exportName}-${target.member}`
@@ -792,7 +793,6 @@ export function analyzeApp(entryPath: string): AppModel {
       schedules: [],
       include: [],
       passRequest: false,
-      passResponse: false,
       uses: new Map(),
     };
     const tallies = new Map<string, Tally>();
@@ -971,11 +971,11 @@ interface RouteSettings {
   public: boolean;
   include: { rel: string; abs: string }[];
   request: boolean;
-  response: boolean;
+  response?: "helper" | "writer";
 }
 
-function readRouteOptions(options: Node | undefined, at: string, callerFile: string, isResponseHelper: (prop: Node) => boolean): RouteSettings {
-  const result: RouteSettings = { public: false, include: [], request: false, response: false };
+function readRouteOptions(options: Node | undefined, at: string, callerFile: string, responseKindOf: (prop: Node) => "helper" | "writer" | undefined): RouteSettings {
+  const result: RouteSettings = { public: false, include: [], request: false };
   if (!options) return result;
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: route options must be an object literal`);
   for (const prop of options.getProperties()) {
@@ -995,8 +995,8 @@ function readRouteOptions(options: Node | undefined, at: string, callerFile: str
       if (value !== "true" && value !== "false") throw new Error(`${at}: route request must be the literal true or false`);
       result.request = value === "true";
     } else if (key === "response") {
-      if (!isResponseHelper(prop)) throw new Error(`${at}: route response must be the \`response\` helper imported from @cloudgear/functions`);
-      result.response = true;
+      result.response = responseKindOf(prop);
+      if (!result.response) throw new Error(`${at}: route response must be \`response\` or \`VercelResponse\`, imported from @cloudgear/functions`);
     } else if (key === "include") {
       const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
       const items = value && Node.isArrayLiteralExpression(value) ? value.getElements() : value ? [value] : [];

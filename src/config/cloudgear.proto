@@ -100,9 +100,11 @@ message Function {
   repeated string schedule = 14;
   // Files packaged with the function, by path from the project root; copied under the bundle's files/.
   repeated string include = 15;
-  // The function receives the original request, then the response helper, before its input.
+  // The function takes a Vercel-style request instead of its input.
   bool pass_request = 16;
-  bool pass_response = 17;
+  reserved 17;
+  // "helper" or "writer": what the function receives after its first argument.
+  string response_arg = 18;
 }
 
 message Source {

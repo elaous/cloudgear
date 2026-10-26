@@ -4,12 +4,13 @@ import {
   INVOKE_CONTENT_TYPE,
   buildInput,
   compilePath,
-  deserializeRequest,
   invoke,
   matchPath,
   parseBody,
-  response,
+  vercelRequestFrom,
+  vercelRequestFromOriginal,
   type OriginalRequest,
+  type ResponseKind,
   type RequestContext,
   type HttpResult,
   type RouteSpec,
@@ -36,6 +37,8 @@ export interface FunctionUrlResult {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
+  isBase64Encoded?: boolean;
+  cookies?: string[];
 }
 
 export interface HandlerOptions {
@@ -45,9 +48,9 @@ export interface HandlerOptions {
   // 401 for a bad token, 503 when the verifier fails. Skipped when `anonymous`.
   authenticate?: Authenticator;
   anonymous?: boolean;
-  // Pass the request, then the `response` helper, to the function before its input.
+  // The function takes a Vercel-style request instead of the input, and a response after it.
   request?: boolean;
-  response?: boolean;
+  response?: ResponseKind;
 }
 
 export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec[], options: HandlerOptions = {}) {
@@ -56,8 +59,11 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
   return async (event: FunctionUrlEvent | ScheduledEvent): Promise<FunctionUrlResult> => {
     if (isScheduled(event)) {
       debug("lambda", "scheduled event", { time: event.time, rule: event.resources?.[0] });
-      const lead = leadArguments(options, () => new Request("https://schedule.invalid/", { method: "POST" }));
-      const result = await invoke(fn, { scheduledTime: event.time, rule: event.resources?.[0] }, {}, lead);
+      const input = { scheduledTime: event.time, rule: event.resources?.[0] };
+      const request = options.request
+        ? vercelRequestFrom({ method: "POST", url: "https://schedule.invalid/", headers: { "content-type": "application/json" }, raw: new TextEncoder().encode(JSON.stringify(input)) })
+        : undefined;
+      const result = await invoke(fn, input, {}, { request, response: options.response });
       if (result.status >= 500) throw new Error(`Scheduled run failed with status ${result.status}`);
       return toLambda(result);
     }
@@ -101,8 +107,12 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       debug("lambda", `no route for ${event.requestContext.http.method} ${event.rawPath}`);
       return toLambda({ status: 404, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "Not found" }) });
     }
-    const lead = leadArguments(options, () => resolved.original ?? requestFromEvent(event, headers));
-    const result = await timed("lambda", "handler", () => invoke(fn, resolved.input, context ?? resolved.context, lead), () => ({ inputKeys: Object.keys(resolved.input as object) }));
+    const request = options.request
+      ? resolved.original
+        ? vercelRequestFromOriginal(resolved.original, resolved.params)
+        : requestFromEvent(event, headers, resolved.params)
+      : undefined;
+    const result = await timed("lambda", "handler", () => invoke(fn, resolved.input, context ?? resolved.context, { request, response: options.response }), () => ({ inputKeys: Object.keys(resolved.input as object) }));
     debug("lambda", `responded ${result.status}`);
     // A HEAD request served by a GET route gets the headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
@@ -117,20 +127,17 @@ interface Resolved {
   input: unknown;
   context: RequestContext;
   headOnly?: boolean;
-  original?: Request;
-}
-
-function leadArguments(options: HandlerOptions, makeRequest: () => Request): unknown[] {
-  return [...(options.request ? [makeRequest()] : []), ...(options.response ? [response] : [])];
+  original?: OriginalRequest;
+  params?: Record<string, string>;
 }
 
 // The URL host is the one the function URL received; a CDN does not forward the viewer's.
-function requestFromEvent(event: FunctionUrlEvent, headers: Record<string, string>): Request {
+function requestFromEvent(event: FunctionUrlEvent, headers: Record<string, string>, params?: Record<string, string>) {
   if (event.cookies?.length) headers = { ...headers, cookie: event.cookies.join("; ") };
   const method = event.requestContext.http.method.toUpperCase();
   const query = event.rawQueryString ? `?${event.rawQueryString}` : "";
-  const body = !event.body || method === "GET" || method === "HEAD" ? undefined : event.isBase64Encoded ? Buffer.from(event.body, "base64") : event.body;
-  return new Request(`https://${headers.host ?? "function.invalid"}${event.rawPath}${query}`, { method, headers, body });
+  const raw = !event.body || method === "GET" || method === "HEAD" ? undefined : event.isBase64Encoded ? Buffer.from(event.body, "base64") : Buffer.from(event.body);
+  return vercelRequestFrom({ method, url: `https://${headers.host ?? "function.invalid"}${event.rawPath}${query}`, headers, raw }, params);
 }
 
 function resolveInput(
@@ -146,27 +153,33 @@ function resolveInput(
       throw new Error("Malformed invoke payload: expected { input, context }");
     }
     const context = trustContext && typeof payload.context === "object" && payload.context !== null ? payload.context : {};
-    const original = trustContext && isOriginalRequest(payload.request) ? deserializeRequest(payload.request) : undefined;
-    return { input: payload.input, context, original };
+    const original = trustContext && isOriginalRequest(payload.request) ? payload.request : undefined;
+    const params = original ? paramsFor(routes, original.method, new URL(original.url).pathname) : paramsFor(routes, event.requestContext.http.method.toUpperCase(), event.rawPath);
+    return { input: payload.input, context, original, params };
   }
 
   const method = event.requestContext.http.method.toUpperCase();
-  const find = (wanted: string) => {
-    for (const route of routes) {
-      if (route.method !== wanted) continue;
-      const params = matchPath(route.matcher, event.rawPath);
-      if (params) return params;
-    }
-    return undefined;
-  };
-  const params = find(method) ?? (method === "HEAD" ? find("GET") : undefined);
+  const params = paramsFor(routes, method, event.rawPath);
   if (!params) return undefined;
   const headOnly = method === "HEAD" && !routes.some((route) => route.method === "HEAD" && matchPath(route.matcher, event.rawPath));
   return {
     input: buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params),
     context: {},
     headOnly,
+    params,
   };
+}
+
+function paramsFor(routes: (RouteSpec & { matcher: ReturnType<typeof compilePath> })[], method: string, pathname: string): Record<string, string> | undefined {
+  const find = (wanted: string) => {
+    for (const route of routes) {
+      if (route.method !== wanted) continue;
+      const params = matchPath(route.matcher, pathname);
+      if (params) return params;
+    }
+    return undefined;
+  };
+  return find(method) ?? (method === "HEAD" ? find("GET") : undefined);
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): HttpResult {
@@ -174,7 +187,13 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
 }
 
 function toLambda(result: HttpResult): FunctionUrlResult {
-  return { statusCode: result.status, headers: result.headers, body: result.body };
+  return {
+    statusCode: result.status,
+    headers: result.headers,
+    body: result.body,
+    ...(result.base64 ? { isBase64Encoded: true } : {}),
+    ...(result.cookies ? { cookies: result.cookies } : {}),
+  };
 }
 
 function lowerCaseKeys(record: Record<string, string | undefined>): Record<string, string> {

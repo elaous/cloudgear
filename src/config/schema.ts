@@ -75,7 +75,7 @@ export interface FunctionSpec {
   schedule?: string[];
   include?: string[];
   pass_request?: boolean;
-  pass_response?: boolean;
+  response_arg?: "helper" | "writer";
 }
 
 const REPEATED = new Set([
@@ -170,7 +170,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...(f.schedule?.length ? { schedule: f.schedule.map(String) } : {}),
       ...(f.include?.length ? { include: f.include.map(String) } : {}),
       ...(f.pass_request === true ? { pass_request: true } : {}),
-      ...(f.pass_response === true ? { pass_response: true } : {}),
+      ...(f.response_arg === "helper" || f.response_arg === "writer" ? { response_arg: f.response_arg } : {}),
       ...optionsFrom(f),
     })),
   };

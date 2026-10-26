@@ -432,7 +432,7 @@ new BlobStore("aws", "://data", { options: { versioning: true } });
 new FunctionRouter("aws", { functionOptions: { tracing: "Active", "env.STAGE": "prod" } })
   .url("GET", "/report", report, { options: { ephemeral_storage_mb: 2048 } });
 new Cert("aws", dns, { options: { key_algorithm: "EC_prime256v1" } });
-new CDN("aws", dns, { cert, bucket, options: { price_class: "PriceClass_100" } });
+new CDN("aws", cert, { bucket, options: { price_class: "PriceClass_100" } });
 ```
 
 | Type | Keys |
@@ -646,5 +646,5 @@ Where each moving part lives, since several are called across packages:
 Early draft. Only the `aws` provider has inference rules and deploy drivers;
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
-validated against their TypeScript types at runtime. The CDN serves one
-domain per app and uploading the static site is not built yet.
+validated against their TypeScript types at runtime. An app has at most one
+CDN, and uploading the static site is not built yet.

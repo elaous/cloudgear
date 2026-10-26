@@ -70,7 +70,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};
       const taken = ["@aws.CloudFront", "@aws.ApiGateway"].some((type) => context.entry(stateKey({ type, name: spec.domain })));
-      // Fail before requesting anything if the endpoint could not take over the domain's record later.
+      // Fail early if the endpoint could not take the record later.
       if (spec.for_endpoint && !taken) {
         const record = await (await deps.dns(spec.dns_provider, spec.dns_zone)).get(spec.domain, "CNAME");
         if (record) {
@@ -91,6 +91,10 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     async update(entry, current) {
       // Only a previous run that stopped before the certificate was issued gets here with work to do.
       if (!current.outputs.arn) throw new Error("Certificate state has no ARN; destroy and apply again");
+      const wanted = (entry.spec as unknown as CertificateComparable).region || deps.region;
+      if (regionOfArn(current.outputs.arn) !== wanted) {
+        throw new Error(`Certificate ${entry.physical_name} cannot move from ${regionOfArn(current.outputs.arn)} to ${wanted}; destroy it and apply again`);
+      }
       const algorithm = (spec: Record<string, unknown>) => (spec.options as Record<string, string> | undefined)?.key_algorithm ?? "RSA_2048";
       if (algorithm(current.spec) !== algorithm(entry.spec)) {
         throw new Error(`Certificate ${entry.physical_name} cannot change key_algorithm; destroy it and apply again`);

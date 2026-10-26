@@ -19,7 +19,7 @@ import {
   UpdateIntegrationCommand,
   UpdateRouteCommand,
 } from "@aws-sdk/client-apigatewayv2";
-import { AddPermissionCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
+import { AddPermissionCommand, GetPolicyCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import type { DnsDriver } from "@cloudgear/dns";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
 import type { ApiComparable } from "../plan";
@@ -58,7 +58,7 @@ async function ignoreMissing(promise: Promise<unknown>): Promise<void> {
   }
 }
 
-// Functions the entry serves or served: its (possibly attempted) spec plus the last one that fully applied.
+// Functions in the current spec or the last fully applied one.
 function servedFunctions(spec: Record<string, unknown>): string[] {
   const names = (s: unknown) => ((s as Partial<ApiComparable> | undefined)?.routes ?? []).map((route) => route.function);
   return [...new Set([...names(spec), ...names(spec.previous)])];
@@ -81,20 +81,32 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
 
   async function allow(functionName: string, functionArn: string, spec: ApiComparable, apiId: string) {
     const [, , , region, account] = functionArn.split(":");
-    try {
-      await deps.lambda.send(
+    const sourceArn = `arn:aws:execute-api:${region}:${account}:${apiId}/*/*`;
+    const grant = () =>
+      deps.lambda.send(
         new AddPermissionCommand({
           FunctionName: functionName,
           StatementId: statementId(spec.domain),
           Action: "lambda:InvokeFunction",
           Principal: "apigateway.amazonaws.com",
-          SourceArn: `arn:aws:execute-api:${region}:${account}:${apiId}/*/*`,
+          SourceArn: sourceArn,
         }),
       );
+    try {
+      await grant();
     } catch (err) {
       const e = err as { name?: string; message?: string };
       if (!(e.name === "ResourceConflictException" && /statement id.*already exists/i.test(e.message ?? ""))) throw err;
+      if (await grantsSource(functionName, statementId(spec.domain), sourceArn)) return;
+      await revoke(functionName, spec.domain);
+      await grant();
     }
+  }
+
+  async function grantsSource(functionName: string, id: string, sourceArn: string): Promise<boolean> {
+    const { Policy } = await deps.lambda.send(new GetPolicyCommand({ FunctionName: functionName }));
+    const statements: { Sid?: string; Condition?: { ArnLike?: Record<string, string> } }[] = [].concat(JSON.parse(Policy).Statement ?? []);
+    return statements.some((s) => s.Sid === id && s.Condition?.ArnLike?.["AWS:SourceArn"] === sourceArn);
   }
 
   async function revoke(functionName: string, domain: string) {
@@ -191,21 +203,24 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
     let domain: any;
     try {
       domain = await deps.apigateway.send(new GetDomainNameCommand({ DomainName: spec.domain }));
-      if (domain.DomainNameConfigurations?.[0]?.CertificateArn !== certificate.outputs.arn) {
-        domain = await deps.apigateway.send(new UpdateDomainNameCommand({ DomainName: spec.domain, DomainNameConfigurations: configuration as never }));
-      }
     } catch (err) {
       if (!named(err, "NotFoundException")) throw err;
+    }
+    const mappings = domain
+      ? await all<{ ApiMappingId: string; ApiId: string; ApiMappingKey?: string }>((token) =>
+          deps.apigateway.send(new GetApiMappingsCommand({ DomainName: spec.domain, NextToken: token })).then((r: any) => ({ Items: r.Items, NextToken: r.NextToken })),
+        )
+      : [];
+    const root = mappings.find((m) => !m.ApiMappingKey);
+    if (root && root.ApiId !== apiId) throw new Error(`${spec.domain} already maps to another API (${root.ApiId}); remove that mapping first`);
+    if (!domain) {
       domain = await deps.apigateway.send(new CreateDomainNameCommand({ DomainName: spec.domain, DomainNameConfigurations: configuration as never }));
+      outputs.domain_created = "true";
+    } else if (domain.DomainNameConfigurations?.[0]?.CertificateArn !== certificate.outputs.arn) {
+      domain = await deps.apigateway.send(new UpdateDomainNameCommand({ DomainName: spec.domain, DomainNameConfigurations: configuration as never }));
     }
     outputs.domain_name = domain.DomainNameConfigurations[0].ApiGatewayDomainName;
     outputs.url = `https://${spec.domain}`;
-
-    const mappings = await all<{ ApiMappingId: string; ApiId: string; ApiMappingKey?: string }>((token) =>
-      deps.apigateway.send(new GetApiMappingsCommand({ DomainName: spec.domain, NextToken: token })).then((r: any) => ({ Items: r.Items, NextToken: r.NextToken })),
-    );
-    const root = mappings.find((m) => !m.ApiMappingKey);
-    if (root && root.ApiId !== apiId) throw new Error(`${spec.domain} already maps to another API (${root.ApiId}); remove that mapping first`);
     if (!root) await deps.apigateway.send(new CreateApiMappingCommand({ DomainName: spec.domain, ApiId: apiId, Stage: STAGE }));
 
     deps.log(`pointing ${spec.domain} at ${outputs.domain_name}`);
@@ -249,7 +264,7 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
           await ignoreMissing(deps.apigateway.send(new DeleteApiMappingCommand({ DomainName: domain, ApiMappingId: mapping.ApiMappingId })));
         }
       }
-      if (current.outputs.domain_name) await ignoreMissing(deps.apigateway.send(new DeleteDomainNameCommand({ DomainName: domain })));
+      if (current.outputs.domain_created === "true") await ignoreMissing(deps.apigateway.send(new DeleteDomainNameCommand({ DomainName: domain })));
       if (current.outputs.api_id) await ignoreMissing(deps.apigateway.send(new DeleteApiCommand({ ApiId: current.outputs.api_id })));
       for (const fn of servedFunctions(current.spec)) await revoke(fn, domain);
     },

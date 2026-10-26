@@ -13,7 +13,7 @@ export { createCdnDriver, registerCdnDriver } from "./cdn-driver";
 export type { CdnDriver, CdnDriverFactory, CdnInfo, CdnProvider, CdnState } from "./cdn-driver";
 
 export interface CertOptions {
-  // Region of the certificate; a CDN's is us-east-1, a router's the function region. Literal only.
+  // us-east-1 for a CDN, the function region for a router. Literal only.
   region?: string;
   // Provider settings with no dedicated option; literals only.
   options?: ProviderOptions;

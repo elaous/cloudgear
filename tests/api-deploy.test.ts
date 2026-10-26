@@ -105,7 +105,7 @@ describe("planning the API domain", () => {
     const regionOf = (config: CloudgearConfig) => plan(config, emptyState()).find((a) => a.key === CERT_KEY)!.desired!.spec.region;
     expect(regionOf(apiConfig())).toBe("");
     expect(regionOf(apiConfig({ region: "eu-central-1" }))).toBe("eu-central-1");
-    expect(regionOf(apiConfig({ certificate: [{ domain: DOMAIN, dns: dnsSpec }] }))).toBe("us-east-1");
+    expect(regionOf(apiConfig({ api: undefined, certificate: [{ domain: DOMAIN, dns: dnsSpec }] }))).toBe("us-east-1");
   });
 
   test("it needs its certificate, and only routed functions are behind it", () => {
@@ -277,12 +277,106 @@ describe("applying the API domain", () => {
     expect(aws.names()).not.toContain("CreateApiCommand");
   });
 
-  test("a domain that already maps to another API is not taken over", async () => {
+  test("a domain that exists and maps to another API is left untouched", async () => {
     const { aws, api } = regionalAws();
-    api.mappings.push({ ApiMappingId: "m-old", ApiId: "someone-else" });
+    api.CreateDomainNameCommand({ DomainNameConfigurations: [{ CertificateArn: "arn:aws:acm:eu-west-1:1:certificate/someone-elses", EndpointType: "REGIONAL" }] });
+    api.mappings.push({ ApiMappingId: "m-other", ApiId: "someone-else" });
     await expect(applyAll(apiConfig(), emptyState(), aws)).rejects.toThrow(/already maps to another API \(someone-else\)/);
+    expect(aws.names()).not.toContain("UpdateDomainNameCommand");
     expect(aws.names()).not.toContain("CreateApiMappingCommand");
     expect(await aws.dns!.get(DOMAIN, "CNAME")).toBeNull();
+  });
+
+  test("a domain cloudgear did not create is not deleted on destroy, only its own mapping", async () => {
+    const { aws, api } = regionalAws();
+    api.CreateDomainNameCommand({ DomainNameConfigurations: [{ CertificateArn: "arn:aws:acm:eu-west-1:1:certificate/api", EndpointType: "REGIONAL" }] });
+    const state = emptyState();
+    await applyAll(apiConfig(), state, aws);
+    expect(state.entries[API_KEY]!.outputs.domain_created).toBeUndefined();
+    const gone = fakeAws({ ...gatewayOverrides(api) }, aws.dns);
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, gone);
+    expect(gone.names()).toContain("DeleteApiMappingCommand");
+    expect(gone.names()).not.toContain("DeleteDomainNameCommand");
+  });
+
+  test("a domain cloudgear created is deleted on destroy", async () => {
+    const state = emptyState();
+    const { aws } = regionalAws();
+    await applyAll(apiConfig(), state, aws);
+    expect(state.entries[API_KEY]!.outputs.domain_created).toBe("true");
+  });
+
+  test("a stale permission for an old API is replaced, a current one is kept", async () => {
+    const conflict = () => {
+      throw error("ResourceConflictException", "The statement id (cloudgear-api-x) provided already exists");
+    };
+    const policyFor = (sourceArn: string) => () => ({
+      Policy: JSON.stringify({ Statement: [{ Sid: statementIdOf(), Condition: { ArnLike: { "AWS:SourceArn": sourceArn } } }] }),
+    });
+    const config = apiConfig({ resource: [], function: [fn({ permission: [], env: [] })] });
+    const grants = (aws: ReturnType<typeof regionalAws>["aws"]) => aws.of("AddPermissionCommand").filter((i) => i.Principal === "apigateway.amazonaws.com");
+    const removals = (aws: ReturnType<typeof regionalAws>["aws"]) => aws.of("RemovePermissionCommand").filter((i) => /cloudgear-api/.test(i.StatementId));
+
+    let first = true;
+    const stale = regionalAws({
+      AddPermissionCommand: (input) => {
+        if (input.Principal === "apigateway.amazonaws.com" && first) {
+          first = false;
+          conflict();
+        }
+      },
+      GetPolicyCommand: policyFor("arn:aws:execute-api:eu-west-1:1:old-api/*/*"),
+    });
+    await applyAll(config, emptyState(), stale.aws);
+    expect(removals(stale.aws)).toHaveLength(1);
+    expect(grants(stale.aws)).toHaveLength(2);
+
+    const current = regionalAws({
+      AddPermissionCommand: (input) => {
+        if (input.Principal === "apigateway.amazonaws.com") conflict();
+      },
+      GetPolicyCommand: policyFor("arn:aws:execute-api:eu-west-1:1:api1/*/*"),
+    });
+    await applyAll(config, emptyState(), current.aws);
+    expect(removals(current.aws)).toEqual([]);
+    expect(grants(current.aws)).toHaveLength(1);
+  });
+
+  test("routes and integrations are read across pages", async () => {
+    const pages: (string | undefined)[] = [];
+    const { aws } = regionalAws({
+      GetRoutesCommand: (input) => {
+        pages.push(input.NextToken);
+        return input.NextToken ? { Items: [{ RouteId: "r-late", RouteKey: "GET /late", Target: "integrations/x" }] } : { Items: [], NextToken: "next" };
+      },
+    });
+    await applyAll(apiConfig({ resource: [], function: [fn({ permission: [], env: [] })] }), emptyState(), aws);
+    expect(pages).toEqual([undefined, "next"]);
+    expect(aws.of("DeleteRouteCommand")).toEqual([{ ApiId: "api1", RouteId: "r-late" }]);
+  });
+
+  test("a changed certificate region is refused with a way out", async () => {
+    const state = emptyState();
+    const { aws } = regionalAws();
+    await applyAll(apiConfig(), state, aws);
+    const moved = apiConfig({ region: "eu-central-1", certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "api" }] });
+    await expect(applyAll(moved, state, fakeAws({}, aws.dns))).rejects.toThrow(/cannot move from eu-west-1 to eu-central-1; destroy it and apply again/);
+  });
+
+  test("a certificate whose endpoint already exists skips the record precheck", async () => {
+    const state = emptyState();
+    const { aws } = regionalAws();
+    await applyAll(apiConfig(), state, aws);
+    delete state.entries[CERT_KEY];
+    const dns = new MemoryDnsDriver();
+    await dns.upsert({ name: DOMAIN, type: "CNAME", values: [REGIONAL], ttl: 300 });
+    const again = regionalAws({}, dns).aws;
+    await applyAll(apiConfig(), state, again);
+    expect(again.names()).toContain("RequestCertificateCommand");
+  });
+
+  test("a hand-written config whose certificate has the wrong usage is refused", () => {
+    expect(() => plan(apiConfig({ certificate: [{ domain: DOMAIN, dns: dnsSpec }] }), emptyState())).toThrow(/must have usage "api"/);
   });
 
   test("an existing domain name is reused, and a changed certificate updates it", async () => {
@@ -432,6 +526,10 @@ describe("certificate regions", () => {
     expect(regions.every((r) => r === "eu-west-1")).toBe(true);
   });
 });
+
+function statementIdOf(): string {
+  return `cloudgear-api-${new Bun.CryptoHasher("sha256").update(DOMAIN).digest("hex").slice(0, 12)}`;
+}
 
 function gatewayOverrides(api: ReturnType<typeof gateway>) {
   const { mappings: _m, routes: _r, integrations: _i, ...commands } = api;

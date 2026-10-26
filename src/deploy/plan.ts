@@ -24,7 +24,7 @@ export const CLOUDFRONT_REGION = "us-east-1";
 
 export interface CertificateComparable {
   domain: string;
-  // The certificate is for an endpoint that will own the domain's record, so that record must be free.
+  // An endpoint will own the domain's record, so it must be free.
   for_endpoint: boolean;
   // Empty means the region the app is deployed to.
   region: string;
@@ -174,8 +174,10 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
   }
 
   const certificates = new Map(config.certificate.map((c) => [c.domain, c]));
-  const certificateKeyOf = (domain: string, what: string) => {
-    if (!certificates.has(domain)) throw new Error(`cloudgear config: ${what} needs a certificate for "${domain}"`);
+  const certificateKeyOf = (domain: string, what: "cdn" | "api") => {
+    const certificate = certificates.get(domain);
+    if (!certificate) throw new Error(`cloudgear config: ${what} needs a certificate for "${domain}"`);
+    if (certificate.usage !== what) throw new Error(`cloudgear config: the certificate for "${domain}" must have usage "${what}"`);
     return stateKey({ type: providerProfile(config.provider).cdn.certificate, name: domain });
   };
 

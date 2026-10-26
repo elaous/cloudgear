@@ -169,6 +169,7 @@ describe("analyzeApp", () => {
       ["edge/same-domain-twice.ts", /a certificate for "api.example.com" is already declared/],
       ["edge/cdn-cert-region.ts", /a CDN needs its certificate in us-east-1, but the Cert says eu-west-1/],
       ["edge/missing-bucket.ts", /the CDN's bucket must be a BlobStore variable/],
+      ["edge/spread-cert.ts", /spread in FunctionRouter options cannot be analyzed/],
     ])("rejects %s", (file, error) => {
       expect(() => analyzeApp(fixture(file))).toThrow(error);
     });

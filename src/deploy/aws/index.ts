@@ -50,7 +50,7 @@ export interface AwsDriverOptions {
   readBundle: (fn: FunctionSpec) => Uint8Array;
   clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient };
   // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
-  // the declaration from the config still cleans up through the right zone). Needed only for certificates and CDNs.
+  // the declaration from the config still cleans up through the right zone). Needed only for certificates, CDNs and the API domain.
   dns?: (provider: string, zone: string) => DnsDriver | Promise<DnsDriver>;
   log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -75,13 +75,13 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const lambda = options.clients?.lambda ?? new LambdaClient({ region: options.region });
   const iam = options.clients?.iam ?? new IAMClient({ region: options.region });
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
-  // CloudFront only accepts certificates from us-east-1, and its API is global.
   const acmClients = new Map<string, SendClient>();
   const acmFor = (region: string): SendClient => {
     if (options.clients?.acm) return options.clients.acm;
     if (!acmClients.has(region)) acmClients.set(region, new ACMClient({ region }));
     return acmClients.get(region)!;
   };
+  // CloudFront's API is global, reached through us-east-1.
   const cloudfront = options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" });
   const apigateway = options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region });
   const events = options.clients?.events ?? new EventBridgeClient({ region: options.region });
@@ -217,7 +217,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   return {
     "@aws.Schedule": scheduleDriver({ events, lambda, log }),
     "@aws.Certificate": certificateDriver({ acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
-    "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3: s3For, dns: requireDns, region: options.region, sleep, log }),
+    "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
     "@aws.ApiGateway": apiGatewayDriver({ apigateway, lambda, dns: requireDns, region: options.region, log }),
     "@aws.S3": {
       async create(entry) {

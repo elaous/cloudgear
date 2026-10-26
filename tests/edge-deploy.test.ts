@@ -319,6 +319,33 @@ describe("applying the edge", () => {
   });
 });
 
+describe("a CDN deployed when it still routed to functions", () => {
+  const legacy = async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    state.entries[CDN_KEY]!.outputs.oac_lambda = "oac-lambda";
+    state.entries[CDN_KEY]!.spec = { ...state.entries[CDN_KEY]!.spec, behaviors: [{ path_pattern: "/foo/*", function: "app-foo", methods: ["GET"] }] };
+    return state;
+  };
+  const statements = (aws: Awaited<ReturnType<typeof applyAll>>) => aws.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId));
+
+  test("the next update removes its Lambda origin access control and function permissions", async () => {
+    const state = await legacy();
+    const aws = await applyAll(cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } }), state);
+    expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-lambda"]);
+    expect(statements(aws).map((i) => [i.FunctionName, i.StatementId.replace(/^cloudgear-cdn-[0-9a-f]+-/, "")])).toEqual([["app-foo", "url"], ["app-foo", "invoke"]]);
+    expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBe("");
+  });
+
+  test("destroying it removes both origin access controls and the permissions", async () => {
+    const state = await legacy();
+    const aws = fakeAws({});
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
+    expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-s3", "oac-lambda"]);
+    expect(statements(aws)).toHaveLength(2);
+  });
+});
+
 describe("records and cleanup the CDN does not own", () => {
   const foreign = { name: DOMAIN, type: "CNAME" as const, values: ["old-site.example.net."], ttl: 300 };
 

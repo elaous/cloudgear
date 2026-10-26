@@ -12,6 +12,7 @@ import {
   ListOriginAccessControlsCommand,
   UpdateDistributionCommand,
 } from "@aws-sdk/client-cloudfront";
+import { RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyCommand } from "@aws-sdk/client-s3";
 import type { DnsDriver } from "@cloudgear/dns";
 import { fitName } from "../../names";
@@ -24,6 +25,7 @@ import type { SendClient } from "./index";
 export interface CloudFrontDeps {
   cloudfront: SendClient;
   s3: (region?: string) => SendClient;
+  lambda: SendClient;
   dns: (provider: string, zone: string) => Promise<DnsDriver>;
   region: string;
   sleep: (ms: number) => Promise<void>;
@@ -176,6 +178,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       const outputs = { ...current.outputs };
       try {
         await converge(entry, context, outputs);
+        await dropFunctionAccess(current, outputs);
         return outputs;
       } catch (err) {
         throw new PartialApplyError(err, outputs);
@@ -192,13 +195,35 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         if (record && sameTarget(record.values[0], current.outputs.domain_name)) await dns.remove(domain, "CNAME");
       }
       if (current.outputs.id) await removeDistribution(current.outputs.id);
-      const oac = current.outputs.oac_s3;
-      if (oac) {
-        await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: oac, IfMatch: await etagOfOac(oac) }), "NoSuchOriginAccessControl");
+      for (const oac of [current.outputs.oac_s3, current.outputs.oac_lambda]) {
+        if (oac) {
+          await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: oac, IfMatch: await etagOfOac(oac) }), "NoSuchOriginAccessControl");
+        }
       }
+      for (const fn of legacyFunctions(current.spec)) await revokeLegacy(fn, domain);
       if (spec.bucket) await removeBucketStatements(spec as CdnComparable);
     },
   };
+
+  // A distribution deployed before CDNs stopped routing to functions still has that access.
+  async function dropFunctionAccess(current: { spec: Record<string, unknown>; outputs: Record<string, string> }, outputs: Record<string, string>) {
+    const oac = current.outputs.oac_lambda;
+    if (oac) {
+      await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: oac, IfMatch: await etagOfOac(oac) }), "NoSuchOriginAccessControl");
+      outputs.oac_lambda = "";
+    }
+    for (const fn of legacyFunctions(current.spec)) await revokeLegacy(fn, String((current.spec as { domain?: string }).domain ?? ""));
+  }
+
+  async function revokeLegacy(functionName: string, domain: string) {
+    for (const kind of ["url", "invoke"]) {
+      try {
+        await deps.lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: `cloudgear-cdn-${tag(domain)}-${kind}` }));
+      } catch (err) {
+        if ((err as { name?: string }).name !== "ResourceNotFoundException") throw err;
+      }
+    }
+  }
 
   async function removeDistribution(id: string) {
     let etag: string;
@@ -234,6 +259,11 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       throw err;
     }
   }
+}
+
+function legacyFunctions(spec: Record<string, unknown>): string[] {
+  const names = (s: unknown) => ((s as { behaviors?: { function: string }[] } | undefined)?.behaviors ?? []).map((b) => b.function);
+  return [...new Set([...names(spec), ...names(spec.previous)])];
 }
 
 async function ignoreMissing(client: SendClient, command: unknown, errorName: string) {

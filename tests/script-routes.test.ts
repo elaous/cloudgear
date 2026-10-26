@@ -52,11 +52,11 @@ describe("generating for routes handled by a script file", () => {
     try {
       const { config } = await generate({ entry: fixture("scripts/main.ts"), configPath: path.join(dir, "cloudgear.prototxt"), buildDir: path.join(dir, "build") });
       expect(config.function.map((f) => [f.name, f.source.export, f.route.map((r) => `${r.method} ${r.path} ${r.name}`)])).toEqual([
-        ["hello", "default", ["GET /hello GET /hello"]],
-        ["save", "default", ["POST /items/{id} saveItem"]],
+        ["handlers-hello", "default", ["GET /hello GET /hello"]],
+        ["handlers-save", "default", ["POST /items/{id} saveItem"]],
       ]);
       expect(config.function[1]!.permission).toMatchObject([{ resource: "script-data", action: ["s3:PutObject"] }]);
-      for (const name of ["hello", "save"]) {
+      for (const name of ["handlers-hello", "handlers-save"]) {
         expect(fs.readFileSync(path.join(dir, "build", name, "entry.ts"), "utf8")).toContain("import { default as fn }");
         expect(fs.existsSync(path.join(dir, "build", name, "index.mjs"))).toBe(true);
       }

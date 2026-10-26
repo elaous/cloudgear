@@ -49,6 +49,8 @@ export interface SendClient {
 export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
+  // Files packaged next to index.mjs, by path.
+  readIncluded?: (fn: FunctionSpec) => { name: string; data: Uint8Array }[];
   clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient };
   // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
   // the declaration from the config still cleans up through the right zone). Needed only for certificates, CDNs and the API domain.
@@ -282,7 +284,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           await putPermissions(roleName, spec);
           undo.push(() => iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })));
 
-          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }]);
+          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
           let created: any;
           // A new IAM role takes a few seconds before Lambda can assume it.
           for (let attempt = 0; ; attempt++) {
@@ -331,7 +333,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const tracingChanged = traced(spec) !== ((current.spec.options as Record<string, string> | undefined)?.tracing === "Active");
         if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec);
         if (changes.includes("code")) {
-          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }]);
+          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
           await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code }));
           await waitForFunction(entry.physical_name);
         }

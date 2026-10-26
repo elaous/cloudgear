@@ -14,12 +14,30 @@ export interface BundleRequest {
   trustContext: boolean;
   // Token verification inside the function (see jwtAuth); `anonymous` functions skip it.
   jwt?: { settings: Record<string, unknown>; anonymous: boolean };
+  // Files copied next to the bundle, at their paths from the project root.
+  include?: { rel: string; abs: string }[];
+  passRequest?: boolean;
+  passResponse?: boolean;
   outDir: string;
 }
 
 export interface BundleResult {
   file: string;
+  // Covers the bundle and the included files.
   sha256: string;
+}
+
+export const INCLUDED_DIR = "files";
+
+// Hash of the bundle file and of each included file's path and content, in path order.
+export function hashBundle(file: string, filesDir: string, rels: string[]): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(fs.readFileSync(file));
+  for (const rel of [...rels].sort()) {
+    hasher.update(`\0${rel}\0`);
+    hasher.update(fs.readFileSync(path.join(filesDir, rel)));
+  }
+  return hasher.digest("hex");
 }
 
 const ADAPTERS: Record<string, string> = {
@@ -42,9 +60,9 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
   // Resolved from the app so the build dir may live outside its node_modules tree.
   const adapterPath = Bun.resolveSync(adapter, path.dirname(source));
   const authPath = req.jwt ? Bun.resolveSync("@cloudgear/functions/auth", path.dirname(source)) : "";
-  const handlerOptions = req.jwt
-    ? `{ trustContext: ${req.trustContext}, authenticate: jwtAuth(${JSON.stringify(req.jwt.settings)}), anonymous: ${req.jwt.anonymous} }`
-    : `{ trustContext: ${req.trustContext} }`;
+  const handlerOptions = `{ trustContext: ${req.trustContext}${
+    req.jwt ? `, authenticate: jwtAuth(${JSON.stringify(req.jwt.settings)}), anonymous: ${req.jwt.anonymous}` : ""
+  }${req.passRequest ? ", request: true" : ""}${req.passResponse ? ", response: true" : ""} }`;
   fs.writeFileSync(
     entry,
     [
@@ -74,7 +92,11 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
   }
 
   const file = path.join(dir, "index.mjs");
-  const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(fs.readFileSync(file));
-  return { file, sha256: hasher.digest("hex") };
+  const filesDir = path.join(dir, INCLUDED_DIR);
+  for (const included of req.include ?? []) {
+    const target = path.join(filesDir, included.rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(included.abs, target);
+  }
+  return { file, sha256: hashBundle(file, filesDir, (req.include ?? []).map((f) => f.rel)) };
 }

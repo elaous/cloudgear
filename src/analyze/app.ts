@@ -52,6 +52,11 @@ export interface AnalyzedFunction {
   options?: Record<string, string>;
   // Five-field UTC cron expressions that also trigger the function.
   schedules: string[];
+  // Files copied into the function's package, by path from the project root.
+  include: { rel: string; abs: string }[];
+  // The function receives the original request and the response helper before its input.
+  passRequest: boolean;
+  passResponse: boolean;
 }
 
 // Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
@@ -208,6 +213,11 @@ export function analyzeApp(entryPath: string): AppModel {
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
+  const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
+  const isResponseHelper = (prop: Node) => {
+    const decl = valueDeclaration(prop);
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "response" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
+  };
   const routeNames = new Map<string, string>();
   const publicRoutes = new Map<string, boolean>();
 
@@ -235,7 +245,7 @@ export function analyzeApp(entryPath: string): AppModel {
     let decl: Node | undefined;
     if (scriptText !== undefined) {
       const file = scriptFile && project.getSourceFile(scriptFile);
-      if (!file) throw new Error(`${where(call)}: script "${scriptText}" not found; the path is relative to this file`);
+      if (!file) throw new Error(`${where(call)}: script "${scriptText}" not found; "./x" is relative to this file, any other path to the project root`);
       decl = file.getExportedDeclarations().get("default")?.[0];
     } else {
       decl = resolveSymbol(fnArg.getSymbol())?.getDeclarations()[0];
@@ -248,12 +258,22 @@ export function analyzeApp(entryPath: string): AppModel {
           : `${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`,
       );
     }
-    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined);
-    checkPathParams(routePath, fnNode, where(call));
+    const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), isResponseHelper);
+    const leading = Number(routeOptions.request) + Number(routeOptions.response);
+    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), leading);
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
-    const routeOptions = readRouteOptions(call.getArguments()[3], where(call));
+    const extras = JSON.stringify([routeOptions.include.map((f) => f.rel), routeOptions.request, routeOptions.response]);
+    const earlierExtras = extrasOf.get(fn);
+    if (earlierExtras && earlierExtras.key !== extras) {
+      throw new Error(`${where(call)}: the routes of "${fn.name}" give it different include, request or response settings (${earlierExtras.at}); set them identically`);
+    }
+    extrasOf.set(fn, earlierExtras ?? { key: extras, at: where(call) });
+    fn.include = routeOptions.include;
+    fn.passRequest = routeOptions.request;
+    fn.passResponse = routeOptions.response;
+    checkPathParams(routePath, fnNode, where(call), leading);
     publicRoutes.set(`${method} ${routePath}`, routeOptions.public);
     const routeName = routeOptions.name ?? ((scriptFile ? "" : fn.declaredName) || `${method} ${routePath}`);
     const clashing = routeNames.get(routeName);
@@ -738,7 +758,7 @@ export function analyzeApp(entryPath: string): AppModel {
     return `the receiver must be an exported instance variable itself (one of ${names.join(", ")}), not an alias or property`;
   }
 
-  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node): AnalyzedFunction {
+  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node, scriptName?: string, leadingParams = 0): AnalyzedFunction {
     const existing = functions.get(decl);
     if (existing) {
       const again = receiver ? exportTargetOf(decl, instanceExport, receiver) : undefined;
@@ -754,12 +774,12 @@ export function analyzeApp(entryPath: string): AppModel {
         `${where(decl)}: "${label}" must be exported so it can be bundled on its own (a named function, a method of an exported object, a static method of an exported class, or a method of an exported instance of a class)${problem ? `: ${problem}` : ""}`,
       );
     }
-    const param = fnNode.getParameters()[0];
+    const param = fnNode.getParameters()[leadingParams];
     const fn: AnalyzedFunction = {
       name: target.member
         ? `${target.exportName}-${target.member}`
         : target.exportName === "default"
-          ? path.parse(decl.getSourceFile().getFilePath()).name
+          ? (scriptName ?? path.parse(decl.getSourceFile().getFilePath()).name)
           : target.exportName,
       declaredName: declaredNameOf(decl),
       file: target.file ?? relative(decl.getSourceFile().getFilePath()),
@@ -768,6 +788,9 @@ export function analyzeApp(entryPath: string): AppModel {
       inputType: param?.getTypeNode()?.getText(),
       routes: [],
       schedules: [],
+      include: [],
+      passRequest: false,
+      passResponse: false,
       uses: new Map(),
     };
     const tallies = new Map<string, Tally>();
@@ -941,8 +964,16 @@ function hasOption(options: Node | undefined, name: string): boolean {
   );
 }
 
-function readRouteOptions(options: Node | undefined, at: string): { name?: string; public: boolean } {
-  const result: { name?: string; public: boolean } = { public: false };
+interface RouteSettings {
+  name?: string;
+  public: boolean;
+  include: { rel: string; abs: string }[];
+  request: boolean;
+  response: boolean;
+}
+
+function readRouteOptions(options: Node | undefined, at: string, callerFile: string, isResponseHelper: (prop: Node) => boolean): RouteSettings {
+  const result: RouteSettings = { public: false, include: [], request: false, response: false };
   if (!options) return result;
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at}: route options must be an object literal`);
   for (const prop of options.getProperties()) {
@@ -957,6 +988,22 @@ function readRouteOptions(options: Node | undefined, at: string): { name?: strin
       const value = Node.isPropertyAssignment(prop) ? prop.getInitializer()?.getText() : undefined;
       if (value !== "true" && value !== "false") throw new Error(`${at}: route public must be the literal true or false`);
       result.public = value === "true";
+    } else if (key === "request") {
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer()?.getText() : undefined;
+      if (value !== "true" && value !== "false") throw new Error(`${at}: route request must be the literal true or false`);
+      result.request = value === "true";
+    } else if (key === "response") {
+      if (!isResponseHelper(prop)) throw new Error(`${at}: route response must be the \`response\` helper imported from @cloudgear/functions`);
+      result.response = true;
+    } else if (key === "include") {
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+      const items = value && Node.isArrayLiteralExpression(value) ? value.getElements() : value ? [value] : [];
+      if (!items.length) throw new Error(`${at}: route include must be a string literal or an array of them`);
+      const byRel = new Map<string, { rel: string; abs: string }>();
+      for (const item of items) {
+        for (const file of expandInclude(stringLiteral(item, `${at}: route include`), callerFile, at)) byRel.set(file.rel, file);
+      }
+      result.include = [...byRel.values()].sort((a, b) => a.rel.localeCompare(b.rel));
     }
   }
   return result;
@@ -1143,13 +1190,42 @@ function exportTargetOf(decl: Node, instanceExport: InstanceExport, receiver?: N
   return { exportName, member };
 }
 
-// `.url(method, path, "./script.ts")`: the absolute path of the script, whether or not it exists.
+// Directory of the nearest package.json at or above the file; where "/x" and "x" paths start.
+function projectRootOf(file: string): string {
+  const pkg = findUp(path.dirname(file), "package.json");
+  return pkg ? path.dirname(pkg) : path.dirname(file);
+}
+
+// "./x" and "../x" are relative to the calling file; "/x" and "x" to the project root.
+function resolveRoutePath(spec: string, callerFile: string): string {
+  if (spec.startsWith("./") || spec.startsWith("../")) return path.resolve(path.dirname(callerFile), spec);
+  return path.join(projectRootOf(callerFile), spec.replace(/^\/+/, ""));
+}
+
+// `.url(method, path, "/api/script.ts")`: the absolute path of the script, whether or not it exists.
 function scriptOf(call: CallExpression): string | undefined {
   const callee = call.getExpression();
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "url") return undefined;
   const script = call.getArguments()[2];
   if (!script || !(Node.isStringLiteral(script) || Node.isNoSubstitutionTemplateLiteral(script))) return undefined;
-  return path.resolve(path.dirname(call.getSourceFile().getFilePath()), script.getLiteralText());
+  return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
+}
+
+// A script's function is named after its path from the project root: "api/v/[slug].ts" is "api-v-slug".
+function scriptNameOf(scriptFile: string, callerFile: string): string {
+  const rel = path.relative(projectRootOf(callerFile), scriptFile).replace(/\.[^./\\]+$/, "");
+  return rel.replace(/[^A-Za-z0-9_]+/g, "-").replace(/^-+|-+$/g, "") || "script";
+}
+
+function expandInclude(spec: string, callerFile: string, at: string): { rel: string; abs: string }[] {
+  const root = projectRootOf(callerFile);
+  const abs = resolveRoutePath(spec, callerFile);
+  const rel = path.relative(root, abs);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`${at}: include "${spec}" is outside the project`);
+  if (!fs.existsSync(abs)) throw new Error(`${at}: include "${spec}" not found (paths start at ${relative(root)})`);
+  const files = (dir: string): string[] =>
+    fs.statSync(dir).isDirectory() ? fs.readdirSync(dir).flatMap((entry) => files(path.join(dir, entry))) : [dir];
+  return files(abs).map((file) => ({ rel: path.relative(root, file).split(path.sep).join("/"), abs: file }));
 }
 
 function functionNode(decl: Node) {
@@ -1168,9 +1244,9 @@ function exportNameOf(decl: Node): string | undefined {
   return undefined;
 }
 
-function checkPathParams(routePath: string, fnNode: ReturnType<typeof functionNode> & {}, at: string) {
+function checkPathParams(routePath: string, fnNode: ReturnType<typeof functionNode> & {}, at: string, leadingParams = 0) {
   const params = [...routePath.matchAll(/\{([A-Za-z_$][\w$]*)\}/g)].map((m) => m[1]!);
-  const param = fnNode.getParameters()[0];
+  const param = fnNode.getParameters()[leadingParams];
   if (!params.length || !param) return;
   const type = param.getType();
   if (type.isAny() || type.isUnknown()) return;

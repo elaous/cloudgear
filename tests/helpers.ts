@@ -96,6 +96,7 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
   const drivers = awsDrivers({
     region: "eu-west-1",
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
+    readIncluded: (spec) => (spec.include ?? []).map((name) => ({ name, data: new TextEncoder().encode(`content of ${name}`) })),
     clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client },
     dns: dns ? (provider, zone) => (onDns?.(provider, zone), dns) : undefined,
     sleep: async () => void sleeps.push(0),

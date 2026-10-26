@@ -11,6 +11,7 @@ import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
+import { INCLUDED_DIR, hashBundle } from "./build/bundle";
 import { generate } from "./generate";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -233,13 +234,15 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
     log: (message) => console.log(`cloudgear: ${message}`),
     readBundle: (fn) => {
       const file = path.resolve(configDir, fn.bundle.path);
-      const data = fs.readFileSync(file);
-      const hasher = new Bun.CryptoHasher("sha256");
-      hasher.update(data);
-      if (hasher.digest("hex") !== fn.bundle.sha256) {
+      const filesDir = path.join(path.dirname(file), INCLUDED_DIR);
+      if (hashBundle(file, filesDir, fn.include ?? []) !== fn.bundle.sha256) {
         throw new Error(`${fn.bundle.path} does not match the config's sha256; re-run \`cloudgear generate\``);
       }
-      return new Uint8Array(data);
+      return new Uint8Array(fs.readFileSync(file));
+    },
+    readIncluded: (fn) => {
+      const filesDir = path.join(path.dirname(path.resolve(configDir, fn.bundle.path)), INCLUDED_DIR);
+      return (fn.include ?? []).map((rel) => ({ name: rel, data: new Uint8Array(fs.readFileSync(path.join(filesDir, rel))) }));
     },
   });
 }

@@ -11,8 +11,11 @@ import {
   invoke,
   matchPath,
   parseBody,
+  response,
   routeKey,
+  serializeRequest,
   type Handler,
+  type OriginalRequest,
   type RequestContext,
   type Method,
   type PathParams,
@@ -34,6 +37,12 @@ export interface RouteOptions {
   public?: boolean;
   // Provider settings of the route's function; literals only.
   options?: ProviderOptions;
+  // Files or directories, from the project root, packaged with the function; literals only.
+  include?: string | string[];
+  // Pass the original request to the function as its first argument.
+  request?: boolean;
+  // Pass the `response` helper after the request; give it the `response` import.
+  response?: typeof response;
   // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
   schedule?: CronSchedule | CronSchedule[];
 }
@@ -88,7 +97,9 @@ interface CompiledRoute {
   name: string;
   public: boolean;
   matcher: ReturnType<typeof compilePath>;
-  fn?: Handler;
+  fn?: (...args: any[]) => unknown;
+  request: boolean;
+  response: boolean;
   // Absolute path of the module whose default export handles the route.
   script?: string;
 }
@@ -121,13 +132,20 @@ export class FunctionRouter {
 
   // `script` is a path, relative to the file calling `url`, of a module whose default export handles the route.
   url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
+  // With `request` or `response` the function takes them before its input.
+  url<P extends string>(
+    method: Method | Lowercase<Method>,
+    path: P,
+    fn: (...args: any[]) => unknown,
+    options: RouteOptions & ({ request: true } | { response: typeof response }),
+  ): this;
   url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
     method: Method | Lowercase<Method>,
     path: P,
     fn: Handler<I, O>,
     options?: RouteOptions,
   ): this;
-  url(method: Method | Lowercase<Method>, path: string, handler: Handler | string, options: RouteOptions = {}): this {
+  url(method: Method | Lowercase<Method>, path: string, handler: ((...args: any[]) => unknown) | string, options: RouteOptions = {}): this {
     const route = { method: assertMethod(method), path };
     const key = routeKey(route);
     if (this.routes.some((r) => r.key === key)) throw new Error(`Route "${key}" is already registered`);
@@ -138,7 +156,7 @@ export class FunctionRouter {
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
-    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn, script });
+    this.routes.push({ ...route, key, name, public: options.public ?? false, matcher: compilePath(path), fn, script, request: options.request === true, response: !!options.response });
     return this;
   }
 
@@ -185,13 +203,14 @@ export class FunctionRouter {
         debug("router", `authenticated ${route.key}`);
         context = { auth: principal };
       }
+      const original = route.request ? (req.clone() as Request) : undefined;
       let input: Record<string, unknown>;
       try {
         input = buildInput(parseBody(await req.text(), req.headers.get("content-type")), url.searchParams, params);
       } catch {
         return Response.json({ error: "Malformed request body" }, { status: 400 });
       }
-      return this.dispatch(route, input, context, req);
+      return this.dispatch(route, input, context, req, original);
     }
     debug("router", pathMatched ? `method not allowed for ${req.method}` : `no route for ${req.method} ${url.pathname}`);
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
@@ -265,12 +284,13 @@ export class FunctionRouter {
     return route.fn;
   }
 
-  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request): Promise<Response> {
+  private async dispatch(route: CompiledRoute, input: Record<string, unknown>, context: RequestContext, req: Request, original?: Request): Promise<Response> {
     debug("router", `dispatching ${route.key} in ${this.mode} mode`, () => ({ inputKeys: Object.keys(input) }));
     if (this.mode === "local") {
       const fn = await this.handlerOf(route);
       if (!fn) return Response.json({ error: "Route script has no default export function" }, { status: 500 });
-      const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context));
+      const lead = [...(original ? [original] : []), ...(route.response ? [response] : [])];
+      const result = await timed("router", `local call ${route.key}`, () => invoke(fn, input, context, lead));
       debug("router", `local ${route.key} -> ${result.status}`);
       return new Response(result.body || null, { status: result.status, headers: result.headers });
     }
@@ -288,6 +308,7 @@ export class FunctionRouter {
       upstream = await request(url, input, {
         route: route.key,
         context,
+        original: original ? await serializeRequest(original) : undefined,
         headers: token && header ? { [header]: token } : undefined,
         sign: this.authMode(endpoints) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
       });
@@ -322,11 +343,12 @@ export async function request(
   init: {
     route?: string;
     context?: RequestContext;
+    original?: OriginalRequest;
     headers?: Record<string, string>;
     sign?: { credentials?: AwsCredentialsProvider; region?: string };
   } = {},
 ): Promise<Response> {
-  const body = JSON.stringify({ input, context: init.context ?? {} });
+  const body = JSON.stringify({ input, context: init.context ?? {}, ...(init.original ? { request: init.original } : {}) });
   const headers: Record<string, string> = {
     "content-type": INVOKE_CONTENT_TYPE,
     ...(init.route ? { [ROUTE_HEADER]: init.route } : {}),
@@ -371,13 +393,16 @@ function findUp(dir: string, relativeFile: string): string | undefined {
 const THIS_FILE = fileURLToPath(import.meta.url);
 const STACK_FILE = /(?:\(|\s)((?:file:\/\/)?\/[^\s():]+):\d+:\d+\)?\s*$/;
 
-// Relative script paths resolve against the file that called `url`, like an import.
+// "./x" and "../x" resolve against the file that called `url`; "/x" and "x" against its project root.
 function scriptPath(script: string): string {
   const frames = (new Error().stack ?? "").split("\n").slice(1);
   for (const frame of frames) {
     const found = STACK_FILE.exec(frame)?.[1];
     const file = found?.startsWith("file://") ? fileURLToPath(found) : found;
-    if (file && file !== THIS_FILE) return path.resolve(path.dirname(file), script);
+    if (!file || file === THIS_FILE) continue;
+    if (script.startsWith("./") || script.startsWith("../")) return path.resolve(path.dirname(file), script);
+    const manifest = findUp(path.dirname(file), "package.json");
+    return path.join(manifest ? path.dirname(manifest) : path.dirname(file), script.replace(/^\/+/, ""));
   }
   return path.resolve(script);
 }

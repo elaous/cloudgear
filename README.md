@@ -75,14 +75,61 @@ export default async function ({ id }: { id: string }) {
 }
 ```
 
-The path MUST be a string literal and is relative to the file that calls `.url`,
-like an import. `generate` analyzes the script like any routed function (its
-`BlobStore` use, `@policy` and input type) and bundles it on its own; the
-function is named after the file. Because the router cannot see the script's
-types, route params are checked by `generate` and not by the compiler, and a
-route without `{ name }` is named `"METHOD /path"`. In local mode the router
-imports the script on its first request and answers 500 if it has no default
-function.
+The path MUST be a string literal. `./x` and `../x` are relative to the file
+that calls `.url`, like an import; `/x` and `x` start at the project root, the
+directory of the nearest `package.json`. `generate` analyzes the script like any
+routed function (its `BlobStore` use, `@policy` and input type) and bundles it
+on its own. The function is named after the script's path from the project root
+(`/api/v/[slug].ts` is `api-v-slug`). Because the router cannot see the
+script's types, route params are checked by `generate` and not by the compiler,
+and a route without `{ name }` is named `"METHOD /path"`. In local mode the
+router imports the script on its first request and answers 500 if it has no
+default function.
+
+#### Request, response and files
+
+A function that does not import cloudgear can still get the request and the
+response helper, and files, through the route's options:
+
+```ts
+import { FunctionRouter, response } from "@cloudgear/functions";
+
+new FunctionRouter("aws").url("GET", "/v/{slug}", "/api/v/[slug].ts", {
+  include: "dist/index.html",
+  request: true,
+  response,
+});
+```
+
+```ts
+// api/v/[slug].ts
+import fs from "node:fs";
+
+export default async function (request: Request, response, { slug }: { slug: string }) {
+  const html = fs.readFileSync("dist/index.html", "utf8");
+  return response({ slug, url: request.url, html }, { status: 200, headers: { "x-slug": slug } });
+}
+```
+
+- `request: true` passes the original `Request` as the first argument.
+- `response` MUST be the `response` helper imported from `@cloudgear/functions`.
+  It is passed after the request (or first without it) and returns what the
+  function can return to set the status and headers.
+- The input (body, query and path params) and the context follow, so the
+  arguments are `(request?, response?, input, context)`. Path params are
+  checked against the input's type, whichever position it is in.
+- `include` is a file, a directory (all its files) or an array of them, from the
+  project root, that MUST exist when `generate` runs. They are packaged with
+  the function at the same relative paths, so the function reads them relative
+  to its working directory (`dist/index.html` above); they are part of the
+  bundle's hash, so a change redeploys the function. `include` MUST NOT leave
+  the project. Lambda accepts packages up to 50 MB.
+- All routes of one function MUST give the same `include`, `request` and
+  `response`. They are not available for providers other than `aws` yet.
+- Behind the router in remote mode, the router forwards the original request
+  (method, URL, headers and body) to a function that asked for it. Called
+  directly through a cert or a CDN, the request is rebuilt from the Function
+  URL event, so its host is the function URL's and not the viewer's.
 
 ### Runtime: `FunctionRouter`
 

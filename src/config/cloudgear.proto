@@ -98,6 +98,11 @@ message Function {
   map<string, string> options = 13;
   // Five-field UTC cron expressions that also trigger the function.
   repeated string schedule = 14;
+  // Files packaged with the function, by path from the project root; copied under the bundle's files/.
+  repeated string include = 15;
+  // The function receives the original request, then the response helper, before its input.
+  bool pass_request = 16;
+  bool pass_response = 17;
 }
 
 message Source {

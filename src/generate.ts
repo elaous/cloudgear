@@ -88,6 +88,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
+    if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.passResponse)) {
+      throw new Error(`${fn.file}: include, request and response are not supported for provider "${model.provider}" yet`);
+    }
     const bundle = await timed("generate", `bundle ${fn.name}`, () => bundleFunction({
       name: fn.name,
       sourceFile: fn.file,
@@ -98,6 +101,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
       trustContext: model.provider === "aws" && model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
+      include: fn.include,
+      passRequest: fn.passRequest,
+      passResponse: fn.passResponse,
       outDir: options.buildDir,
     }));
     debug("generate", `bundled ${fn.name}`, () => ({ file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size }));
@@ -122,6 +128,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       reserved_concurrency: reservedConcurrency,
       options: fn.options,
       schedule: fn.schedules.length ? fn.schedules : undefined,
+      include: fn.include.length ? fn.include.map((f) => f.rel) : undefined,
+      pass_request: fn.passRequest || undefined,
+      pass_response: fn.passResponse || undefined,
     });
   }
 

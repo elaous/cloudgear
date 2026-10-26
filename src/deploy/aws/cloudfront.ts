@@ -12,14 +12,14 @@ import {
   ListOriginAccessControlsCommand,
   UpdateDistributionCommand,
 } from "@aws-sdk/client-cloudfront";
-import { AddPermissionCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
+import { RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyCommand } from "@aws-sdk/client-s3";
 import type { DnsDriver } from "@cloudgear/dns";
 import { fitName } from "../../names";
 import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
 import type { CdnComparable } from "../plan";
-import { stateKey, type StateEntry } from "../state";
+import { stateKey } from "../state";
 import type { SendClient } from "./index";
 
 export interface CloudFrontDeps {
@@ -32,39 +32,17 @@ export interface CloudFrontDeps {
   log: (message: string) => void;
 }
 
-// Managed cache and origin request policies.
+// Managed cache policy.
 const CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6";
-const CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
-const ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac";
 
 const DEPLOY_ATTEMPTS = 180;
 const POLL_MS = 10_000;
 const CLOUDFRONT = "cloudfront.amazonaws.com";
-const ALL_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"];
-
-interface FunctionOrigin {
-  physical: string;
-  host: string;
-  arn: string;
-}
 
 export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   const tag = (domain: string) => createHash("sha256").update(domain).digest("hex").slice(0, 12);
 
-  function functionOrigins(entry: { deps: string[] }, spec: CdnComparable, context: DriverContext): Map<string, FunctionOrigin> {
-    const origins = new Map<string, FunctionOrigin>();
-    for (const behavior of spec.behaviors) {
-      if (origins.has(behavior.function)) continue;
-      const fn = entry.deps
-        .map((key) => context.entry(key))
-        .find((e) => e?.type === "@aws.Lambda" && e.physical_name === behavior.function);
-      if (!fn?.outputs.url || !fn.outputs.arn) throw new Error(`Function "${behavior.function}" has no URL yet; apply it first`);
-      origins.set(behavior.function, { physical: behavior.function, host: new URL(fn.outputs.url).host, arn: fn.outputs.arn });
-    }
-    return origins;
-  }
-
-  async function ensureOac(label: string, type: "s3" | "lambda", known?: string): Promise<string> {
+  async function ensureOac(label: string, known?: string): Promise<string> {
     if (known) return known;
     const name = fitName(label, 64);
     try {
@@ -75,7 +53,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
             Description: "Managed by cloudgear",
             SigningProtocol: "sigv4",
             SigningBehavior: "always",
-            OriginAccessControlOriginType: type,
+            OriginAccessControlOriginType: "s3",
           },
         }),
       );
@@ -131,41 +109,6 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     }
   }
 
-  async function allowDistribution(functionName: string, domain: string, distributionArn: string) {
-    const permissions = [
-      { Action: "lambda:InvokeFunctionUrl", kind: "url", FunctionUrlAuthType: "AWS_IAM" as const },
-      { Action: "lambda:InvokeFunction", kind: "invoke", InvokedViaFunctionUrl: true },
-    ];
-    for (const { kind, ...permission } of permissions) {
-      try {
-        await deps.lambda.send(
-          new AddPermissionCommand({
-            FunctionName: functionName,
-            StatementId: `cloudgear-cdn-${tag(domain)}-${kind}`,
-            Principal: CLOUDFRONT,
-            SourceArn: distributionArn,
-            ...permission,
-          }),
-        );
-      } catch (err) {
-        const e = err as { name?: string; message?: string };
-        if (!(e.name === "ResourceConflictException" && /statement id.*already exists/i.test(e.message ?? ""))) throw err;
-      }
-    }
-  }
-
-  async function revokeDistribution(functionName: string, domain: string) {
-    for (const kind of ["url", "invoke"]) {
-      try {
-        await deps.lambda.send(
-          new RemovePermissionCommand({ FunctionName: functionName, StatementId: `cloudgear-cdn-${tag(domain)}-${kind}` }),
-        );
-      } catch (err) {
-        if ((err as { name?: string }).name !== "ResourceNotFoundException") throw err;
-      }
-    }
-  }
-
   async function waitDeployed(id: string): Promise<boolean> {
     for (let attempt = 0; attempt < DEPLOY_ATTEMPTS; attempt++) {
       const res = await deps.cloudfront.send(new GetDistributionCommand({ Id: id }));
@@ -181,7 +124,6 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const spec = entry.spec as unknown as CdnComparable;
     const certificate = context.entry(stateKey({ type: "@aws.Certificate", name: spec.domain }));
     if (!certificate?.outputs.arn) throw new Error(`Certificate for ${spec.domain} is not issued yet`);
-    const origins = functionOrigins(entry, spec, context);
 
     // Fail before creating anything if the name already points somewhere that is not ours.
     const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
@@ -191,11 +133,10 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     }
 
     deps.log("creating origin access controls");
-    outputs.oac_s3 = await ensureOac(`cloudgear-${spec.domain}-s3`, "s3", outputs.oac_s3);
-    if (origins.size) outputs.oac_lambda = await ensureOac(`cloudgear-${spec.domain}-lambda`, "lambda", outputs.oac_lambda);
+    outputs.oac_s3 = await ensureOac(`cloudgear-${spec.domain}-s3`, outputs.oac_s3);
 
     const config = (reference: string, enabled = true) =>
-      buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: spec.bucket_region || deps.region, oacS3: outputs.oac_s3!, oacLambda: outputs.oac_lambda, origins, reference, enabled });
+      buildDistributionConfig(spec, { certificateArn: certificate.outputs.arn!, region: spec.bucket_region || deps.region, oacS3: outputs.oac_s3!, reference, enabled });
 
     if (!outputs.id) {
       deps.log(`creating the distribution for ${spec.domain}`);
@@ -213,9 +154,8 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       );
     }
 
-    deps.log(`allowing the distribution to read ${spec.bucket} and call ${origins.size} function(s)`);
+    deps.log(`allowing the distribution to read ${spec.bucket}`);
     await putBucketStatements(spec, outputs.arn!);
-    for (const origin of origins.values()) await allowDistribution(origin.physical, spec.domain, outputs.arn!);
     deps.log(`pointing ${spec.domain} at ${outputs.domain_name}`);
     await dns.upsert({ name: spec.domain, type: "CNAME", values: [outputs.domain_name!], ttl: 300 });
     deps.log("waiting for the distribution to deploy");
@@ -236,12 +176,9 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
 
     async update(entry, current, _changes, context) {
       const outputs = { ...current.outputs };
-      const spec = entry.spec as unknown as CdnComparable;
-      const before = servedFunctions(current.spec);
       try {
         await converge(entry, context, outputs);
-        const stillServed = new Set(spec.behaviors.map((b) => b.function));
-        for (const gone of before.filter((fn) => !stillServed.has(fn))) await revokeDistribution(gone, spec.domain);
+        await dropFunctionAccess(current, outputs);
         return outputs;
       } catch (err) {
         throw new PartialApplyError(err, outputs);
@@ -258,15 +195,35 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         if (record && sameTarget(record.values[0], current.outputs.domain_name)) await dns.remove(domain, "CNAME");
       }
       if (current.outputs.id) await removeDistribution(current.outputs.id);
-      for (const key of ["oac_s3", "oac_lambda"]) {
-        const id = current.outputs[key];
-        if (!id) continue;
-        await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: id, IfMatch: await etagOfOac(id) }), "NoSuchOriginAccessControl");
+      for (const oac of [current.outputs.oac_s3, current.outputs.oac_lambda]) {
+        if (oac) {
+          await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: oac, IfMatch: await etagOfOac(oac) }), "NoSuchOriginAccessControl");
+        }
       }
+      for (const fn of legacyFunctions(current.spec)) await revokeLegacy(fn, domain);
       if (spec.bucket) await removeBucketStatements(spec as CdnComparable);
-      for (const fn of servedFunctions(current.spec)) await revokeDistribution(fn, domain);
     },
   };
+
+  // A distribution deployed before CDNs stopped routing to functions still has that access.
+  async function dropFunctionAccess(current: { spec: Record<string, unknown>; outputs: Record<string, string> }, outputs: Record<string, string>) {
+    const oac = current.outputs.oac_lambda;
+    if (oac) {
+      await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: oac, IfMatch: await etagOfOac(oac) }), "NoSuchOriginAccessControl");
+      outputs.oac_lambda = "";
+    }
+    for (const fn of legacyFunctions(current.spec)) await revokeLegacy(fn, String((current.spec as { domain?: string }).domain ?? ""));
+  }
+
+  async function revokeLegacy(functionName: string, domain: string) {
+    for (const kind of ["url", "invoke"]) {
+      try {
+        await deps.lambda.send(new RemovePermissionCommand({ FunctionName: functionName, StatementId: `cloudgear-cdn-${tag(domain)}-${kind}` }));
+      } catch (err) {
+        if ((err as { name?: string }).name !== "ResourceNotFoundException") throw err;
+      }
+    }
+  }
 
   async function removeDistribution(id: string) {
     let etag: string;
@@ -304,9 +261,8 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 }
 
-// Functions the entry serves or served: its (possibly attempted) spec plus the last one that fully applied.
-function servedFunctions(spec: Record<string, unknown>): string[] {
-  const names = (s: unknown) => ((s as Partial<CdnComparable> | undefined)?.behaviors ?? []).map((b) => b.function);
+function legacyFunctions(spec: Record<string, unknown>): string[] {
+  const names = (s: unknown) => ((s as { behaviors?: { function: string }[] } | undefined)?.behaviors ?? []).map((b) => b.function);
   return [...new Set([...names(spec), ...names(spec.previous)])];
 }
 
@@ -322,17 +278,8 @@ export interface DistributionInputs {
   certificateArn: string;
   region: string;
   oacS3: string;
-  oacLambda?: string;
-  origins: Map<string, FunctionOrigin>;
   reference: string;
   enabled: boolean;
-}
-
-// CloudFront routes by path only and allows just three method sets.
-export function allowedMethods(methods: string[]): string[] {
-  const set = new Set(methods);
-  if ([...set].some((m) => !["GET", "HEAD", "OPTIONS"].includes(m))) return ALL_METHODS;
-  return set.has("OPTIONS") ? ["GET", "HEAD", "OPTIONS"] : ["GET", "HEAD"];
 }
 
 export function buildDistributionConfig(spec: CdnComparable, input: DistributionInputs): DistributionConfig {
@@ -348,31 +295,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
       S3OriginConfig: { OriginAccessIdentity: "" },
       OriginAccessControlId: input.oacS3,
     },
-    ...[...input.origins.values()].map((origin) => ({
-      Id: `cloudgear-fn-${origin.physical}`,
-      DomainName: origin.host,
-      CustomOriginConfig: {
-        HTTPPort: 80,
-        HTTPSPort: 443,
-        OriginProtocolPolicy: "https-only",
-        OriginSslProtocols: { Quantity: 1, Items: ["TLSv1.2"] },
-      },
-      OriginAccessControlId: input.oacLambda,
-    })),
   ];
-
-  const behaviors = spec.behaviors.map((behavior) => {
-    const methods = allowedMethods(behavior.methods);
-    return {
-      PathPattern: behavior.path_pattern,
-      TargetOriginId: `cloudgear-fn-${behavior.function}`,
-      ViewerProtocolPolicy: "redirect-to-https",
-      AllowedMethods: { ...methodList(methods), CachedMethods: methodList(["GET", "HEAD"]) },
-      CachePolicyId: CACHING_DISABLED,
-      OriginRequestPolicyId: ALL_VIEWER_EXCEPT_HOST,
-      Compress: true,
-    };
-  });
 
   return {
     CallerReference: input.reference,
@@ -391,7 +314,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
       CachePolicyId: CACHING_OPTIMIZED,
       Compress: true,
     },
-    CacheBehaviors: { Quantity: behaviors.length, Items: behaviors },
+    CacheBehaviors: { Quantity: 0, Items: [] },
     ViewerCertificate: {
       ACMCertificateArn: input.certificateArn,
       SSLSupportMethod: "sni-only",

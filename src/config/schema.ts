@@ -8,9 +8,9 @@ export interface CloudgearConfig {
   function: FunctionSpec[];
   invoker: string[];
   authenticated: "iam" | "none";
-  dns?: DnsSpec;
-  certificate?: CertificateSpec;
+  certificate: CertificateSpec[];
   cdn?: CdnSpec;
+  api?: ApiSpec;
   region?: string;
 }
 
@@ -24,7 +24,15 @@ export type Options = Record<string, string>;
 
 export interface CertificateSpec {
   domain: string;
+  dns: DnsSpec;
+  usage?: "cdn" | "api";
+  region?: string;
   options?: Options;
+}
+
+export interface ApiSpec {
+  provider: string;
+  domain: string;
 }
 
 export interface CdnSpec {
@@ -32,7 +40,6 @@ export interface CdnSpec {
   domain: string;
   bucket: string;
   path: string;
-  behavior: { path_pattern: string; function: string; method: string[] }[];
   options?: Options;
 }
 
@@ -72,8 +79,7 @@ const REPEATED = new Set([
   "function.permission.action",
   "function.env",
   "invoker",
-  "cdn.behavior",
-  "cdn.behavior.method",
+  "certificate",
   "resource.options",
   "function.options",
   "function.schedule",
@@ -97,20 +103,21 @@ export function decodeConfig(text: string): CloudgearConfig {
     invoker: (raw.invoker ?? []).map(String),
     authenticated: raw.authenticated === "none" ? "none" : "iam",
     region: raw.region ? String(raw.region) : undefined,
-    dns: raw.dns && { provider: str(raw.dns, "provider"), domain: str(raw.dns, "domain"), zone: str(raw.dns, "zone") },
-    certificate: raw.certificate && { domain: str(raw.certificate, "domain"), ...optionsFrom(raw.certificate) },
+    certificate: (raw.certificate ?? []).map((c: Record<string, any>) => ({
+      domain: str(c, "domain"),
+      dns: { provider: str(c.dns ?? {}, "provider"), domain: str(c.dns ?? {}, "domain"), zone: str(c.dns ?? {}, "zone") },
+      ...(c.usage === "cdn" || c.usage === "api" ? { usage: c.usage } : {}),
+      ...(c.region ? { region: String(c.region) } : {}),
+      ...optionsFrom(c),
+    })),
     cdn: raw.cdn && {
       provider: str(raw.cdn, "provider"),
       domain: str(raw.cdn, "domain"),
       bucket: str(raw.cdn, "bucket"),
       path: String(raw.cdn.path ?? ""),
       ...optionsFrom(raw.cdn),
-      behavior: (raw.cdn.behavior ?? []).map((b: Record<string, any>) => ({
-        path_pattern: str(b, "path_pattern"),
-        function: str(b, "function"),
-        method: (b.method ?? []).map(String),
-      })),
     },
+    api: raw.api && { provider: str(raw.api, "provider"), domain: str(raw.api, "domain") },
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
       type: str(r, "type"),
@@ -159,7 +166,7 @@ function optionsToProto(config: CloudgearConfig): unknown {
     ...config,
     resource: config.resource.map(withOptions),
     function: config.function.map(withOptions),
-    certificate: config.certificate && withOptions(config.certificate),
+    certificate: config.certificate.map(withOptions),
     cdn: config.cdn && withOptions(config.cdn),
   };
 }

@@ -4,7 +4,8 @@ import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import type { CloudgearConfig } from "../src/config/schema";
 import { apply, endpointsFrom, hasEndpoints } from "../src/deploy/apply";
 import { awsDrivers } from "../src/deploy/aws";
-import { allowedMethods, buildDistributionConfig, invalidateDistribution } from "../src/deploy/aws/cloudfront";
+import { certificateDriver } from "../src/deploy/aws/certificate";
+import { buildDistributionConfig, invalidateDistribution } from "../src/deploy/aws/cloudfront";
 import { formatPlan, plan, type CdnComparable } from "../src/deploy/plan";
 import type { State } from "../src/deploy/state";
 import { applyAll, baseConfig, emptyState, fakeAws } from "./helpers";
@@ -13,17 +14,12 @@ const DOMAIN = "cdn.example.com";
 const CERT_KEY = `@aws.Certificate.${DOMAIN}`;
 const CDN_KEY = `@aws.CloudFront.${DOMAIN}`;
 
+const dnsSpec = { provider: "gandi", domain: DOMAIN, zone: "example.com" };
+
 const cdnConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig => ({
   ...baseConfig(),
-  dns: { provider: "gandi", domain: DOMAIN, zone: "example.com" },
-  certificate: { domain: DOMAIN },
-  cdn: {
-    provider: "aws",
-    domain: DOMAIN,
-    bucket: "data",
-    path: "web/",
-    behavior: [{ path_pattern: "/foo/*", function: "foo", method: ["POST", "GET"] }],
-  },
+  certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
+  cdn: { provider: "aws", domain: DOMAIN, bucket: "data", path: "web/" },
   ...overrides,
 });
 
@@ -47,17 +43,15 @@ describe("planning the edge", () => {
     const order = removal.map((a) => a.key);
     expect(order).toHaveLength(4);
     // dependents go before what they depend on
-    expect(order[0]).toBe(CDN_KEY);
     expect(order.indexOf(CDN_KEY)).toBeLessThan(order.indexOf(CERT_KEY));
-    expect(order.indexOf(CDN_KEY)).toBeLessThan(order.indexOf("@aws.Lambda.foo"));
     expect(order.indexOf("@aws.Lambda.foo")).toBeLessThan(order.indexOf("@aws.S3.data"));
     expect(order.indexOf(CDN_KEY)).toBeLessThan(order.indexOf("@aws.S3.data"));
   });
 
-  test("a CDN without a certificate or dns is a config error", () => {
-    expect(() => plan(cdnConfig({ certificate: undefined }), emptyState())).toThrow(/cdn needs dns and certificate/);
-    expect(() => plan(cdnConfig({ dns: undefined }), emptyState())).toThrow(/needs dns/);
+  test("a CDN without its certificate, or with an unknown bucket, is a config error", () => {
+    expect(() => plan(cdnConfig({ certificate: [] }), emptyState())).toThrow(/cdn needs a certificate for "cdn.example.com"/);
     expect(() => plan(cdnConfig({ cdn: { ...cdnConfig().cdn!, bucket: "nope" } }), emptyState())).toThrow(/bucket "nope" is not a declared resource/);
+    expect(() => plan(cdnConfig({ certificate: [{ domain: DOMAIN, dns: dnsSpec, usage: "cdn", region: "eu-west-1" }] }), emptyState())).toThrow(/must be in us-east-1/);
   });
 
   test("a certificate can be planned without a CDN", () => {
@@ -66,22 +60,14 @@ describe("planning the edge", () => {
     expect(actions.map((a) => a.key)).not.toContain(CDN_KEY);
   });
 
-  test("the CDN is refreshed when a function it serves is created again", async () => {
+  test("a changed site path updates the CDN, and recreating a function does not touch it", async () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
     expect(plan(cdnConfig(), state).map((a) => a.op)).toEqual(["noop", "dry", "noop", "noop", "noop"]);
-
-    delete state.entries["@aws.Lambda.foo"];
-    const actions = plan(cdnConfig(), state);
-    expect(actions.find((a) => a.key === "@aws.Lambda.foo")!.op).toBe("create");
-    expect(actions.find((a) => a.key === CDN_KEY)).toMatchObject({ op: "update", changes: ["dependencies"] });
-  });
-
-  test("changed behaviors update the CDN", async () => {
-    const state = emptyState();
-    await applyAll(cdnConfig(), state);
-    const changed = cdnConfig({ cdn: { ...cdnConfig().cdn!, behavior: [{ path_pattern: "/bar/*", function: "foo", method: ["GET"] }] } });
+    const changed = cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } });
     expect(plan(changed, state).find((a) => a.key === CDN_KEY)).toMatchObject({ op: "update", changes: ["spec"] });
+    delete state.entries["@aws.Lambda.foo"];
+    expect(plan(cdnConfig(), state).find((a) => a.key === CDN_KEY)!.op).toBe("noop");
   });
 });
 
@@ -94,16 +80,12 @@ describe("applying the edge", () => {
     const order = ["RequestCertificateCommand", "CreateOriginAccessControlCommand", "CreateDistributionCommand", "PutBucketPolicyCommand", "GetDistributionCommand"];
     expect(order.map((n) => names.indexOf(n))).toEqual([...order.map((n) => names.indexOf(n))].sort((a, b) => a - b));
     expect(order.every((n) => names.includes(n))).toBe(true);
-    // the Lambda is created before anything that needs its URL
-    expect(names.indexOf("CreateFunctionUrlConfigCommand")).toBeLessThan(names.indexOf("CreateDistributionCommand"));
-
     expect(aws.of("RequestCertificateCommand")).toEqual([{ DomainName: DOMAIN, ValidationMethod: "DNS" }]);
     expect(await aws.dns!.get("_v1.cdn.example.com", "CNAME")).toMatchObject({ values: ["_v2.acm-validations.aws."], ttl: 300 });
     expect(await aws.dns!.get(DOMAIN, "CNAME")).toMatchObject({ values: ["d111.cloudfront.net"] });
 
     expect(aws.of("CreateOriginAccessControlCommand").map((i) => i.OriginAccessControlConfig)).toMatchObject([
       { Name: `cloudgear-${DOMAIN}-s3`, OriginAccessControlOriginType: "s3", SigningBehavior: "always", SigningProtocol: "sigv4" },
-      { Name: `cloudgear-${DOMAIN}-lambda`, OriginAccessControlOriginType: "lambda" },
     ]);
 
     expect(state.entries[CERT_KEY]!.outputs).toMatchObject({ arn: "arn:aws:acm:us-east-1:1:certificate/c1", validation_name: "_v1.cdn.example.com" });
@@ -113,9 +95,8 @@ describe("applying the edge", () => {
       domain_name: "d111.cloudfront.net",
       status: "Deployed",
       oac_s3: "oac-s3",
-      oac_lambda: "oac-lambda",
     });
-    expect(state.entries[CDN_KEY]!.deps).toEqual([CERT_KEY, "@aws.S3.data", "@aws.Lambda.foo"]);
+    expect(state.entries[CDN_KEY]!.deps).toEqual([CERT_KEY, "@aws.S3.data"]);
   });
 
   test("each step is reported, in order, as it happens", async () => {
@@ -129,7 +110,7 @@ describe("applying the edge", () => {
       /creating origin access controls/,
       /creating the distribution for cdn\.example\.com/,
       /distribution E1 will be served from d111\.cloudfront\.net/,
-      /allowing the distribution to read data and call 1 function\(s\)/,
+      /allowing the distribution to read data/,
       /pointing cdn\.example\.com at d111\.cloudfront\.net/,
       /waiting for the distribution to deploy/,
       /cdn\.example\.com is live/,
@@ -139,7 +120,7 @@ describe("applying the edge", () => {
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
 
-  test("the distribution serves the site from the bucket and routes to the function", async () => {
+  test("the distribution serves the site from the bucket", async () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const config = aws.of("CreateDistributionCommand")[0].DistributionConfig;
 
@@ -149,23 +130,10 @@ describe("applying the edge", () => {
       Enabled: true,
       ViewerCertificate: { ACMCertificateArn: "arn:aws:acm:us-east-1:1:certificate/c1", SSLSupportMethod: "sni-only", MinimumProtocolVersion: "TLSv1.2_2021" },
     });
-    const [site, fn] = config.Origins.Items;
-    expect(site).toMatchObject({ Id: "cloudgear-site", DomainName: "data.s3.eu-west-1.amazonaws.com", OriginPath: "/web", OriginAccessControlId: "oac-s3" });
-    expect(fn).toMatchObject({
-      DomainName: "app-foo.lambda-url.eu-west-1.on.aws",
-      OriginAccessControlId: "oac-lambda",
-      CustomOriginConfig: { OriginProtocolPolicy: "https-only" },
-    });
+    expect(config.Origins.Items).toHaveLength(1);
+    expect(config.Origins.Items[0]).toMatchObject({ Id: "cloudgear-site", DomainName: "data.s3.eu-west-1.amazonaws.com", OriginPath: "/web", OriginAccessControlId: "oac-s3" });
     expect(config.DefaultCacheBehavior).toMatchObject({ TargetOriginId: "cloudgear-site", ViewerProtocolPolicy: "redirect-to-https" });
-    expect(config.CacheBehaviors.Items).toEqual([
-      expect.objectContaining({
-        PathPattern: "/foo/*",
-        TargetOriginId: "cloudgear-fn-app-foo",
-        AllowedMethods: expect.objectContaining({ Items: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"] }),
-        CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
-        OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac",
-      }),
-    ]);
+    expect(config.CacheBehaviors).toEqual({ Quantity: 0, Items: [] });
   });
 
   test("the S3 origin uses the bucket's own region", async () => {
@@ -177,7 +145,7 @@ describe("applying the edge", () => {
     expect(site.DomainName).toBe("data.s3.ap-southeast-2.amazonaws.com");
   });
 
-  test("only this distribution may read the site and call the function", async () => {
+  test("only this distribution may read the site", async () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const policy = JSON.parse(aws.of("PutBucketPolicyCommand")[0].Policy);
     const condition = { StringEquals: { "AWS:SourceArn": "arn:aws:cloudfront::1:distribution/E1" } };
@@ -185,12 +153,7 @@ describe("applying the edge", () => {
     expect(policy.Statement).toEqual([
       expect.objectContaining({ Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*", Condition: condition }),
     ]);
-
-    const grants = aws.of("AddPermissionCommand").filter((i) => i.Principal === "cloudfront.amazonaws.com");
-    expect(grants).toMatchObject([
-      { FunctionName: "app-foo", Action: "lambda:InvokeFunctionUrl", SourceArn: "arn:aws:cloudfront::1:distribution/E1", FunctionUrlAuthType: "AWS_IAM" },
-      { FunctionName: "app-foo", Action: "lambda:InvokeFunction", SourceArn: "arn:aws:cloudfront::1:distribution/E1", InvokedViaFunctionUrl: true },
-    ]);
+    expect(aws.of("AddPermissionCommand").filter((i) => i.Principal === "cloudfront.amazonaws.com")).toEqual([]);
   });
 
   test("existing bucket policy statements are kept and the CDN's are not duplicated", async () => {
@@ -202,7 +165,7 @@ describe("applying the edge", () => {
     });
     const state = emptyState();
     await applyAll(cdnConfig(), state, aws);
-    await applyAll({ ...cdnConfig(), cdn: { ...cdnConfig().cdn!, behavior: [{ path_pattern: "/x/*", function: "foo", method: ["GET"] }] } }, state, aws);
+    await applyAll({ ...cdnConfig(), cdn: { ...cdnConfig().cdn!, path: "x/" } }, state, aws);
 
     const sids = JSON.parse(stored).Statement.map((s: { Sid: string }) => s.Sid);
     expect(sids).toHaveLength(2);
@@ -225,13 +188,13 @@ describe("applying the edge", () => {
   test("updating reuses the distribution with its caller reference and etag", async () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
-    const changed = cdnConfig({ cdn: { ...cdnConfig().cdn!, behavior: [{ path_pattern: "/bar/*", function: "foo", method: ["GET"] }] } });
+    const changed = cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } });
     const aws = await applyAll(changed, state);
 
     expect(aws.names()).not.toContain("CreateDistributionCommand");
     expect(aws.names()).not.toContain("CreateOriginAccessControlCommand");
     expect(aws.of("UpdateDistributionCommand")).toMatchObject([
-      { Id: "E1", IfMatch: "e1", DistributionConfig: { CallerReference: "ref-1", CacheBehaviors: { Items: [{ PathPattern: "/bar/*" }] } } },
+      { Id: "E1", IfMatch: "e1", DistributionConfig: { CallerReference: "ref-1", Origins: { Items: [{ OriginPath: "/other" }] } } },
     ]);
   });
 
@@ -243,7 +206,7 @@ describe("applying the edge", () => {
     await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
 
     const names = aws.names();
-    expect(names.slice(0, 6)).toEqual([
+    expect(names.filter((n) => !/Function|Role/.test(n)).slice(0, 6)).toEqual([
       "GetDistributionConfigCommand",
       "UpdateDistributionCommand",
       "GetDistributionCommand",
@@ -253,9 +216,8 @@ describe("applying the edge", () => {
     ]);
     expect(aws.of("UpdateDistributionCommand")[0]).toMatchObject({ IfMatch: "e1", DistributionConfig: { Enabled: false } });
     expect(aws.of("DeleteDistributionCommand")).toEqual([{ Id: "E1", IfMatch: "e1" }]);
-    expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-s3", "oac-lambda"]);
+    expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-s3"]);
     expect(names).toContain("DeleteBucketPolicyCommand");
-    expect(aws.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
     expect(await created.dns!.get(DOMAIN, "CNAME")).toBeNull();
     // the certificate's validation record stays: ACM shares it between certificates for a domain
     expect(await created.dns!.get("_v1.cdn.example.com", "CNAME")).not.toBeNull();
@@ -288,7 +250,7 @@ describe("applying the edge", () => {
     });
     await expect(applyAll(cdnConfig(), state, broken)).rejects.toThrow("bucket policy denied");
     expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, bucket: "data" });
-    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ id: "E1", oac_s3: "oac-s3", oac_lambda: "oac-lambda" });
+    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ id: "E1", oac_s3: "oac-s3" });
 
     const next = plan(cdnConfig(), state).find((a) => a.key === CDN_KEY)!;
     expect(next.op).toBe("update");
@@ -317,12 +279,12 @@ describe("applying the edge", () => {
         throw error("OriginAccessControlAlreadyExists");
       },
       ListOriginAccessControlsCommand: () => ({
-        OriginAccessControlList: { Items: [{ Name: `cloudgear-${DOMAIN}-s3`, Id: "old-s3" }, { Name: `cloudgear-${DOMAIN}-lambda`, Id: "old-fn" }] },
+        OriginAccessControlList: { Items: [{ Name: `cloudgear-${DOMAIN}-s3`, Id: "old-s3" }] },
       }),
     });
     const state = emptyState();
     await applyAll(cdnConfig(), state, aws);
-    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ oac_s3: "old-s3", oac_lambda: "old-fn" });
+    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ oac_s3: "old-s3" });
   });
 
   test("a CDN without a DNS driver fails with an explanation", async () => {
@@ -338,7 +300,7 @@ describe("applying the edge", () => {
   test("a CDN without any routed function still has endpoints to write", async () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
-    const siteOnly = cdnConfig({ function: [], cdn: { ...cdnConfig().cdn!, behavior: [] } });
+    const siteOnly = cdnConfig({ function: [] });
     const endpoints = endpointsFrom(siteOnly, state);
     expect(endpoints.routes).toEqual({});
     expect(hasEndpoints(endpoints)).toBe(true);
@@ -354,6 +316,33 @@ describe("applying the edge", () => {
     delete state.entries[CDN_KEY]!.outputs.url;
     expect(endpointsFrom(cdnConfig(), state).cdn!.url).toBe("https://d111.cloudfront.net");
     expect(endpointsFrom(cdnConfig({ cdn: undefined }), state).cdn).toBeUndefined();
+  });
+});
+
+describe("a CDN deployed when it still routed to functions", () => {
+  const legacy = async () => {
+    const state = emptyState();
+    await applyAll(cdnConfig(), state);
+    state.entries[CDN_KEY]!.outputs.oac_lambda = "oac-lambda";
+    state.entries[CDN_KEY]!.spec = { ...state.entries[CDN_KEY]!.spec, behaviors: [{ path_pattern: "/foo/*", function: "app-foo", methods: ["GET"] }] };
+    return state;
+  };
+  const statements = (aws: Awaited<ReturnType<typeof applyAll>>) => aws.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId));
+
+  test("the next update removes its Lambda origin access control and function permissions", async () => {
+    const state = await legacy();
+    const aws = await applyAll(cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } }), state);
+    expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-lambda"]);
+    expect(statements(aws).map((i) => [i.FunctionName, i.StatementId.replace(/^cloudgear-cdn-[0-9a-f]+-/, "")])).toEqual([["app-foo", "url"], ["app-foo", "invoke"]]);
+    expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBe("");
+  });
+
+  test("destroying it removes both origin access controls and the permissions", async () => {
+    const state = await legacy();
+    const aws = fakeAws({});
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
+    expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-s3", "oac-lambda"]);
+    expect(statements(aws)).toHaveLength(2);
   });
 });
 
@@ -375,7 +364,7 @@ describe("records and cleanup the CDN does not own", () => {
     const dns = new MemoryDnsDriver();
     await dns.upsert(foreign);
     const aws = fakeAws({}, dns);
-    await applyAll(cdnConfig({ cdn: undefined }), emptyState(), aws);
+    await applyAll(cdnConfig({ cdn: undefined, certificate: [{ domain: DOMAIN, dns: dnsSpec }] }), emptyState(), aws);
     expect(aws.names()).toContain("RequestCertificateCommand");
     expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
   });
@@ -416,69 +405,39 @@ describe("records and cleanup the CDN does not own", () => {
     expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
   });
 
-  test("deleting a CDN whose create failed part-way still removes its bucket policy and permissions", async () => {
+  test("deleting a CDN whose create failed part-way still removes its bucket policy", async () => {
     const state = emptyState();
     let policy = "";
     const failing = fakeAws({
       PutBucketPolicyCommand: (input) => void (policy = input.Policy),
-      AddPermissionCommand: (input) => {
-        if (input.Principal === "cloudfront.amazonaws.com") throw error("AccessDeniedException", "cannot grant");
+      GetDistributionCommand: () => {
+        throw error("AccessDenied", "cannot read the distribution");
       },
     });
-    await expect(applyAll(cdnConfig(), state, failing)).rejects.toThrow("cannot grant");
-    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, bucket: "data", behaviors: [{ function: "app-foo" }] });
+    await expect(applyAll(cdnConfig(), state, failing)).rejects.toThrow("cannot read the distribution");
+    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, bucket: "data" });
 
     const cleanup = fakeAws({ GetBucketPolicyCommand: () => ({ Policy: policy }) });
     await applyAll({ ...baseConfig(), resource: [], function: [] }, state, cleanup);
     expect(cleanup.names()).toContain("DeleteBucketPolicyCommand");
-    expect(cleanup.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
   });
 
   test("an update that fails keeps the outputs it produced and is marked incomplete", async () => {
     const state = emptyState();
-    await applyAll(cdnConfig({ function: [] , cdn: { ...cdnConfig().cdn!, behavior: [] } }), state);
-    expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBeUndefined();
-
-    // the function arrives later; creating its origin access control succeeds, then the update fails
-    const next = cdnConfig();
+    await applyAll(cdnConfig(), state);
+    const next = cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } });
     const failing = fakeAws({
       UpdateDistributionCommand: () => {
         throw error("InvalidArgument", "bad config");
       },
     });
     await expect(applyAll(next, state, failing)).rejects.toThrow("bad config");
-    expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBe("oac-lambda");
-    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true });
+    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ id: "E1", oac_s3: "oac-s3" });
+    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, previous: { path: "web/" } });
 
     const resumed = await applyAll(next, state);
     expect(resumed.names()).not.toContain("CreateOriginAccessControlCommand");
     expect(state.entries[CDN_KEY]!.spec).not.toHaveProperty("incomplete");
-  });
-
-  test("permissions of a function dropped by a failed update are still revoked on retry and on destroy", async () => {
-    const state = emptyState();
-    await applyAll(cdnConfig(), state);
-    const dropped = cdnConfig({ cdn: { ...cdnConfig().cdn!, behavior: [] } });
-
-    const failing = fakeAws({
-      UpdateDistributionCommand: () => {
-        throw error("InvalidArgument", "bad config");
-      },
-    });
-    await expect(applyAll(dropped, state, failing)).rejects.toThrow("bad config");
-    expect(state.entries[CDN_KEY]!.spec).toMatchObject({ incomplete: true, behaviors: [], previous: { behaviors: [{ function: "app-foo" }] } });
-
-    const retry = await applyAll(dropped, state);
-    expect(retry.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
-    expect(state.entries[CDN_KEY]!.spec).not.toHaveProperty("previous");
-
-    // and a destroy after another failed update still knows what the distribution had been granted
-    const again = emptyState();
-    await applyAll(cdnConfig(), again);
-    await expect(applyAll(dropped, again, failing)).rejects.toThrow();
-    const gone = fakeAws({});
-    await applyAll({ ...baseConfig(), resource: [], function: [] }, again, gone);
-    expect(gone.of("RemovePermissionCommand").filter((i) => /cloudgear-cdn/.test(i.StatementId))).toHaveLength(2);
   });
 
   test("a distribution that vanished while disabling is not an error", async () => {
@@ -502,7 +461,7 @@ describe("records and cleanup the CDN does not own", () => {
     const opened: [string, string][] = [];
     const aws = fakeAws({}, created.dns, (provider, zone) => void opened.push([provider, zone]));
     // the declarations are gone from the config, but the state still knows where the records live
-    await applyAll({ ...baseConfig(), resource: [], function: [], dns: undefined, certificate: undefined, cdn: undefined }, state, aws);
+    await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
     expect(opened.length).toBeGreaterThan(0);
     expect(new Set(opened.map((o) => o.join("/")))).toEqual(new Set(["gandi/example.com"]));
     expect(state.entries).toEqual({});
@@ -511,8 +470,7 @@ describe("records and cleanup the CDN does not own", () => {
   test("origin access controls are found on later pages and get names within CloudFront's limit", async () => {
     const long = "a-very-long-subdomain-name-for-a-site.deeply.nested.example.com";
     const config = cdnConfig({
-      dns: { provider: "gandi", domain: long, zone: "example.com" },
-      certificate: { domain: long },
+      certificate: [{ domain: long, dns: { ...dnsSpec, domain: long }, usage: "cdn" }],
       cdn: { ...cdnConfig().cdn!, domain: long },
     });
     const pages: string[] = [];
@@ -650,21 +608,12 @@ describe("certificate", () => {
 });
 
 describe("CloudFront configuration", () => {
-  test("allowedMethods picks one of the three sets CloudFront accepts", () => {
-    expect(allowedMethods(["GET"])).toEqual(["GET", "HEAD"]);
-    expect(allowedMethods(["GET", "HEAD"])).toEqual(["GET", "HEAD"]);
-    expect(allowedMethods(["GET", "OPTIONS"])).toEqual(["GET", "HEAD", "OPTIONS"]);
-    expect(allowedMethods(["GET", "POST"])).toEqual(["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]);
-    expect(allowedMethods(["DELETE"])).toHaveLength(7);
-  });
-
-  test("a bucket-only distribution has no function origins or behaviors", () => {
-    const spec: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", behaviors: [] };
+  test("a distribution has the bucket as its only origin and no extra behaviors", () => {
+    const spec: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "" };
     const config = buildDistributionConfig(spec, {
       certificateArn: "arn",
       region: "us-east-1",
       oacS3: "oac",
-      origins: new Map(),
       reference: "ref",
       enabled: true,
     });

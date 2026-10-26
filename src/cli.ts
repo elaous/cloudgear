@@ -84,7 +84,7 @@ async function main() {
       const state = loadState(statePath, config.project, config.provider);
       const target =
         command === "destroy"
-          ? { ...config, resource: [], function: [], dns: undefined, certificate: undefined, cdn: undefined }
+          ? { ...config, resource: [], function: [], certificate: [], cdn: undefined, api: undefined }
           : config;
       const actions = plan(target, state);
       console.log(formatPlan(actions));
@@ -102,6 +102,10 @@ async function main() {
           });
           console.log(`cloudgear: ${command} complete`);
           for (const entry of command === "apply" ? Object.values(state.entries) : []) {
+            if (entry.type === "@aws.ApiGateway" && entry.outputs.url) {
+              console.log(`cloudgear: api ${entry.outputs.url} (${entry.outputs.domain_name})`);
+              continue;
+            }
             if (entry.type !== "@aws.CloudFront" || !entry.outputs.domain_name) continue;
             const status = entry.outputs.status === "Deployed" ? "live" : "still deploying";
             console.log(`cloudgear: site https://${entry.name} (${status}; distribution ${entry.outputs.id}, ${entry.outputs.domain_name})`);

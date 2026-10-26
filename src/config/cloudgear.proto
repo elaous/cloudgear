@@ -13,12 +13,19 @@ message Config {
   repeated string invoker = 5;
   // "iam" (callers must sign requests) or "none" (public function URLs).
   string authenticated = 6;
-  // The DNS zone holding this app's records; set when a certificate or CDN is declared.
-  Dns dns = 7;
-  Certificate certificate = 8;
+  reserved 7;
+  repeated Certificate certificate = 8;
   Cdn cdn = 9;
+  // The router's own domain, served through API Gateway.
+  Api api = 11;
   // Region of the functions; empty means the region the deployer chooses (--region or AWS_REGION).
   string region = 10;
+}
+
+message Api {
+  string provider = 1;
+  // Domain of the Certificate that serves the API.
+  string domain = 2;
 }
 
 message Dns {
@@ -31,6 +38,12 @@ message Dns {
 message Certificate {
   string domain = 1;
   map<string, string> options = 2;
+  // The zone validating it and holding the records of what it serves.
+  Dns dns = 3;
+  // "cdn" or "api"; empty when nothing uses it.
+  string usage = 4;
+  // Empty means us-east-1 for a CDN or unused certificate, the function region for an API.
+  string region = 5;
 }
 
 message Cdn {
@@ -40,16 +53,8 @@ message Cdn {
   string bucket = 3;
   // Key prefix of the site within the bucket ("" for the root).
   string path = 4;
-  repeated Behavior behavior = 5;
+  reserved 5;
   map<string, string> options = 6;
-}
-
-// Routes the CDN sends to a function instead of the bucket.
-message Behavior {
-  string path_pattern = 1;
-  // Name of a Function.
-  string function = 2;
-  repeated string method = 3;
 }
 
 message Resource {

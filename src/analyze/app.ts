@@ -75,9 +75,17 @@ interface Tally {
 
 export type Authentication = "iam" | "none";
 
+export interface CertificateModel {
+  domain: string;
+  dns: { provider: string; domain: string; zone: string };
+  // What the certificate serves; decides the region it is issued in.
+  usage: "cdn" | "api" | "";
+  region?: string;
+  options?: Record<string, string>;
+}
+
 export interface EdgeModel {
-  dns?: { provider: string; domain: string; zone: string };
-  certificate?: { domain: string; options?: Record<string, string> };
+  certificates: CertificateModel[];
   cdn?: {
     provider: string;
     domain: string;
@@ -85,8 +93,9 @@ export interface EdgeModel {
     // Name of the bucket resource and the key prefix of the static site within it.
     bucket: string;
     path: string;
-    behaviors: { pathPattern: string; function: string; methods: string[] }[];
   };
+  // The router's own domain, served through API Gateway.
+  api?: { provider: string; domain: string };
 }
 
 export interface AppModel extends EdgeModel {
@@ -94,7 +103,7 @@ export interface AppModel extends EdgeModel {
   // Region of the functions, from the router's options; undefined means the deploy default.
   region?: string;
   authenticated: Authentication;
-  // Set with a CDN, where viewers reach functions directly and each function verifies the token.
+  // Set with an API domain, where callers reach functions directly and each verifies the token.
   jwt?: JwtSettings;
   entry: string;
   resources: AnalyzedResource[];
@@ -247,13 +256,13 @@ export function analyzeApp(entryPath: string): AppModel {
 
   warnModuleLevelUse();
   const edge = analyzeEdge();
-  const verifying = !!jwtSettings && !!edge.cdn?.behaviors.length;
+  const verifying = !!jwtSettings && !!edge.api;
   if (verifying) {
     for (const fn of functions.values()) {
       const flags = fn.routes.map((r) => publicRoutes.get(`${r.method} ${r.path}`) ?? false);
       if (flags.some(Boolean) && !flags.every(Boolean)) {
         throw new Error(
-          `${fn.file}: "${fn.name}" serves both public and protected routes; with a cdn a function verifies tokens as a whole, so give each its own function`,
+          `${fn.file}: "${fn.name}" serves both public and protected routes; with a cert on the router a function verifies tokens as a whole, so give each its own function`,
         );
       }
       fn.anonymous = flags.every(Boolean);
@@ -357,21 +366,14 @@ export function analyzeApp(entryPath: string): AppModel {
     const dnsExprs = ofClass("@cloudgear/dns", "DNS");
     const certExprs = ofClass("@cloudgear/cdn", "Cert");
     const cdnExprs = ofClass("@cloudgear/cdn", "CDN");
-    const routerCdn = readCdnReference(router.getArguments()[1], where(router));
+    const routerCert = readCertReference(router.getArguments()[1], where(router));
+    const routerOptions = router.getArguments()[1];
 
-    if (!dnsExprs.length && !certExprs.length && !cdnExprs.length) {
-      if (routerCdn) throw new Error(`${where(router)}: the router's cdn option needs a CDN declared with new CDN(...)`);
-      return {};
+    if (!certExprs.length && !cdnExprs.length) {
+      if (routerCert) throw new Error(`${where(router)}: the router's cert needs a Cert declared with new Cert(...)`);
+      return { certificates: [] };
     }
-    for (const [name, exprs] of [["DNS", dnsExprs], ["Cert", certExprs], ["CDN", cdnExprs]] as const) {
-      if (exprs.length > 1) throw new Error(`Only one ${name} per app is supported, found: ${exprs.map(where).join(", ")}`);
-    }
-    if (routerCdn !== undefined && !cdnExprs.length) {
-      throw new Error(`${where(router)}: the router's cdn needs a CDN declared with new CDN(...)`);
-    }
-    const [dnsExpr] = dnsExprs;
-    const [certExpr] = certExprs;
-    const [cdnExpr] = cdnExprs;
+    if (cdnExprs.length > 1) throw new Error(`Only one CDN per app is supported, found: ${cdnExprs.map(where).join(", ")}`);
 
     const initializerOf = (node: Node | undefined, what: string, at: string): NewExpression => {
       const decl = node && Node.isIdentifier(node) ? resolveSymbol(node.getSymbol())?.getDeclarations()[0] : undefined;
@@ -380,91 +382,68 @@ export function analyzeApp(entryPath: string): AppModel {
       return init;
     };
 
-    let dns: EdgeModel["dns"];
-    let domainName: string | undefined;
-    if (dnsExpr) {
-      const at = where(dnsExpr);
-      const [providerArg, domainArg, optionsArg] = dnsExpr.getArguments();
-      const dnsProvider = stringLiteral(providerArg, `${at}: DNS provider`);
-      if (dnsProvider !== "gandi" && dnsProvider !== "aws") throw new Error(`${at}: DNS provider must be "gandi" or "aws"`);
+    const dnsOf = (expr: NewExpression) => {
+      const at = where(expr);
+      const [providerArg, domainArg, optionsArg] = expr.getArguments();
+      const provider = stringLiteral(providerArg, `${at}: DNS provider`);
+      if (provider !== "gandi" && provider !== "aws") throw new Error(`${at}: DNS provider must be "gandi" or "aws"`);
       const zone = readStringOption(optionsArg, "zone", `${at}: DNS options`);
       try {
-        const parsed = new DNS(dnsProvider, stringLiteral(domainArg, `${at}: DNS domain`), zone ? { zone } : {});
-        dns = { provider: dnsProvider, domain: parsed.domain, zone: parsed.zone };
+        const parsed = new DNS(provider, stringLiteral(domainArg, `${at}: DNS domain`), zone ? { zone } : {});
+        return { provider, domain: parsed.domain, zone: parsed.zone };
       } catch (err) {
         throw new Error(`${at}: ${(err as Error).message}`);
       }
-      domainName = dns.domain;
+    };
+
+    const certificates = new Map<NewExpression, CertificateModel>();
+    for (const certExpr of certExprs) {
+      const at = where(certExpr);
+      const [providerArg, dnsArg, optionsArg] = certExpr.getArguments();
+      if (stringLiteral(providerArg, `${at}: Cert provider`) !== "aws") throw new Error(`${at}: Cert provider must be "aws"`);
+      const dnsExpr = initializerOf(dnsArg, "the Cert's DNS", at);
+      if (!dnsExprs.includes(dnsExpr)) throw new Error(`${at}: the Cert's DNS must be a new DNS(...) declared in your project`);
+      const dns = dnsOf(dnsExpr);
+      const region = readRegion(optionsArg, `${at}: Cert`);
+      const clash = [...certificates.values()].find((c) => c.domain === dns.domain);
+      if (clash) throw new Error(`${at}: a certificate for "${dns.domain}" is already declared`);
+      certificates.set(certExpr, { domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
     }
 
-    let certificate: EdgeModel["certificate"];
-    if (certExpr) {
-      const at = where(certExpr);
-      const [providerArg, dnsArg] = certExpr.getArguments();
-      if (stringLiteral(providerArg, `${at}: Cert provider`) !== "aws") throw new Error(`${at}: Cert provider must be "aws"`);
-      if (!dnsExpr || initializerOf(dnsArg, "the Cert's DNS", at) !== dnsExpr) throw new Error(`${at}: the Cert must use the app's DNS`);
-      certificate = { domain: domainName!, options: readOptionsMap(certExpr.getArguments()[2], "options", `${at}: Cert`) };
-    }
+    const certOf = (node: Node | undefined, what: string, at: string): CertificateModel => {
+      const model = certificates.get(initializerOf(node, what, at));
+      if (!model) throw new Error(`${at}: ${what} must be a Cert declared in your project`);
+      return model;
+    };
+    const subdomain = (cert: CertificateModel, at: string, what: string) => {
+      if (cert.domain === cert.dns.zone) {
+        throw new Error(`${at}: "${cert.domain}" is the zone apex, which cannot be a CNAME; serve ${what} from a subdomain`);
+      }
+    };
 
     let cdn: EdgeModel["cdn"];
+    let cdnCert: CertificateModel | undefined;
+    const [cdnExpr] = cdnExprs;
     if (cdnExpr) {
       const at = where(cdnExpr);
-      const [providerArg, dnsArg, optionsArg] = cdnExpr.getArguments();
+      const [providerArg, certArg, optionsArg] = cdnExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
-      if (!dnsExpr || initializerOf(dnsArg, "the CDN's DNS", at) !== dnsExpr) throw new Error(`${at}: the CDN must use the app's DNS`);
-      if (dns!.domain === dns!.zone) {
-        throw new Error(`${at}: "${dns!.domain}" is the zone apex, which cannot be a CNAME; serve the site from a subdomain`);
-      }
-      if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with cert and bucket`);
+      cdnCert = certOf(certArg, "the CDN's cert", at);
+      subdomain(cdnCert, at, "the site");
+      if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with a bucket`);
 
       let bucketStore: Store | undefined;
-      let certOk = false;
       for (const prop of optionsArg.getProperties()) {
         if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in CDN options cannot be analyzed`);
-        const key = propName(prop);
-        const decl = valueDeclaration(prop);
-        if (key === "cert") {
-          const init = decl && Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
-          certOk = !!certExpr && init === certExpr;
-        } else if (key === "bucket") {
+        if (propName(prop) === "bucket") {
+          const decl = valueDeclaration(prop);
           bucketStore = decl && resourceByDecl.get(decl);
         }
       }
-      if (!certOk) throw new Error(`${at}: the CDN's cert must be the app's Cert, passed as a variable`);
       if (!bucketStore) throw new Error(`${at}: the CDN's bucket must be a BlobStore variable declared in your project`);
       if (bucketStore.resource.provider !== "aws") throw new Error(`${at}: the CDN's bucket must use provider "aws"`);
       if (bucketStore.resource.dry) {
         warnings.push(`${at}: bucket "${bucketStore.resource.name}" is dry, but the CDN adds one statement to its bucket policy`);
-      }
-
-      const behaviors = routerCdn === undefined ? [] : cdnBehaviors(at);
-      if (routerCdn !== undefined && initializerOf(routerCdn, "the router's cdn", where(router)) !== cdnExpr) {
-        throw new Error(`${where(router)}: the router's cdn must be the app's CDN`);
-      }
-      if (routerCdn === undefined) {
-        // The CDN only serves the bucket.
-      } else {
-        if (authenticated !== "iam") {
-          throw new Error(`${where(router)}: a CDN reaches functions through CloudFront, which needs authenticated: "iam"`);
-        }
-        const options = router.getArguments()[1];
-        if (hasOption(options, "authenticate") && jwtSettings) {
-          if (jwtSettings.header === "authorization") {
-            throw new Error(
-              `${where(router)}: with a cdn, jwtAuth needs a header other than "authorization" (for example { header: "x-auth-token" }); CloudFront origin access control signs requests to functions with that header`,
-            );
-          }
-        } else if (hasOption(options, "authenticate")) {
-          const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
-          if (open) {
-            throw new Error(
-              `${where(router)}: with a cdn, CloudFront calls functions directly and the router's authenticate hook does not run for "${open[0]}"; mark it { public: true } or drop the cdn`,
-            );
-          }
-        }
-        if (hasOption(options, "rateLimit")) {
-          warnings.push(`${where(router)}: rateLimit does not apply to routes served through the CDN`);
-        }
       }
       for (const fn of functions.values()) {
         for (const use of fn.uses.values()) {
@@ -476,47 +455,43 @@ export function analyzeApp(entryPath: string): AppModel {
           }
         }
       }
-      cdn = { provider: "aws", domain: domainName!, options: readOptionsMap(optionsArg, "options", `${at}: CDN`), bucket: bucketStore.resource.name, path: bucketStore.path, behaviors };
+      if (cdnCert.region && cdnCert.region !== "us-east-1") {
+        throw new Error(`${at}: a CDN needs its certificate in us-east-1, but the Cert says ${cdnCert.region}`);
+      }
+      cdnCert.usage = "cdn";
+      cdn = {
+        provider: "aws",
+        domain: cdnCert.domain,
+        options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
+        bucket: bucketStore.resource.name,
+        path: bucketStore.path,
+      };
     }
-    return { dns, certificate, cdn };
-  }
 
-  // CloudFront picks a behavior by path only, so each pattern needs exactly one function.
-  function cdnBehaviors(at: string) {
-    const assertSupported = (route: { method: string; path: string }, pattern: string) => {
-      if (!/^[A-Za-z0-9_\-.*$/~"'@:+]+$/.test(pattern)) {
-        throw new Error(`${at}: CloudFront path patterns allow only letters, digits and _ - . * $ / ~ " ' @ : +; ${route.method} ${route.path} does not qualify`);
+    let api: EdgeModel["api"];
+    if (routerCert !== undefined) {
+      const at = where(router);
+      const cert = certOf(routerCert, "the router's cert", at);
+      if (cert === cdnCert) throw new Error(`${at}: the router and the CDN cannot share a Cert; give each its own domain`);
+      subdomain(cert, at, "the API");
+      if (cert.region && cert.region !== routerRegion) {
+        throw new Error(`${at}: the router's Cert must be in the function region (${routerRegion ?? "the deploy region"}), but it says ${cert.region}`);
       }
-      const shadowed = SITE_PATHS.find((sitePath) => patternMatches(pattern, sitePath));
-      if (shadowed) {
-        throw new Error(
-          `${at}: ${route.method} ${route.path} becomes "${pattern}", which would capture the static site's ${shadowed}; put it under a fixed prefix such as /api`,
-        );
-      }
-    };
-    const byPattern = new Map<string, { fn: AnalyzedFunction; methods: Set<string>; first: string }>();
-    for (const fn of functions.values()) {
-      for (const route of fn.routes) {
-        const pattern = route.path.replace(/\{[^}]+\}/g, "*");
-        assertSupported(route, pattern);
-        const existing = byPattern.get(pattern);
-        if (existing && existing.fn !== fn) {
+      if (hasOption(routerOptions, "authenticate") && !jwtSettings) {
+        const open = [...publicRoutes].find(([, isPublic]) => !isPublic);
+        if (open) {
           throw new Error(
-            `${at}: CloudFront cannot route by method: ${existing.first} (${existing.fn.name}) and ${route.method} ${route.path} (${fn.name}) share the path "${pattern}"; give them different paths`,
+            `${at}: with a cert, API Gateway calls functions directly and the router's authenticate hook does not run for "${open[0]}"; mark it { public: true }, use jwtAuth, or drop the cert`,
           );
         }
-        const entry = existing ?? { fn, methods: new Set<string>(), first: `${route.method} ${route.path}` };
-        entry.methods.add(route.method);
-        byPattern.set(pattern, entry);
       }
+      if (hasOption(routerOptions, "rateLimit")) {
+        warnings.push(`${at}: rateLimit does not apply to routes served on the cert's domain`);
+      }
+      cert.usage = "api";
+      api = { provider: "aws", domain: cert.domain };
     }
-    if (byPattern.size > 25) {
-      warnings.push(`${at}: ${byPattern.size} CloudFront behaviors exceed the default quota of 25 per distribution`);
-    }
-    return orderBySpecificity([...byPattern.keys()]).map((pathPattern) => {
-      const { fn, methods } = byPattern.get(pathPattern)!;
-      return { pathPattern, function: fn.name, methods: [...methods].sort() };
-    });
+    return { certificates: [...certificates.values()], cdn, api };
   }
 
   // Declarations an identifier refers to; `{ store }` and `obj.store` lead back to the variable.
@@ -897,12 +872,12 @@ function valueDeclaration(prop: Node): Node | undefined {
   return undefined;
 }
 
-function readCdnReference(options: Node | undefined, at: string): Node | undefined {
+function readCertReference(options: Node | undefined, at: string): Node | undefined {
   if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
   for (const prop of options.getProperties()) {
-    if (propName(prop) !== "cdn") continue;
+    if (Node.isSpreadAssignment(prop) || propName(prop) !== "cert") continue;
     const decl = valueDeclaration(prop);
-    if (!decl) throw new Error(`${at}: the router's cdn must be a variable`);
+    if (!decl) throw new Error(`${at}: the router's cert must be a variable`);
     return Node.isVariableDeclaration(decl) ? decl.getNameNode() : decl;
   }
   return undefined;
@@ -990,39 +965,6 @@ function readStorePath(options: Node | undefined, at: string): string {
     }
   }
   return "";
-}
-
-// A routed function is bundled through a named export, or as a method of an exported object.
-// CloudFront's `*` also matches "/", so "/users/*" would swallow "/users/*/posts/*". A pattern must
-// come after every pattern that matches only a subset of its paths; otherwise fewer wildcards, then longer, first.
-// Paths a static site normally serves; an API route must not capture them.
-const SITE_PATHS = ["/", "/index.html", "/favicon.ico", "/assets/app.js", "/static/app.js"];
-
-function patternMatches(pattern: string, path: string): boolean {
-  const source = pattern.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${source}$`).test(path);
-}
-
-export function orderBySpecificity(patterns: string[]): string[] {
-  // Stand in for `*` with a character no pattern contains, so a literal never looks like a wildcard's match.
-  const filler = ["#", "%", "!", "^", "\u0001"].find((c) => !patterns.some((p) => p.includes(c))) ?? "\u0002";
-  const regexes = patterns.map((p) => new RegExp(`^${p.replace(/[.+$"'@:~-]/g, "\\$&").replace(/\*/g, ".*")}$`));
-  const samples = patterns.map((p) => p.replace(/\*/g, filler));
-  const narrower = (a: number, b: number) => a !== b && regexes[b]!.test(samples[a]!) && !regexes[a]!.test(samples[b]!);
-  const narrow = patterns.map((_, a) => patterns.map((_, b) => narrower(a, b)));
-  const wildcards = (pattern: string) => pattern.split("*").length - 1;
-
-  const remaining = new Set(patterns.keys());
-  const ordered: string[] = [];
-  while (remaining.size) {
-    const ready = [...remaining]
-      .filter((p) => ![...remaining].some((q) => narrow[q]![p]))
-      .sort((a, b) => wildcards(patterns[a]!) - wildcards(patterns[b]!) || patterns[b]!.length - patterns[a]!.length);
-    const next = ready[0] ?? [...remaining][0]!;
-    ordered.push(patterns[next]!);
-    remaining.delete(next);
-  }
-  return ordered;
 }
 
 function declaredNameOf(decl: Node): string {

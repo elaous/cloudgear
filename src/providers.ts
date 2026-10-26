@@ -15,6 +15,7 @@ export interface ProviderProfile {
   function: { type: string; runtime: string; memoryMb: number; timeoutS: number };
   blobStore: { type: string; actions: Record<BlobAccess, string[]> };
   cdn: { type: string; certificate: string };
+  api: { type: string };
   schedule: { type: string };
 }
 
@@ -48,6 +49,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     },
     function: { type: "@aws.Lambda", runtime: "nodejs22.x", memoryMb: 256, timeoutS: 10 },
     cdn: { type: "@aws.CloudFront", certificate: "@aws.Certificate" },
+    api: { type: "@aws.ApiGateway" },
     schedule: { type: "@aws.Schedule" },
     blobStore: {
       type: "@aws.S3",
@@ -105,6 +107,6 @@ export function validateConfigOptions(config: CloudgearConfig): void {
     validateOptions(config.provider, type, options, `${type} "${name}"`);
   for (const resource of config.resource) check(resource.type, resource.name, resource.options);
   for (const fn of config.function) check(fn.type, fn.name, fn.options);
-  if (config.certificate) check(providerProfile(config.provider).cdn.certificate, config.certificate.domain, config.certificate.options);
+  for (const certificate of config.certificate) check(providerProfile(config.provider).cdn.certificate, certificate.domain, certificate.options);
   if (config.cdn) check(providerProfile(config.cdn.provider).cdn.type, config.cdn.domain, config.cdn.options);
 }

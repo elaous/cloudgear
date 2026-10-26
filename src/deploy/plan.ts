@@ -1,4 +1,4 @@
-import type { CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
+import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
 import { createHash } from "node:crypto";
 import { toEventBridgeCron } from "@cloudgear/functions";
 import { providerProfile, validateConfigOptions } from "../providers";
@@ -13,17 +13,21 @@ export interface DesiredEntry {
   physical_name: string;
   dry: boolean;
   spec: Record<string, unknown>;
-  source: ResourceSpec | FunctionSpec | CertificateSpec | CdnSpec;
+  source: ResourceSpec | FunctionSpec | CertificateSpec | CdnSpec | ApiSpec;
   // State keys that must exist (and be applied) first.
   deps: string[];
   // Re-applied whenever a dependency is created or replaced, because it embeds their outputs.
   refresh?: boolean;
 }
 
+export const CLOUDFRONT_REGION = "us-east-1";
+
 export interface CertificateComparable {
   domain: string;
-  // The certificate is for a CDN that will own the domain's record, so that record must be free.
-  for_cdn: boolean;
+  // An endpoint will own the domain's record, so it must be free.
+  for_endpoint: boolean;
+  // Empty means the region the app is deployed to.
+  region: string;
   dns_provider: string;
   dns_zone: string;
   options?: Record<string, string>;
@@ -44,8 +48,14 @@ export interface CdnComparable {
   bucket_region: string;
   path: string;
   options?: Record<string, string>;
-  // Functions served by the CDN; their URLs are read from state when applying.
-  behaviors: { path_pattern: string; function: string; methods: string[] }[];
+}
+
+export interface ApiComparable {
+  domain: string;
+  region: string;
+  dns_provider: string;
+  dns_zone: string;
+  routes: { key: string; function: string }[];
 }
 
 export interface PlannedAction {
@@ -163,35 +173,48 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     }
   }
 
-  if (config.certificate) {
-    if (!config.dns) throw new Error("cloudgear config: certificate needs dns");
+  const certificates = new Map(config.certificate.map((c) => [c.domain, c]));
+  const certificateKeyOf = (domain: string, what: "cdn" | "api") => {
+    const certificate = certificates.get(domain);
+    if (!certificate) throw new Error(`cloudgear config: ${what} needs a certificate for "${domain}"`);
+    if (certificate.usage !== what) throw new Error(`cloudgear config: the certificate for "${domain}" must have usage "${what}"`);
+    return stateKey({ type: providerProfile(config.provider).cdn.certificate, name: domain });
+  };
+
+  for (const certificate of config.certificate) {
     const profile = providerProfile(config.provider).cdn;
+    if (certificate.usage === "cdn" && certificate.region && certificate.region !== CLOUDFRONT_REGION) {
+      throw new Error(`cloudgear config: the certificate for ${certificate.domain} serves a CDN, so it must be in ${CLOUDFRONT_REGION}`);
+    }
+    if (certificate.usage === "api" && certificate.region && certificate.region !== (config.region ?? "")) {
+      throw new Error(`cloudgear config: the certificate for ${certificate.domain} serves the API, so it must be in the function region`);
+    }
     entries.push({
       kind: "resource",
       type: profile.certificate,
-      name: config.certificate.domain,
-      physical_name: config.certificate.domain,
+      name: certificate.domain,
+      physical_name: certificate.domain,
       dry: false,
       spec: {
-        domain: config.certificate.domain,
-        for_cdn: !!config.cdn,
-        ...optionsSpec(config.certificate.options),
-        dns_provider: config.dns.provider,
-        dns_zone: config.dns.zone,
+        domain: certificate.domain,
+        for_endpoint: !!certificate.usage,
+        region: certificate.region ?? (certificate.usage === "api" ? (config.region ?? "") : CLOUDFRONT_REGION),
+        ...optionsSpec(certificate.options),
+        dns_provider: certificate.dns.provider,
+        dns_zone: certificate.dns.zone,
       } satisfies CertificateComparable,
-      source: config.certificate,
+      source: certificate,
       deps: [],
     });
   }
 
   if (config.cdn) {
-    const { cdn, dns } = config;
-    if (!dns || !config.certificate) throw new Error("cloudgear config: cdn needs dns and certificate");
+    const { cdn } = config;
+    const certificate = certificates.get(cdn.domain);
+    const certificateKey = certificateKeyOf(cdn.domain, "cdn");
     const profile = providerProfile(cdn.provider).cdn;
     const bucket = resources.get(cdn.bucket);
     if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
-    const functions = new Map(config.function.map((fn) => [fn.name, fn]));
-    const certificateKey = stateKey({ type: profile.certificate, name: config.certificate.domain });
     entries.push({
       kind: "resource",
       type: profile.type,
@@ -200,27 +223,40 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       dry: false,
       spec: {
         domain: cdn.domain,
-        dns_provider: dns.provider,
-        dns_zone: dns.zone,
+        dns_provider: certificate!.dns.provider,
+        dns_zone: certificate!.dns.zone,
         bucket: physicalOf(cdn.bucket),
         bucket_region: (bucket as ResourceSpec).region ?? "",
         path: cdn.path,
         ...optionsSpec(cdn.options),
-        behaviors: cdn.behavior.map((b) => ({
-          path_pattern: b.path_pattern,
-          function: functions.get(b.function)?.physical_name ?? b.function,
-          methods: [...b.method].sort(),
-        })),
       } satisfies CdnComparable,
       source: cdn,
-      deps: [
-        certificateKey,
-        stateKey(bucket),
-        ...cdn.behavior.flatMap((b) => {
-          const fn = functions.get(b.function);
-          return fn ? [stateKey(fn)] : [];
-        }),
-      ],
+      deps: [certificateKey, stateKey(bucket)],
+    });
+  }
+
+  if (config.api) {
+    const { api } = config;
+    const certificate = certificates.get(api.domain);
+    const certificateKey = certificateKeyOf(api.domain, "api");
+    const routed = config.function.filter((fn) => fn.route.length > 0);
+    entries.push({
+      kind: "resource",
+      type: providerProfile(api.provider).api.type,
+      name: api.domain,
+      physical_name: api.domain,
+      dry: false,
+      spec: {
+        domain: api.domain,
+        region: config.region ?? "",
+        dns_provider: certificate!.dns.provider,
+        dns_zone: certificate!.dns.zone,
+        routes: routed
+          .flatMap((fn) => fn.route.map((route) => ({ key: `${route.method} ${route.path}`, function: fn.physical_name })))
+          .sort((a, b) => a.key.localeCompare(b.key)),
+      } satisfies ApiComparable,
+      source: api,
+      deps: [certificateKey, ...routed.map((fn) => stateKey(fn))],
       refresh: true,
     });
   }

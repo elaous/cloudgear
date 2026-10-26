@@ -31,7 +31,7 @@ describe("provider options in source", () => {
       b: { tracing: "Active", "env.STAGE": "prod" },
     });
     const edge = analyzeApp(fixture("edge.ts"));
-    expect(edge.certificate!.options).toEqual({ key_algorithm: "EC_prime256v1" });
+    expect(edge.certificates[0]!.options).toEqual({ key_algorithm: "EC_prime256v1" });
     expect(edge.cdn!.options).toEqual({ price_class: "PriceClass_100", default_root_object: "home.html" });
   });
 
@@ -54,7 +54,7 @@ describe("options in the config", () => {
     expect(config.function.find((f) => f.name === "b")!.options).toEqual({ tracing: "Active", "env.STAGE": "prod" });
     const edge = await generated(fixture("edge.ts"));
     expect(decodeConfig(edge.text)).toEqual(edge.config);
-    expect(edge.config.certificate!.options).toEqual({ key_algorithm: "EC_prime256v1" });
+    expect(edge.config.certificate[0]!.options).toEqual({ key_algorithm: "EC_prime256v1" });
   });
 
   test("config without options has none", async () => {
@@ -193,10 +193,10 @@ describe("applying options on AWS", () => {
 
   test("the distribution takes its options", () => {
     const spec: CdnComparable = {
-      domain: "cdn.example.com", dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", behaviors: [],
+      domain: "cdn.example.com", dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "",
       options: { price_class: "PriceClass_100", default_root_object: "home.html" },
     };
-    const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", origins: new Map(), reference: "ref", enabled: true };
+    const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true };
     expect(buildDistributionConfig(spec, input)).toMatchObject({ PriceClass: "PriceClass_100", DefaultRootObject: "home.html" });
     const plain = buildDistributionConfig({ ...spec, options: undefined }, input);
     expect(plain.DefaultRootObject).toBe("index.html");
@@ -208,8 +208,13 @@ describe("applying options on AWS", () => {
       baseConfig({
         resource: [],
         function: [],
-        dns: { provider: "gandi", domain: "cdn.example.com", zone: "example.com" },
-        certificate: { domain: "cdn.example.com", ...(key_algorithm ? { options: { key_algorithm } } : {}) },
+        certificate: [
+          {
+            domain: "cdn.example.com",
+            dns: { provider: "gandi", domain: "cdn.example.com", zone: "example.com" },
+            ...(key_algorithm ? { options: { key_algorithm } } : {}),
+          },
+        ],
       });
     const state = emptyState();
     const aws = fakeAws();

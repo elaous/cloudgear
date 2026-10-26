@@ -16,7 +16,8 @@ describe("@policy on a static method of an exported class", () => {
     const fn = model.functions.find((f) => f.name === "Local-getObjects")!;
     expect(fn).toMatchObject({ exportName: "Local", member: "getObjects" });
     expect([...fn.uses.values()]).toEqual([{ resource: "mybucket", path: "img-cache/", accesses: new Set(["read", "write", "list"]) }]);
-    expect(model.cdn).toMatchObject({ domain: "cdn.example.com", bucket: "mybucket", path: "img-cache/" });
+    expect(model.cdn).toMatchObject({ domain: "www.example.com", bucket: "mybucket", path: "img-cache/" });
+    expect(model.api).toEqual({ provider: "aws", domain: "api.example.com" });
     expect(model.warnings).toEqual([expect.stringMatching(/also uses the CDN's bucket "mybucket" under "img-cache\/"/)]);
   });
 

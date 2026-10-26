@@ -25,6 +25,7 @@ import {
 import { createHash } from "node:crypto";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
+import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
@@ -36,6 +37,7 @@ import { environmentOptions } from "../../providers";
 import { zip } from "../../build/zip";
 import { fitName } from "../../names";
 import { certificateDriver } from "./certificate";
+import { apiGatewayDriver } from "./apigateway";
 import { cloudFrontDriver } from "./cloudfront";
 import { scheduleDriver } from "./schedule";
 
@@ -46,9 +48,9 @@ export interface SendClient {
 export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
-  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient };
+  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient };
   // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
-  // the declaration from the config still cleans up through the right zone). Needed only for certificates and CDNs.
+  // the declaration from the config still cleans up through the right zone). Needed only for certificates, CDNs and the API domain.
   dns?: (provider: string, zone: string) => DnsDriver | Promise<DnsDriver>;
   log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -73,9 +75,15 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const lambda = options.clients?.lambda ?? new LambdaClient({ region: options.region });
   const iam = options.clients?.iam ?? new IAMClient({ region: options.region });
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
-  // CloudFront only accepts certificates from us-east-1, and its API is global.
-  const acm = options.clients?.acm ?? new ACMClient({ region: "us-east-1" });
+  const acmClients = new Map<string, SendClient>();
+  const acmFor = (region: string): SendClient => {
+    if (options.clients?.acm) return options.clients.acm;
+    if (!acmClients.has(region)) acmClients.set(region, new ACMClient({ region }));
+    return acmClients.get(region)!;
+  };
+  // CloudFront's API is global, reached through us-east-1.
   const cloudfront = options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" });
+  const apigateway = options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region });
   const events = options.clients?.events ?? new EventBridgeClient({ region: options.region });
   const zones = new Map<string, Promise<DnsDriver>>();
   const requireDns = (provider: string, zone: string): Promise<DnsDriver> => {
@@ -208,8 +216,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
 
   return {
     "@aws.Schedule": scheduleDriver({ events, lambda, log }),
-    "@aws.Certificate": certificateDriver({ acm, dns: requireDns, sleep, log }),
+    "@aws.Certificate": certificateDriver({ acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
     "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
+    "@aws.ApiGateway": apiGatewayDriver({ apigateway, lambda, dns: requireDns, region: options.region, log }),
     "@aws.S3": {
       async create(entry) {
         const region = (entry.spec.region as string | undefined) || options.region;

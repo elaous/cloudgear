@@ -69,8 +69,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       member: fn.member,
       routes: fn.routes,
       provider: model.provider,
-      // Viewers of a CDN reach functions with their own requests, so no identity can be vouched for.
-      trustContext: model.authenticated === "iam" && !model.cdn?.behaviors.length,
+      // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
+      trustContext: model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       outDir: options.buildDir,
     });
@@ -114,18 +114,24 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     invoker: invokers,
     authenticated: model.authenticated,
     region: model.region,
-    dns: model.dns,
-    certificate: model.certificate,
+    certificate: model.certificates.map((c) => ({
+      domain: c.domain,
+      dns: c.dns,
+      ...(c.usage ? { usage: c.usage } : {}),
+      ...(c.region ? { region: c.region } : {}),
+      options: c.options,
+    })),
     cdn: model.cdn && {
       provider: model.cdn.provider,
       domain: model.cdn.domain,
       bucket: model.cdn.bucket,
       path: model.cdn.path,
       options: model.cdn.options,
-      behavior: model.cdn.behaviors.map((b) => ({ path_pattern: b.pathPattern, function: b.function, method: b.methods })),
     },
+    api: model.api,
   };
   if (config.cdn) providerProfile(config.cdn.provider);
+  if (config.api) providerProfile(config.api.provider);
   validateConfigOptions(config);
 
   fs.mkdirSync(configDir, { recursive: true });

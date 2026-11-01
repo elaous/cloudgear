@@ -2,7 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cron, toEventBridgeCron } from "@cloudgear/functions";
+import { cron, response, toEventBridgeCron } from "@cloudgear/functions";
 import { createHandler } from "@cloudgear/functions/drivers/aws";
 import { analyzeApp } from "../src/analyze/app";
 import { decodeConfig } from "../src/config/schema";
@@ -173,6 +173,8 @@ describe("the scheduled event in the Lambda adapter", () => {
         throw new Error("boom");
       }, []);
       await expect(handler(event)).rejects.toThrow(/Scheduled run failed with status 500/);
+      const refusing = createHandler(async () => response({ error: "no" }, { status: 401 }), []);
+      await expect(refusing(event)).rejects.toThrow(/Scheduled run failed with status 401/);
     } finally {
       console.error = log;
     }

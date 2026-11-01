@@ -576,7 +576,7 @@ new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * 
   token verification on the API domain does not apply to it. A run that ends
   in a 5xx is thrown, so Lambda records it and, as for any asynchronous
   invocation, retries it up to twice (set the function's maximum retry
-  attempts to 0 for at most one run); a 4xx result counts as a success. Scheduled runs do not happen under `listen()`.
+  attempts to 0 for at most one run); so is a 4xx result, which means a guard that refuses the run. Scheduled runs do not happen under `listen()`.
 - Changing an expression or the function's name replaces the rule. The
   provider profile names the deployer type (`schedule.type` in
   `src/providers.ts`), so another provider's scheduler (Cloud Scheduler on GCP)
@@ -692,6 +692,14 @@ a check that throws is a 500, never a refusal. Stores a check uses count as the
 function's own uses, like any other code in it. A guard works on methods like
 `@policy` and `@schedule` do (static, or instance through an exported
 instance), and wraps the method, so the order of decorators does not matter.
+The wrapper is async (a sync method then returns a promise, which the router
+awaits) and keeps the method's name. The input is the first argument and the
+context the last, so it also works with the `response` option; with `request`
+the first argument, and so the checks' input, is the request. Several contexts
+carry no caller, so a guarded route there always answers 401: `public: true`
+routes, `authenticated: "none"`, a router served through a CDN or API domain
+without `jwtAuth`, GCP, and scheduled runs (a scheduled run that a guard
+refuses fails, so do not guard a scheduled method).
 
 ## Debugging
 

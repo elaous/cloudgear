@@ -64,7 +64,7 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
         ? vercelRequestFrom({ method: "POST", url: "https://schedule.invalid/", headers: { "content-type": "application/json" }, raw: new TextEncoder().encode(JSON.stringify(input)) })
         : undefined;
       const result = await invoke(fn, input, {}, { request, response: options.response });
-      if (result.status >= 500) throw new Error(`Scheduled run failed with status ${result.status}`);
+      if (result.status >= 400) throw new Error(`Scheduled run failed with status ${result.status}`);
       return toLambda(result);
     }
     const headers = lowerCaseKeys(event.headers ?? {});

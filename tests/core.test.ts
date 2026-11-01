@@ -8,6 +8,8 @@ import { allOf, anyOf, authenticated, claim, guard, not, type Check } from "@clo
 import * as core from "@cloudgear/core";
 import { analyzeApp } from "../src/analyze/app";
 import { generate } from "../src/generate";
+import { invoke } from "../packages/functions/http";
+import { createHandler } from "@cloudgear/functions/drivers/aws";
 
 setDefaultTimeout(30_000);
 
@@ -126,6 +128,63 @@ describe("@guard", () => {
     }
     await Counted.run(undefined as never, admin);
     expect(called).toBe(0);
+  });
+});
+
+describe("@guard with the router's calling conventions", () => {
+  class Routes {
+    @guard(claim("role", "admin"))
+    static async helper(input: { id: string }, respond: typeof core.response, _context?: core.RequestContext) {
+      return respond({ id: input.id }, { status: 201 });
+    }
+
+    @guard(authenticated())
+    static sync(_input?: unknown, _context?: core.RequestContext) {
+      return { sync: true };
+    }
+
+    @guard(authenticated())
+    static async scheduled(_input?: unknown, _context?: core.RequestContext) {
+      return { ran: true };
+    }
+  }
+
+  test("a route with the response option gets the context from the last argument and keeps the helper", async () => {
+    const ok = await invoke(Routes.helper, { id: "1" }, admin, { response: "helper" });
+    expect(ok.status).toBe(201);
+    expect(JSON.parse(ok.body)).toEqual({ id: "1" });
+    expect((await invoke(Routes.helper, { id: "1" }, reader, { response: "helper" })).status).toBe(403);
+    expect((await invoke(Routes.helper, { id: "1" }, {}, { response: "helper" })).status).toBe(401);
+  });
+
+  test("a synchronous method works and is awaited by the router", async () => {
+    const result = await invoke(Routes.sync, {}, admin);
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ sync: true });
+  });
+
+  test("the wrapper keeps the method's name, so routes keep their default names", () => {
+    expect(Routes.helper.name).toBe("helper");
+    expect(Routes.sync.name).toBe("sync");
+  });
+
+  test("a scheduled run has no caller, so a guard refuses it and the run fails", async () => {
+    const handler = createHandler(Routes.scheduled, []);
+    const log = console.error;
+    console.error = () => {};
+    try {
+      await expect(handler({ source: "aws.events", time: "2026-10-26T10:00:00Z" })).rejects.toThrow(/Scheduled run failed with status 401/);
+    } finally {
+      console.error = log;
+    }
+  });
+
+  test("claims are optional on a principal, and checks short-circuit and fail closed", async () => {
+    expect(await claim("role")({}, { auth: { subject: "s" } as never })).toBe(false);
+    const calls: string[] = [];
+    await anyOf(() => (calls.push("a"), true), () => (calls.push("b"), true))({}, {});
+    expect(calls).toEqual(["a"]);
+    await expect(not(async () => Promise.reject(new Error("check failed")))({}, {})).rejects.toThrow("check failed");
   });
 });
 

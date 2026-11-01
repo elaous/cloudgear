@@ -1,0 +1,13 @@
+{
+  "name": "@cloudgear/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "@cloudgear/blob": "workspace:*",
+    "@cloudgear/functions": "workspace:*"
+  }
+}

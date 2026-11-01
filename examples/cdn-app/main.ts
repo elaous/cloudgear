@@ -1,4 +1,5 @@
-import { BlobStore, permissions, policy } from "@cloudgear/blob";
+import { BlobStore } from "@cloudgear/blob";
+import { permissions, policy } from "@cloudgear/core";
 import { CDN, Cert } from "@cloudgear/cdn";
 import { DNS } from "@cloudgear/dns";
 import { FunctionRouter } from "@cloudgear/functions";

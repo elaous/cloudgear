@@ -664,6 +664,35 @@ alone. The GCP adapter never trusts a caller identity sent in the request,
 because nothing authenticates callers before it runs; the router's API domain
 needs provider `aws`.
 
+## `@cloudgear/core`
+
+One import for the decorators and helpers an app uses: `policy`, `permissions`,
+`grant`, `schedule`, `cron`, `jwtAuth` and `response` (re-exported unchanged
+from `@cloudgear/blob` and `@cloudgear/functions`, which the analyzer follows
+through the re-export), plus `guard`:
+
+```ts
+import { claim, guard, permissions, policy } from "@cloudgear/core";
+
+export class Reports {
+  @guard(claim("role", "admin"))
+  @policy(reports, { permissions: [permissions.Get] })
+  static async read({ id }: { id: string }) { /* ... */ }
+}
+```
+
+`@guard(...checks)` runs the method only when every check passes, otherwise it
+answers `401` (no caller) or `403` (a caller the checks refuse) without calling
+it. A check is `(input, context) => boolean | Promise<boolean>` and sees
+`context.auth`, which comes from the router's `authenticate`, `jwtAuth` or a
+trusted router call, so a guard is only as good as the authentication behind
+it. Built in: `authenticated()`, `claim(name, value | predicate?)`, `allOf`,
+`anyOf` and `not`. Checks are evaluated in order and stop at the first refusal;
+a check that throws is a 500, never a refusal. Stores a check uses count as the
+function's own uses, like any other code in it. A guard works on methods like
+`@policy` and `@schedule` do (static, or instance through an exported
+instance), and wraps the method, so the order of decorators does not matter.
+
 ## Debugging
 
 Set `CG_DEBUG=true` (also `1`, `yes`, `on`) to print debug lines on stderr,
@@ -885,6 +914,7 @@ Where each moving part lives, since several are called across packages:
 | certificate, CloudFront and API Gateway drivers | `src/deploy/aws/certificate.ts`, `cloudfront.ts`, `apigateway.ts` | `awsDrivers` |
 | schedule driver (EventBridge) | `src/deploy/aws/schedule.ts` | `awsDrivers` |
 | `cron`, `schedule` | `packages/functions/cron.ts` | apps; `src/analyze/app.ts`, `src/deploy/plan.ts` |
+| `guard`, checks, re-exports | `packages/core/index.ts` | apps |
 | `groupRoutes`, `conflictingGroups` (CloudFront paths) | `src/routes.ts` | `src/analyze/app.ts`, `src/deploy/plan.ts` |
 | `routeFunctionCode` (method routing) | `src/deploy/aws/route-function.ts` | `src/deploy/aws/cloudfront.ts` |
 | `debug`, `timed`, `redact` | `packages/debug/index.ts` | every package and `src/` |

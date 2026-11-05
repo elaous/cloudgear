@@ -87,6 +87,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const lambda = withDebug("lambda", options.clients?.lambda ?? new LambdaClient({ region: options.region }));
   const iam = withDebug("iam", options.clients?.iam ?? new IAMClient({ region: options.region }));
   const tagsFor = taggerFor(options.tags);
+  const tagger = options.tags ? tagsFor : undefined;
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
   const acmClients = new Map<string, SendClient>();
   const acmFor = (region: string): SendClient => {
@@ -228,10 +229,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   return {
-    "@aws.Schedule": scheduleDriver({ events, lambda, log, tags: tagsFor }),
-    "@aws.Certificate": certificateDriver({ tags: tagsFor, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
-    "@aws.CloudFront": cloudFrontDriver({ tags: tagsFor, cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
-    "@aws.ApiGateway": apiGatewayDriver({ tags: tagsFor, apigateway, lambda, dns: requireDns, region: options.region, log }),
+    "@aws.Schedule": scheduleDriver({ events, lambda, log, tags: tagger }),
+    "@aws.Certificate": certificateDriver({ tags: tagger, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
+    "@aws.CloudFront": cloudFrontDriver({ tags: tagger, cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
+    "@aws.ApiGateway": apiGatewayDriver({ tags: tagger, apigateway, lambda, dns: requireDns, region: options.region, log }),
     "@aws.S3": {
       async create(entry) {
         const region = (entry.spec.region as string | undefined) || options.region;

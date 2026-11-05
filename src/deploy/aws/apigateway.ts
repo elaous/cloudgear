@@ -27,8 +27,10 @@ import type { ApiComparable } from "../plan";
 import { stateKey } from "../state";
 import { sameTarget } from "./certificate";
 import type { SendClient } from "./index";
+import { type Tagger } from "./tags";
 
 export interface ApiGatewayDeps {
+  tags?: Tagger;
   apigateway: SendClient;
   lambda: SendClient;
   dns: (provider: string, zone: string, token?: SecretRefSpec) => Promise<DnsDriver>;
@@ -138,7 +140,7 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
     if (!outputs.api_id) {
       deps.log(`creating the API for ${spec.domain}`);
       const created = await deps.apigateway.send(
-        new CreateApiCommand({ Name: `cloudgear-${spec.domain}`, ProtocolType: "HTTP", Description: "Managed by cloudgear" }),
+        new CreateApiCommand({ Name: `cloudgear-${spec.domain}`, ProtocolType: "HTTP", Description: "Managed by cloudgear", ...(deps.tags ? { Tags: deps.tags(spec.domain) } : {}) }),
       );
       outputs.api_id = created.ApiId;
       outputs.api_endpoint = created.ApiEndpoint;
@@ -215,7 +217,7 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
     const root = mappings.find((m) => !m.ApiMappingKey);
     if (root && root.ApiId !== apiId) throw new Error(`${spec.domain} already maps to another API (${root.ApiId}); remove that mapping first`);
     if (!domain) {
-      domain = await deps.apigateway.send(new CreateDomainNameCommand({ DomainName: spec.domain, DomainNameConfigurations: configuration as never }));
+      domain = await deps.apigateway.send(new CreateDomainNameCommand({ DomainName: spec.domain, DomainNameConfigurations: configuration as never, ...(deps.tags ? { Tags: deps.tags(spec.domain) } : {}) }));
       outputs.domain_created = "true";
     } else if (domain.DomainNameConfigurations?.[0]?.CertificateArn !== certificate.outputs.arn) {
       domain = await deps.apigateway.send(new UpdateDomainNameCommand({ DomainName: spec.domain, DomainNameConfigurations: configuration as never }));

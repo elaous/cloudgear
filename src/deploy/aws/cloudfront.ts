@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   CreateDistributionCommand,
+  TagResourceCommand,
   CreateFunctionCommand as CreateEdgeFunctionCommand,
   CreateInvalidationCommand,
   CreateOriginAccessControlCommand,
@@ -28,8 +29,10 @@ import type { CdnComparable } from "../plan";
 import { stateKey } from "../state";
 import type { SendClient } from "./index";
 import { originIdOf, routeFunctionCode } from "./route-function";
+import { tagList, type Tagger } from "./tags";
 
 export interface CloudFrontDeps {
+  tags?: Tagger;
   cloudfront: SendClient;
   s3: (region?: string) => SendClient;
   lambda: SendClient;
@@ -269,6 +272,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       outputs.arn = created.Distribution.ARN;
       outputs.domain_name = created.Distribution.DomainName;
       outputs.url = `https://${outputs.domain_name}`;
+      if (deps.tags) await deps.cloudfront.send(new TagResourceCommand({ Resource: outputs.arn, Tags: { Items: tagList(deps.tags(spec.domain)) } }));
       deps.log(`distribution ${outputs.id} will be served from ${outputs.domain_name}`);
     } else {
       deps.log(`updating distribution ${outputs.id}`);

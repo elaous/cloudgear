@@ -4,8 +4,10 @@ import { createHash } from "node:crypto";
 import { PartialApplyError, type Driver } from "../apply";
 import type { ScheduleComparable } from "../plan";
 import type { SendClient } from "./index";
+import { tagList, type Tagger } from "./tags";
 
 export interface ScheduleDeps {
+  tags?: Tagger;
   events: SendClient;
   lambda: SendClient;
   log: (message: string) => void;
@@ -25,7 +27,7 @@ export function scheduleDriver(deps: ScheduleDeps): Driver {
     if (!functionArn) throw new Error(`Function ${spec.function} has no ARN yet; apply it first`);
     try {
       const rule = await deps.events.send(
-        new PutRuleCommand({ Name: ruleName, ScheduleExpression: spec.expression, State: "ENABLED", Description: `cloudgear: ${spec.cron} UTC` }),
+        new PutRuleCommand({ Name: ruleName, ScheduleExpression: spec.expression, State: "ENABLED", Description: `cloudgear: ${spec.cron} UTC`, ...(deps.tags ? { Tags: tagList(deps.tags(spec.function)) } : {}) }),
       );
       outputs.rule_name = ruleName;
       outputs.rule_arn = rule.RuleArn;

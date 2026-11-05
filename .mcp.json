@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "awslabs.lambda-tool-mcp-server": {
+      "command": "uvx",
+      "args": ["awslabs.lambda-tool-mcp-server@latest"],
+      "env": {
+        "AWS_REGION": "${AWS_REGION:-us-east-1}",
+        "FUNCTION_TAG_KEY": "cloudgear:managed-by",
+        "FUNCTION_TAG_VALUE": "cloudgear"
+      }
+    }
+  }
+}

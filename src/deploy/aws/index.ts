@@ -29,7 +29,7 @@ import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
-import { CreateBucketCommand, DeleteBucketCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, DeleteBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
@@ -38,6 +38,7 @@ import { environmentOptions } from "../../providers";
 import { secretStatements, type SecretContext } from "./secrets";
 import { zip } from "../../build/zip";
 import { fitName } from "../../names";
+import { taggerFor, tagList, type Tags } from "./tags";
 import { certificateDriver } from "./certificate";
 import { apiGatewayDriver } from "./apigateway";
 import { cloudFrontDriver } from "./cloudfront";
@@ -56,6 +57,8 @@ export interface AwsDriverOptions {
   // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
   // the declaration from the config still cleans up through the right zone). Needed only for certificates, CDNs and the API domain.
   dns?: (provider: string, zone: string, token?: SecretRefSpec) => DnsDriver | Promise<DnsDriver>;
+  // Applied to every resource created, with `cloudgear:resource` set to its logical name.
+  tags?: Tags;
   log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -83,6 +86,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   };
   const lambda = withDebug("lambda", options.clients?.lambda ?? new LambdaClient({ region: options.region }));
   const iam = withDebug("iam", options.clients?.iam ?? new IAMClient({ region: options.region }));
+  const tagsFor = taggerFor(options.tags);
+  const tagger = options.tags ? tagsFor : undefined;
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
   const acmClients = new Map<string, SendClient>();
   const acmFor = (region: string): SendClient => {
@@ -224,10 +229,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   return {
-    "@aws.Schedule": scheduleDriver({ events, lambda, log }),
-    "@aws.Certificate": certificateDriver({ acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
-    "@aws.CloudFront": cloudFrontDriver({ cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
-    "@aws.ApiGateway": apiGatewayDriver({ apigateway, lambda, dns: requireDns, region: options.region, log }),
+    "@aws.Schedule": scheduleDriver({ events, lambda, log, tags: tagger }),
+    "@aws.Certificate": certificateDriver({ tags: tagger, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
+    "@aws.CloudFront": cloudFrontDriver({ tags: tagger, cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
+    "@aws.ApiGateway": apiGatewayDriver({ tags: tagger, apigateway, lambda, dns: requireDns, region: options.region, log }),
     "@aws.S3": {
       async create(entry) {
         const region = (entry.spec.region as string | undefined) || options.region;
@@ -238,8 +243,14 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               region === "us-east-1" ? undefined : { LocationConstraint: region as BucketLocationConstraint },
           }),
         );
-        if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
-          await setVersioning(entry.physical_name, region, true);
+        try {
+          if (options.tags) await s3For(region).send(new PutBucketTaggingCommand({ Bucket: entry.physical_name, Tagging: { TagSet: tagList(tagsFor(entry.name)) } }));
+          if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
+            await setVersioning(entry.physical_name, region, true);
+          }
+        } catch (err) {
+          await s3For(region).send(new DeleteBucketCommand({ Bucket: entry.physical_name })).catch(() => {});
+          throw err;
         }
         return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },
@@ -278,7 +289,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         // Undo steps for what this call created, so a failure never leaves orphans behind.
         const undo: (() => Promise<unknown>)[] = [];
         try {
-          const role = await iam.send(new CreateRoleCommand({ RoleName: roleName, AssumeRolePolicyDocument: LAMBDA_TRUST_POLICY }));
+          const role = await iam.send(new CreateRoleCommand({ RoleName: roleName, AssumeRolePolicyDocument: LAMBDA_TRUST_POLICY, ...(options.tags ? { Tags: tagList(tagsFor(entry.name)) } : {}) }));
           undo.push(() => iam.send(new DeleteRoleCommand({ RoleName: roleName })));
           await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY }));
           undo.push(() => iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })));
@@ -300,6 +311,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
                   MemorySize: spec.memory_mb,
                   Timeout: spec.timeout_s,
                   Environment: environment(spec),
+                  ...(options.tags ? { Tags: tagsFor(entry.name) } : {}),
                   ...lambdaOptions(spec),
                 }),
               );

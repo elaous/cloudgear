@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   CreateDistributionCommand,
+  CreateDistributionWithTagsCommand,
   CreateFunctionCommand as CreateEdgeFunctionCommand,
   CreateInvalidationCommand,
   CreateOriginAccessControlCommand,
@@ -28,8 +29,10 @@ import type { CdnComparable } from "../plan";
 import { stateKey } from "../state";
 import type { SendClient } from "./index";
 import { originIdOf, routeFunctionCode } from "./route-function";
+import { tagList, type Tagger } from "./tags";
 
 export interface CloudFrontDeps {
+  tags?: Tagger;
   cloudfront: SendClient;
   s3: (region?: string) => SendClient;
   lambda: SendClient;
@@ -264,7 +267,12 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
 
     if (!outputs.id) {
       deps.log(`creating the distribution for ${spec.domain}`);
-      const created = await deps.cloudfront.send(new CreateDistributionCommand({ DistributionConfig: config(`cloudgear-${tag(spec.domain)}-${Date.now()}`) }));
+      const distributionConfig = config(`cloudgear-${tag(spec.domain)}-${Date.now()}`);
+      const created = await deps.cloudfront.send(
+        deps.tags
+          ? new CreateDistributionWithTagsCommand({ DistributionConfigWithTags: { DistributionConfig: distributionConfig, Tags: { Items: tagList(deps.tags(spec.domain)) } } })
+          : new CreateDistributionCommand({ DistributionConfig: distributionConfig }),
+      );
       outputs.id = created.Distribution.Id;
       outputs.arn = created.Distribution.ARN;
       outputs.domain_name = created.Distribution.DomainName;

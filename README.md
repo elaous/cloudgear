@@ -942,6 +942,42 @@ inline policy with the inferred S3 permissions), a Lambda function and a
 function URL with `AuthType: AWS_IAM`. Credentials come from the standard AWS
 SDK chain.
 
+#### Tags
+
+Every AWS resource `apply` creates (bucket, IAM role, function, schedule rule,
+certificate, distribution, API and API domain) is tagged:
+
+| Tag | Value |
+| --- | --- |
+| `cloudgear:managed-by` | `cloudgear` |
+| `cloudgear:version` | the cloudgear version that created it |
+| `cloudgear:project` | the config's project |
+| `cloudgear:env` | `--env`, when given (for example `prod`) |
+| `cloudgear:author` | `--author`, else `git config user.name`, else `$USER` |
+| `cloudgear:resource` | the resource's logical name |
+
+`--tag key=value` (repeatable) adds more; `cloudgear:` and `aws:` keys are
+reserved. Values are sanitized to what AWS accepts. Tags are set when cloudgear
+creates a resource: resources that already exist are not retagged, and a tag
+change alone is not a planned change. Remove the resource or tag it yourself to
+update it. A distribution's origin access control and edge function cannot be
+tagged.
+
+Tags need extra IAM permissions for the deploying principal: `s3:PutBucketTagging`,
+`iam:TagRole`, `lambda:TagResource`, `events:TagResource`,
+`acm:AddTagsToCertificate`, `cloudfront:TagResource`, and `apigateway:POST` on
+`/tags/*`. A missing one fails the create (a bucket whose tagging fails is
+deleted again). `cloudgear:author` holds a person's name, readable by anyone
+who can list tags, and appears in billing exports; pass `--author ci` to
+avoid that. A tag key is up to 128 characters of letters, digits, spaces and
+`+ - = . _ : / @`, and a resource takes at most 50 tags.
+
+`cloudgear:managed-by` is also how the AWS Lambda MCP server finds the
+functions: `.mcp.json` runs `awslabs.lambda-tool-mcp-server` with
+`FUNCTION_TAG_KEY=cloudgear:managed-by` and `FUNCTION_TAG_VALUE=cloudgear`, so
+only cloudgear's functions become tools. It uses the AWS credentials and
+`AWS_REGION` of the environment it starts in.
+
 #### Regions
 
 The deploy region is the router's `region` option, else `--region`, else

@@ -5,8 +5,10 @@ import { PartialApplyError, type Driver } from "../apply";
 import type { CertificateComparable } from "../plan";
 import { stateKey } from "../state";
 import type { SendClient } from "./index";
+import { tagList, type Tagger } from "./tags";
 
 export interface CertificateDeps {
+  tags?: Tagger;
   acm: (region: string) => SendClient;
   region: string;
   dns: (provider: string, zone: string, token?: SecretRefSpec) => Promise<DnsDriver>;
@@ -79,7 +81,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
         }
       }
       try {
-        const requested = await deps.acm(spec.region || deps.region).send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS", KeyAlgorithm: spec.options?.key_algorithm as never }));
+        const requested = await deps.acm(spec.region || deps.region).send(new RequestCertificateCommand({ DomainName: spec.domain, ValidationMethod: "DNS", KeyAlgorithm: spec.options?.key_algorithm as never, ...(deps.tags ? { Tags: tagList(deps.tags(spec.domain)) } : {}) }));
         const arn: string = requested.CertificateArn;
         outputs.arn = arn;
         deps.log(`requested a certificate for ${spec.domain}`);

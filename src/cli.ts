@@ -13,6 +13,8 @@ import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan"
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
+import { baseTags, type Tags } from "./deploy/aws/tags";
+import pkg from "../package.json";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -35,6 +37,9 @@ Options:
                      caller identities, not just to call (generate only, repeatable)
   --reserved-concurrency <n>  Cap each function's concurrent executions (generate only)
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
+  --env <name>       Environment tag for created resources, e.g. prod (apply only)
+  --author <name>    Author tag (default: git user.name, then $USER) (apply only)
+  --tag <key=value>  Extra tag on created resources, repeatable (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
   --path <path>      Restrict secrets set to one declared path
@@ -50,6 +55,9 @@ async function main() {
       invoker: { type: "string", multiple: true },
       "reserved-concurrency": { type: "string" },
       region: { type: "string" },
+      env: { type: "string" },
+      author: { type: "string" },
+      tag: { type: "string", multiple: true },
       "from-envfile": { type: "string" },
       "allow-unignored": { type: "boolean", default: false },
       path: { type: "string" },
@@ -127,7 +135,7 @@ async function main() {
           return;
         }
         try {
-          await apply(actions, state, await drivers(actions, config, configPath, values.region), {
+          await apply(actions, state, await drivers(actions, config, configPath, values.region, deployTags(config, configPath, values)), {
             save: (s) => saveState(statePath, s),
             log: (message) => console.log(`cloudgear: ${message}`),
           });
@@ -246,23 +254,42 @@ function readConfig(configPath: string): CloudgearConfig {
 }
 
 // One deployer set per provider the planned actions touch.
-async function drivers(actions: PlannedAction[], config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
+function gitUserName(cwd: string): string {
+  try {
+    return Bun.spawnSync(["git", "config", "user.name"], { cwd, stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
+  } catch {
+    return "";
+  }
+}
+
+function deployTags(config: CloudgearConfig, configPath: string, values: { env?: string; author?: string; tag?: string[] }): Tags {
+  const extra: Tags = {};
+  for (const pair of values.tag ?? []) {
+    const at = pair.indexOf("=");
+    if (at < 1) throw new Error(`--tag expects key=value, got "${pair}"`);
+    extra[pair.slice(0, at)] = pair.slice(at + 1);
+  }
+  const author = values.author ?? (gitUserName(path.dirname(configPath)) || process.env.USER);
+  return baseTags({ project: config.project, version: pkg.version, env: values.env, author, extra });
+}
+
+async function drivers(actions: PlannedAction[], config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {
   const providers = providersNeeded(actions);
   debug("cli", "providers", { providers });
   const all: Drivers = {};
   for (const provider of providers) {
     const factory = DEPLOYERS[provider];
     if (!factory) throw new Error(`Provider "${provider}" has no deploy drivers yet; the config can be planned but not applied`);
-    Object.assign(all, await factory(config, configPath, region));
+    Object.assign(all, await factory(config, configPath, region, tags));
   }
   return all;
 }
 
-const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined) => Promise<Drivers>> = {
+const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags) => Promise<Drivers>> = {
   aws: awsDeployers,
 };
 
-async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<Drivers> {
+async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {
   // The router's own `region` option wins, then --region, then the environment.
   const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });
@@ -275,6 +302,7 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
   }
   return awsDrivers({
     region: resolvedRegion,
+    tags,
     dns: async (provider, zone, token) =>
       createDnsDriver(provider as DnsProvider, zone, token ? { token: await readSecretRef(token, resolvedRegion) } : undefined),
     log: (message) => console.log(`cloudgear: ${message}`),

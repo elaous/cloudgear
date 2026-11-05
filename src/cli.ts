@@ -135,7 +135,7 @@ async function main() {
           return;
         }
         try {
-          await apply(actions, state, await drivers(actions, config, configPath, values.region, deployTags(config, values)), {
+          await apply(actions, state, await drivers(actions, config, configPath, values.region, deployTags(config, configPath, values)), {
             save: (s) => saveState(statePath, s),
             log: (message) => console.log(`cloudgear: ${message}`),
           });
@@ -254,15 +254,22 @@ function readConfig(configPath: string): CloudgearConfig {
 }
 
 // One deployer set per provider the planned actions touch.
-function deployTags(config: CloudgearConfig, values: { env?: string; author?: string; tag?: string[] }): Tags {
+function gitUserName(cwd: string): string {
+  try {
+    return Bun.spawnSync(["git", "config", "user.name"], { cwd, stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
+  } catch {
+    return "";
+  }
+}
+
+function deployTags(config: CloudgearConfig, configPath: string, values: { env?: string; author?: string; tag?: string[] }): Tags {
   const extra: Tags = {};
   for (const pair of values.tag ?? []) {
     const at = pair.indexOf("=");
     if (at < 1) throw new Error(`--tag expects key=value, got "${pair}"`);
     extra[pair.slice(0, at)] = pair.slice(at + 1);
   }
-  const git = Bun.spawnSync(["git", "config", "user.name"], { stdout: "pipe", stderr: "ignore" });
-  const author = values.author ?? (git.stdout.toString().trim() || process.env.USER);
+  const author = values.author ?? (gitUserName(path.dirname(configPath)) || process.env.USER);
   return baseTags({ project: config.project, version: pkg.version, env: values.env, author, extra });
 }
 

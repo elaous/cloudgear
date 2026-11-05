@@ -243,9 +243,14 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               region === "us-east-1" ? undefined : { LocationConstraint: region as BucketLocationConstraint },
           }),
         );
-        if (options.tags) await s3For(region).send(new PutBucketTaggingCommand({ Bucket: entry.physical_name, Tagging: { TagSet: tagList(tagsFor(entry.name)) } }));
-        if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
-          await setVersioning(entry.physical_name, region, true);
+        try {
+          if (options.tags) await s3For(region).send(new PutBucketTaggingCommand({ Bucket: entry.physical_name, Tagging: { TagSet: tagList(tagsFor(entry.name)) } }));
+          if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
+            await setVersioning(entry.physical_name, region, true);
+          }
+        } catch (err) {
+          await s3For(region).send(new DeleteBucketCommand({ Bucket: entry.physical_name })).catch(() => {});
+          throw err;
         }
         return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },

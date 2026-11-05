@@ -61,6 +61,10 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
       Distribution: { Id: "E1", ARN: "arn:aws:cloudfront::1:distribution/E1", DomainName: "d111.cloudfront.net" },
       ETag: "e1",
     }),
+    CreateDistributionWithTagsCommand: () => ({
+      Distribution: { Id: "E1", ARN: "arn:aws:cloudfront::1:distribution/E1", DomainName: "d111.cloudfront.net" },
+      ETag: "e1",
+    }),
     GetDistributionCommand: () => ({ Distribution: { Status: "Deployed" } }),
     GetDistributionConfigCommand: () => ({ ETag: "e1", DistributionConfig: { CallerReference: "ref-1", Enabled: true } }),
     UpdateDistributionCommand: () => ({ ETag: "e2" }),

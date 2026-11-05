@@ -27,6 +27,20 @@ describe("baseTags", () => {
     expect(() => baseTags({ project: "p", version: "1", extra: { "aws:x": "x" } })).toThrow(/reserved/);
   });
 
+  test("invalid keys and too many tags are refused", () => {
+    expect(() => baseTags({ project: "p", version: "1", extra: { "bad#key": "x" } })).toThrow(/invalid/);
+    expect(() => baseTags({ project: "p", version: "1", extra: { ["k".repeat(129)]: "x" } })).toThrow(/invalid/);
+    const many = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`k${i}`, "v"]));
+    expect(() => baseTags({ project: "p", version: "1", extra: many })).toThrow(/Too many tags/);
+  });
+
+  test("control characters and surrogate pairs are handled", () => {
+    expect(tagValue("a\nb\tc")).toBe("a_b_c");
+    expect(tagValue("𝒜".repeat(300))).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(Array.from(tagValue("𝒜".repeat(300)))).toHaveLength(256);
+    expect(Array.from(tagValue("é".repeat(300)))).toHaveLength(256);
+  });
+
   test("values drop characters AWS rejects and are capped at 256", () => {
     expect(tagValue("a<b>c")).toBe("a_b_c");
     expect(tagValue("x".repeat(300))).toHaveLength(256);
@@ -40,6 +54,12 @@ describe("applied tags", () => {
     expect(asMap(aws.of("PutBucketTaggingCommand")[0].Tagging.TagSet)).toMatchObject({ ...tags, "cloudgear:resource": "data" });
     expect(asMap(aws.of("CreateRoleCommand")[0].Tags)).toMatchObject({ ...tags, "cloudgear:resource": "foo" });
     expect(aws.of("CreateFunctionCommand")[0].Tags).toMatchObject({ ...tags, "cloudgear:resource": "foo" });
+  });
+
+  test("a failed bucket tag deletes the bucket", async () => {
+    const aws = fakeAws({ PutBucketTaggingCommand: () => { throw new Error("AccessDenied"); } }, undefined, undefined, tags);
+    await expect(applyAll(baseConfig(), emptyState(), aws)).rejects.toThrow(/AccessDenied/);
+    expect(aws.of("DeleteBucketCommand")).toEqual([{ Bucket: "data" }]);
   });
 
   test("nothing is tagged when no tags are configured", async () => {
@@ -60,7 +80,8 @@ describe("applied tags", () => {
     const aws = await applyAll(config, emptyState(), fakeAws({}, undefined, undefined, tags));
     expect(asMap(aws.of("PutRuleCommand")[0].Tags)).toMatchObject(tags);
     expect(asMap(aws.of("RequestCertificateCommand")[0].Tags)).toMatchObject({ ...tags, "cloudgear:resource": "cdn.example.com" });
-    expect(asMap(aws.of("TagResourceCommand")[0].Tags.Items)).toMatchObject(tags);
+    expect(asMap(aws.of("CreateDistributionWithTagsCommand")[0].DistributionConfigWithTags.Tags.Items)).toMatchObject(tags);
+    expect(aws.of("CreateDistributionCommand")).toEqual([]);
   });
 
   test("the API and its domain are tagged", async () => {

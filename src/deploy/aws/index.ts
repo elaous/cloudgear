@@ -33,8 +33,9 @@ import { CreateBucketCommand, DeleteBucketCommand, PutBucketVersioningCommand, S
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
-import type { FunctionSpec } from "../../config/schema";
+import type { FunctionSpec, SecretRefSpec } from "../../config/schema";
 import { environmentOptions } from "../../providers";
+import { secretStatements, type SecretContext } from "./secrets";
 import { zip } from "../../build/zip";
 import { fitName } from "../../names";
 import { certificateDriver } from "./certificate";
@@ -54,7 +55,7 @@ export interface AwsDriverOptions {
   clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient };
   // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
   // the declaration from the config still cleans up through the right zone). Needed only for certificates, CDNs and the API domain.
-  dns?: (provider: string, zone: string) => DnsDriver | Promise<DnsDriver>;
+  dns?: (provider: string, zone: string, token?: SecretRefSpec) => DnsDriver | Promise<DnsDriver>;
   log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -94,10 +95,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const apigateway = withDebug("apigateway", options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region }));
   const events = withDebug("events", options.clients?.events ?? new EventBridgeClient({ region: options.region }));
   const zones = new Map<string, Promise<DnsDriver>>();
-  const requireDns = (provider: string, zone: string): Promise<DnsDriver> => {
+  const requireDns = (provider: string, zone: string, token?: SecretRefSpec): Promise<DnsDriver> => {
     if (!options.dns) throw new Error("A DNS driver is required for the certificate and CDN, but none was configured");
     const key = `${provider}/${zone}`;
-    if (!zones.has(key)) zones.set(key, Promise.resolve(options.dns(provider, zone)));
+    if (!zones.has(key)) zones.set(key, Promise.resolve(options.dns(provider, zone, token)));
     return zones.get(key)!;
   };
   const log = options.log ?? (() => {});
@@ -114,13 +115,13 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     throw new Error(`Timed out waiting for Lambda ${name} to become active`);
   }
 
-  async function putPermissions(roleName: string, spec: FunctionComparable) {
-    if (!spec.permissions.length && !traced(spec)) {
+  async function putPermissions(roleName: string, spec: FunctionComparable, roleArn?: string) {
+    if (!spec.permissions.length && !traced(spec) && !spec.secrets?.length) {
       await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })), "NoSuchEntity");
       return;
     }
     await iam.send(
-      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec) }),
+      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec, spec.secrets?.length ? { account: accountOf(roleArn), region: options.region } : undefined) }),
     );
   }
 
@@ -281,7 +282,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           undo.push(() => iam.send(new DeleteRoleCommand({ RoleName: roleName })));
           await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY }));
           undo.push(() => iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })));
-          await putPermissions(roleName, spec);
+          await putPermissions(roleName, spec, role.Role.Arn);
           undo.push(() => iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })));
 
           const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
@@ -331,7 +332,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = current.outputs.role_name ?? roleNameFor(entry.physical_name);
         const tracingChanged = traced(spec) !== ((current.spec.options as Record<string, string> | undefined)?.tracing === "Active");
-        if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec);
+        if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec, current.outputs.role_arn);
         if (changes.includes("code")) {
           const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
           await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code }));
@@ -394,7 +395,13 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   };
 }
 
-export function policyDocument(spec: FunctionComparable): string {
+function accountOf(roleArn: string | undefined): string {
+  const account = roleArn?.split(":")[4];
+  if (!account) throw new Error("The function's role has no ARN in state; destroy and apply it again to grant it secrets");
+  return account;
+}
+
+export function policyDocument(spec: FunctionComparable, secrets?: SecretContext): string {
   const statements = spec.permissions.flatMap((p) => {
     if (p.type !== "@aws.S3") throw new Error(`No IAM mapping for permissions on ${p.type}`);
     const bucketArn = `arn:aws:s3:::${p.physical_name}`;
@@ -417,6 +424,10 @@ export function policyDocument(spec: FunctionComparable): string {
   });
   if (traced(spec)) {
     statements.push({ Effect: "Allow", Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"], Resource: "*" } as never);
+  }
+  if (spec.secrets?.length) {
+    if (!secrets) throw new Error("The account and region are needed to grant a function its secrets");
+    statements.push(...(secretStatements(spec.secrets, secrets) as never[]));
   }
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
 }

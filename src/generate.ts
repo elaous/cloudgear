@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
 import { debug, timed } from "@cloudgear/debug";
-import { analyzeApp } from "./analyze/app";
+import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
-import { encodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
+import { encodeConfig, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
 import { fitName, sanitizeName } from "./names";
 import { capability, crossProviderAccess, providerProfile, validateConfigOptions } from "./providers";
 
@@ -100,6 +100,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     if (includedBytes > WARN_INCLUDED_BYTES) {
       warnings.push(`${fn.file}: the files included in "${fn.name}" are ${Math.ceil(includedBytes / 1e6)} MB; a zipped package over 50 MB cannot be uploaded directly`);
     }
+    checkSecrets(fn, model.provider, profile.reservedEnv, warnings);
+    const hydrated = fn.secrets.filter((s) => s.env || s.all);
     const bundle = await timed("generate", `bundle ${fn.name}`, () => bundleFunction({
       name: fn.name,
       sourceFile: fn.file,
@@ -113,6 +115,12 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       include: fn.include,
       passRequest: fn.passRequest,
       responseKind: fn.responseKind,
+      secrets: hydrated.length
+        ? {
+            bindings: hydrated.map((s) => ({ provider: s.provider, service: s.service, ...(s.region ? { region: s.region } : {}), path: s.path, name: s.name, env: s.env, ...(s.all ? { all: true } : {}) })),
+            services: [...new Set(hydrated.map((s) => s.service))].sort(),
+          }
+        : undefined,
       outDir: options.buildDir,
     }));
     debug("generate", `bundled ${fn.name}`, () => ({ file: bundle.file, sha256: bundle.sha256, bytes: fs.statSync(bundle.file).size }));
@@ -140,6 +148,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       include: fn.include.length ? fn.include.map((f) => f.rel) : undefined,
       pass_request: fn.passRequest || undefined,
       response_arg: fn.responseKind,
+      secret: fn.secrets.length ? fn.secrets.map(bindingSpec) : undefined,
     });
   }
 
@@ -162,7 +171,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     certificate: model.certificates.map((c) => ({
       provider: c.provider,
       domain: c.domain,
-      dns: c.dns,
+      dns: { ...c.dns, ...(c.dns.token ? { token: refSpec(c.dns.token) } : {}) },
       ...(c.usage ? { usage: c.usage } : {}),
       ...(c.region ? { region: c.region } : {}),
       options: c.options,
@@ -183,7 +192,57 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));
   debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
+  if (functions.some((f) => f.secret?.length) || config.certificate.some((c) => c.dns.token)) {
+    for (const file of trackedEnvFiles(path.dirname(path.resolve(options.entry)))) {
+      warnings.push(`${file} is tracked by git; keep env files out of the repository (add them to .gitignore) and load them with \`cloudgear secrets set\``);
+    }
+  }
   return { config, warnings: [...new Set(warnings)] };
+}
+
+const refSpec = (s: SecretRefModel): SecretRefSpec => ({
+  provider: s.provider,
+  service: s.service,
+  ...(s.region ? { region: s.region } : {}),
+  ...(s.kmsKey ? { kms_key: s.kmsKey } : {}),
+  path: s.path,
+  name: s.name,
+});
+
+const bindingSpec = (s: SecretBindingModel): SecretBindingSpec => ({ ...refSpec(s), env: s.env, ...(s.all ? { all: true } : {}) });
+
+const SECRETISH = /SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API_?KEY/i;
+
+// The environment a function gets must be unambiguous, and secrets do not belong in plain options.
+function checkSecrets(fn: AnalyzedFunction, provider: string, reserved: RegExp, warnings: string[]): void {
+  const targets = new Map<string, string>();
+  for (const binding of fn.secrets.filter((s) => s.env)) {
+    if (reserved.test(binding.env)) throw new Error(`${fn.file}: "${fn.name}" cannot fill ${binding.env}; it is reserved by the platform`);
+    const target = `${binding.path}/${binding.name}`;
+    const clash = targets.get(binding.env);
+    if (clash && clash !== target) throw new Error(`${fn.file}: "${fn.name}" fills ${binding.env} from both ${clash} and ${target}`);
+    targets.set(binding.env, target);
+    if (fn.options?.[`env.${binding.env}`] !== undefined) {
+      throw new Error(`${fn.file}: "${fn.name}" sets ${binding.env} as a plain env option and as a secret; keep one`);
+    }
+  }
+  for (const binding of fn.secrets.filter((s) => s.all)) {
+    warnings.push(`${fn.file}: "${fn.name}" reads every secret under ${binding.path}; list the names to grant only those`);
+  }
+  for (const key of Object.keys(fn.options ?? {})) {
+    if (key.startsWith("env.") && SECRETISH.test(key.slice(4))) {
+      warnings.push(`${fn.file}: "${fn.name}" sets ${key} as a plain option, which is committed and readable on the function; use a SecretStore for secrets`);
+    }
+  }
+  if (fn.secrets.length && provider !== "aws") {
+    warnings.push(`${fn.file}: "${fn.name}" (${provider}) reads AWS secrets; cross-provider access is not provisioned yet, so the function gets no credentials for them`);
+  }
+}
+
+// Env files committed to git are the one way a secret set by `cloudgear secrets set` reaches the repository.
+function trackedEnvFiles(dir: string): string[] {
+  const result = Bun.spawnSync(["git", "ls-files", "--", ".env*", "*.env"], { cwd: dir, stderr: "ignore" });
+  return result.exitCode === 0 ? result.stdout.toString().split("\n").filter(Boolean) : [];
 }
 
 function projectName(dir: string): string {

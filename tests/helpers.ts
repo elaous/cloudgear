@@ -38,7 +38,7 @@ export const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearC
 export const emptyState = (): State => ({ version: 1, project: "app", provider: "aws", entries: {} });
 
 // Records every SDK command and answers with canned responses.
-export function fakeAws(overrides: Record<string, (input: any, attempt: number) => any> = {}, dns: MemoryDnsDriver | null = new MemoryDnsDriver(), onDns?: (provider: string, zone: string) => void) {
+export function fakeAws(overrides: Record<string, (input: any, attempt: number) => any> = {}, dns: MemoryDnsDriver | null = new MemoryDnsDriver(), onDns?: (provider: string, zone: string, token?: unknown) => void) {
   const calls: { name: string; input: any }[] = [];
   let integrationCounter = 0;
   const counts = new Map<string, number>();
@@ -98,7 +98,7 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
     readIncluded: (spec) => (spec.include ?? []).map((name) => ({ name, data: new TextEncoder().encode(`content of ${name}`) })),
     clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client },
-    dns: dns ? (provider, zone) => (onDns?.(provider, zone), dns) : undefined,
+    dns: dns ? (provider, zone, token) => (onDns?.(provider, zone, token), dns) : undefined,
     sleep: async () => void sleeps.push(0),
     log: (message) => void logs.push(message),
   });

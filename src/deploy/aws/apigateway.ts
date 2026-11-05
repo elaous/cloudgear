@@ -21,6 +21,7 @@ import {
 } from "@aws-sdk/client-apigatewayv2";
 import { AddPermissionCommand, GetPolicyCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import type { DnsDriver } from "@cloudgear/dns";
+import type { SecretRefSpec } from "../../config/schema";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
 import type { ApiComparable } from "../plan";
 import { stateKey } from "../state";
@@ -30,7 +31,7 @@ import type { SendClient } from "./index";
 export interface ApiGatewayDeps {
   apigateway: SendClient;
   lambda: SendClient;
-  dns: (provider: string, zone: string) => Promise<DnsDriver>;
+  dns: (provider: string, zone: string, token?: SecretRefSpec) => Promise<DnsDriver>;
   region: string;
   log: (message: string) => void;
 }
@@ -128,7 +129,7 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
     }
     const arns = functionArns(entry, spec, context);
 
-    const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+    const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
     const record = await dns.get(spec.domain, "CNAME");
     if (record && !(outputs.domain_name && sameTarget(record.values[0], outputs.domain_name))) {
       throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the API from another name`);
@@ -252,7 +253,7 @@ export function apiGatewayDriver(deps: ApiGatewayDeps): Driver {
       const spec = current.spec as unknown as Partial<ApiComparable>;
       const domain = spec.domain ?? current.name;
       if (current.outputs.domain_name && spec.dns_provider && spec.dns_zone) {
-        const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+        const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
         const record = await dns.get(domain, "CNAME");
         if (record && sameTarget(record.values[0], current.outputs.domain_name)) await dns.remove(domain, "CNAME");
       }

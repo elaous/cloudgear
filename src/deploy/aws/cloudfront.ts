@@ -20,6 +20,7 @@ import {
 import { AddPermissionCommand, GetPolicyCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyCommand } from "@aws-sdk/client-s3";
 import type { DnsDriver } from "@cloudgear/dns";
+import type { SecretRefSpec } from "../../config/schema";
 import { fitName } from "../../names";
 import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
@@ -32,7 +33,7 @@ export interface CloudFrontDeps {
   cloudfront: SendClient;
   s3: (region?: string) => SendClient;
   lambda: SendClient;
-  dns: (provider: string, zone: string) => Promise<DnsDriver>;
+  dns: (provider: string, zone: string, token?: SecretRefSpec) => Promise<DnsDriver>;
   region: string;
   sleep: (ms: number) => Promise<void>;
   log: (message: string) => void;
@@ -233,7 +234,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     if (!certificate?.outputs.arn) throw new Error(`Certificate for ${spec.domain} is not issued yet`);
 
     // Fail before creating anything if the name already points somewhere that is not ours.
-    const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+    const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
     const record = await dns.get(spec.domain, "CNAME");
     if (record && !(outputs.domain_name && sameTarget(record.values[0], outputs.domain_name))) {
       throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
@@ -330,7 +331,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       const domain = spec.domain ?? current.name;
       // Only remove the record if it still points at the distribution this entry created.
       if (current.outputs.domain_name && spec.dns_provider && spec.dns_zone) {
-        const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+        const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
         const record = await dns.get(domain, "CNAME");
         if (record && sameTarget(record.values[0], current.outputs.domain_name)) await dns.remove(domain, "CNAME");
       }

@@ -13,6 +13,7 @@ import {
 } from "ts-morph";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
+import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
 
@@ -27,6 +28,22 @@ export interface AnalyzedResource {
   file: string;
   line: number;
 }
+
+// One secret a function can read, as a SecretStore path declares it.
+export interface SecretBindingModel {
+  provider: "aws";
+  service: SecretService;
+  region?: string;
+  kmsKey?: string;
+  path: string;
+  // Empty for a wildcard binding.
+  name: string;
+  // The environment variable it fills; empty when the code reads the secret itself.
+  env: string;
+  all?: boolean;
+}
+
+export type SecretRefModel = Omit<SecretBindingModel, "env" | "all">;
 
 export interface StoreUse {
   resource: string;
@@ -52,6 +69,7 @@ export interface AnalyzedFunction {
   options?: Record<string, string>;
   // Five-field UTC cron expressions that also trigger the function.
   schedules: string[];
+  secrets: SecretBindingModel[];
   // Files copied into the function's package, by path from the project root.
   include: { rel: string; abs: string }[];
   // The function takes a Vercel-style request instead of its input, and a response after it.
@@ -85,7 +103,7 @@ export type Authentication = "iam" | "none";
 export interface CertificateModel {
   provider: string;
   domain: string;
-  dns: { provider: string; domain: string; zone: string };
+  dns: { provider: string; domain: string; zone: string; token?: SecretRefModel };
   // What the certificate serves; decides the region it is issued in.
   usage: "cdn" | "api" | "";
   region?: string;
@@ -196,6 +214,172 @@ export function analyzeApp(entryPath: string): AppModel {
     resourceByDecl.set(decl, { resource: existing ?? resource, path: storePath });
   }
 
+  // Secret stores, and the paths, names and references built from them
+  interface SecretStoreModel {
+    provider: "aws";
+    service: SecretService;
+    region?: string;
+    kmsKey?: string;
+  }
+  interface SecretPathModel {
+    store: SecretStoreModel;
+    prefix: string;
+    all: boolean;
+  }
+  const secretStores = new Map<Node, SecretStoreModel>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/secrets", "SecretStore"))) {
+    const at = where(expr);
+    const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
+    if (!decl || decl.getInitializer() !== expr) throw new Error(`${at}: assign new SecretStore(...) to a variable so its paths can be traced`);
+    const [providerArg, optionsArg] = expr.getArguments();
+    if (stringLiteral(providerArg, `${at}: SecretStore provider`) !== "aws") throw new Error(`${at}: SecretStore provider must be "aws"`);
+    const service = readStringOption(optionsArg, "service", `${at}: SecretStore options`) ?? "ssm";
+    if (service !== "ssm" && service !== "secretsmanager") throw new Error(`${at}: SecretStore service must be "ssm" or "secretsmanager"`);
+    secretStores.set(decl, {
+      provider: "aws",
+      service,
+      region: readRegion(optionsArg, `${at}: SecretStore`),
+      kmsKey: readStringOption(optionsArg, "kmsKey", `${at}: SecretStore options`),
+    });
+  }
+  let secretUses: SecretBindingModel[] | undefined;
+
+  const initOf = (node: Node | undefined, depth = 0): Node | undefined => {
+    if (!node) return undefined;
+    if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isNonNullExpression(node)) return initOf(node.getExpression(), depth);
+    if (Node.isIdentifier(node) && depth < 8) {
+      const decl = resolveSymbol(node.getSymbol())?.getDeclarations()[0];
+      const init = decl && Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
+      return init ? initOf(init, depth + 1) : node;
+    }
+    return node;
+  };
+
+  // `ss.path("/a/b")`, written inline or held by a variable.
+  const pathOf = (node: Node | undefined): SecretPathModel | undefined => {
+    const e = initOf(node);
+    if (!e || !Node.isCallExpression(e)) return undefined;
+    const callee = e.getExpression();
+    if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "path") return undefined;
+    const owner = callee.getExpression();
+    const ownerDecl = Node.isIdentifier(owner) ? resolveSymbol(owner.getSymbol())?.getDeclarations()[0] : undefined;
+    const store = ownerDecl && secretStores.get(ownerDecl);
+    if (!store) return undefined;
+    const text = stringLiteral(e.getArguments()[0], `${where(e)}: SecretStore path`);
+    try {
+      return { store, ...(({ prefix, all }) => ({ prefix, all }))(parseSecretPath(text)) };
+    } catch (err) {
+      throw new Error(`${where(e)}: ${(err as Error).message}`);
+    }
+  };
+
+  // A call of such a path: `env(["A"])`, `env({ A: "b" })` or `env("A")`.
+  const callOnPath = (node: Node | undefined): { path: SecretPathModel; arg: Node | undefined; call: CallExpression } | undefined => {
+    const e = initOf(node);
+    if (!e || !Node.isCallExpression(e)) return undefined;
+    const path = pathOf(e.getExpression());
+    return path ? { path, arg: e.getArguments()[0], call: e } : undefined;
+  };
+
+  const bindingFields = (path: SecretPathModel) => ({
+    provider: path.store.provider,
+    service: path.store.service,
+    ...(path.store.region ? { region: path.store.region } : {}),
+    ...(path.store.kmsKey ? { kmsKey: path.store.kmsKey } : {}),
+    path: path.prefix,
+  });
+
+  const namesOf = (arg: Node | undefined, at: string): [string, string][] => {
+    const e = initOf(arg);
+    if (e && Node.isArrayLiteralExpression(e)) {
+      return e.getElements().map((item): [string, string] => {
+        const name = stringLiteral(item, `${at}: secret name`);
+        return [name, name];
+      });
+    }
+    if (e && Node.isObjectLiteralExpression(e)) {
+      return e.getProperties().map((prop): [string, string] => {
+        if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in a secret map cannot be analyzed`);
+        const key = propName(prop);
+        const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+        if (!key) throw new Error(`${at}: secret map entries must be NAME: "secret-name"`);
+        return [key, stringLiteral(value, `${at}: secret ${key}`)];
+      });
+    }
+    throw new Error(`${at}: expected an array of names or a map of environment variable to secret name, got: ${arg?.getText() ?? "nothing"}`);
+  };
+
+  const uniqueSecrets = (items: SecretBindingModel[]): SecretBindingModel[] => {
+    const seen = new Map<string, SecretBindingModel>();
+    for (const item of items) seen.set(JSON.stringify([item.service, item.region, item.path, item.name, item.env, !!item.all]), item);
+    return [...seen.values()];
+  };
+
+  // The `env:` option of a route or router: names to fill into the environment.
+  function bindingsOf(node: Node, at: string): SecretBindingModel[] {
+    const e = initOf(node);
+    if (!e) return [];
+    if (Node.isArrayLiteralExpression(e)) return e.getElements().flatMap((item) => bindingsOf(item, at));
+    const whole = pathOf(e);
+    if (whole) {
+      if (!whole.all) throw new Error(`${at}: env needs the names to read, ${e.getText()}(["NAME"]), or a path ending in /* for everything under it`);
+      return [{ ...bindingFields(whole), name: "", env: "", all: true }];
+    }
+    const call = callOnPath(e);
+    if (!call) throw new Error(`${at}: env must be built from a SecretStore path, for example ss.path("/app")(["NAME"]); got: ${node.getText()}`);
+    const arg = initOf(call.arg);
+    if (arg && (Node.isStringLiteral(arg) || Node.isNoSubstitutionTemplateLiteral(arg))) {
+      throw new Error(`${at}: a single secret is read in code with env("NAME").get(); an env binding takes a list or a map`);
+    }
+    return namesOf(call.arg, at).map(([env, name]) => ({ ...bindingFields(call.path), name, env }));
+  }
+
+  // Code that reads a secret by name needs access to it; the environment is not filled for it.
+  function noteSecretCall(call: CallExpression) {
+    if (!secretUses) return;
+    const found = callOnPath(call);
+    const arg = initOf(found?.arg);
+    if (found && arg && (Node.isStringLiteral(arg) || Node.isNoSubstitutionTemplateLiteral(arg))) {
+      secretUses.push({ ...bindingFields(found.path), name: arg.getLiteralValue(), env: "" });
+    }
+  }
+
+  function noteSecretRef(decl: Node) {
+    if (!secretUses || !Node.isVariableDeclaration(decl)) return;
+    const ref = refOf(decl.getInitializer());
+    if (ref) secretUses.push({ ...ref, env: "" });
+  }
+
+  // `env("NAME")`, written inline or held by a variable.
+  function refOf(node: Node | undefined): SecretRefModel | undefined {
+    const found = callOnPath(node);
+    const arg = initOf(found?.arg);
+    if (!found || !arg || !(Node.isStringLiteral(arg) || Node.isNoSubstitutionTemplateLiteral(arg))) return undefined;
+    return { ...bindingFields(found.path), name: arg.getLiteralValue() };
+  }
+
+  // The DNS provider's API token, read from a secret when `apply` runs: never a literal in source.
+  function readSecretToken(options: Node | undefined, at: string): SecretRefModel | undefined {
+    if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "token");
+    if (!prop) return undefined;
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    const ref = refOf(value);
+    if (!ref) {
+      throw new Error(`${at}: the DNS token must be a secret, for example token: ss.path("/app")("GANDI_TOKEN"); a literal would be committed with the code`);
+    }
+    return ref;
+  }
+
+  function readEnvOption(options: Node | undefined, at: string): SecretBindingModel[] {
+    if (!options || !Node.isObjectLiteralExpression(options)) return [];
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "env");
+    if (!prop) return [];
+    const shorthand = Node.isShorthandPropertyAssignment(prop) ? resolveSymbol(prop.getValueSymbol())?.getDeclarations()[0] : undefined;
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : shorthand && Node.isVariableDeclaration(shorthand) ? shorthand.getInitializer() : undefined;
+    return value ? bindingsOf(value, at) : [];
+  }
+
   // Router
   const routers = newExpressions.filter((e) => isClass(e, "@cloudgear/functions", "FunctionRouter"));
   if (routers.length === 0) throw new Error(`No new FunctionRouter(...) found in ${relative(entry)} or its imports`);
@@ -213,6 +397,7 @@ export function analyzeApp(entryPath: string): AppModel {
     );
   }
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
+  const routerSecrets = readEnvOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
@@ -284,6 +469,7 @@ export function analyzeApp(entryPath: string): AppModel {
     routeNames.set(routeName, `${method} ${routePath}`);
     fn.routes.push({ method, path: routePath, name: routeName });
     addSchedules(fn, readScheduleOption(call.getArguments()[3], `${where(call)}: route`));
+    fn.secrets = uniqueSecrets([...fn.secrets, ...readEnvOption(call.getArguments()[3], `${where(call)}: route`)]);
     const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
     const earlier = routeOptionsOf.get(fn);
     if (earlier && !sameOptions(earlier.options, routeFunctionOptions)) {
@@ -300,6 +486,7 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 
   for (const fn of functions.values()) {
+    fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
     const merged = { ...routerFunctionOptions, ...fn.options };
     fn.options = Object.keys(merged).length ? merged : undefined;
   }
@@ -344,9 +531,11 @@ export function analyzeApp(entryPath: string): AppModel {
       if (!visited.has(target)) collectUsage(target, tallies, visited);
     };
     const visit = (node: Node) => {
+      if (Node.isCallExpression(node)) noteSecretCall(node);
       if (!Node.isIdentifier(node)) return;
       for (const decl of declarationsOf(node)) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
+        noteSecretRef(decl);
         // `@policy(store, ...)` is read separately, and is not a use of the store.
         const decorator = node.getFirstAncestorByKind(SyntaxKind.Decorator);
         if (decorator && isPolicyDecorator(decorator)) continue;
@@ -452,9 +641,10 @@ export function analyzeApp(entryPath: string): AppModel {
       const provider = stringLiteral(providerArg, `${at}: DNS provider`);
       if (provider !== "gandi" && provider !== "aws") throw new Error(`${at}: DNS provider must be "gandi" or "aws"`);
       const zone = readStringOption(optionsArg, "zone", `${at}: DNS options`);
+      const token = readSecretToken(optionsArg, at);
       try {
         const parsed = new DNS(provider, stringLiteral(domainArg, `${at}: DNS domain`), zone ? { zone } : {});
-        return { provider, domain: parsed.domain, zone: parsed.zone };
+        return { provider, domain: parsed.domain, zone: parsed.zone, ...(token ? { token } : {}) };
       } catch (err) {
         throw new Error(`${at}: ${(err as Error).message}`);
       }
@@ -791,12 +981,16 @@ export function analyzeApp(entryPath: string): AppModel {
       inputType: param?.getTypeNode()?.getText(),
       routes: [],
       schedules: [],
+      secrets: [],
       include: [],
       passRequest: false,
       uses: new Map(),
     };
     const tallies = new Map<string, Tally>();
+    secretUses = [];
     collectUsage(fnNode, tallies, new Set());
+    fn.secrets = uniqueSecrets(secretUses);
+    secretUses = undefined;
     const policies = readPolicies(fnNode, fn.name);
     for (const [key, allowed] of policies) {
       const tally = tallies.get(key);

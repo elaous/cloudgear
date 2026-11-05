@@ -1,5 +1,6 @@
 import { DeleteCertificateCommand, DescribeCertificateCommand, RequestCertificateCommand } from "@aws-sdk/client-acm";
 import type { DnsDriver } from "@cloudgear/dns";
+import type { SecretRefSpec } from "../../config/schema";
 import { PartialApplyError, type Driver } from "../apply";
 import type { CertificateComparable } from "../plan";
 import { stateKey } from "../state";
@@ -8,7 +9,7 @@ import type { SendClient } from "./index";
 export interface CertificateDeps {
   acm: (region: string) => SendClient;
   region: string;
-  dns: (provider: string, zone: string) => Promise<DnsDriver>;
+  dns: (provider: string, zone: string, token?: SecretRefSpec) => Promise<DnsDriver>;
   sleep: (ms: number) => Promise<void>;
   log: (message: string) => void;
 }
@@ -43,7 +44,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     const name = record.Name.replace(/\.$/, "");
     outputs.validation_name = name;
     outputs.validation_value = record.Value;
-    const dns = await deps.dns(spec.dns_provider, spec.dns_zone);
+    const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
     // ACM reuses one validation record per account and domain, so an identical one is already ours to use.
     const existing = await dns.get(name, "CNAME");
     if (existing && !sameTarget(existing.values[0], record.Value)) {
@@ -72,7 +73,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       const taken = ["@aws.CloudFront", "@aws.ApiGateway"].some((type) => context.entry(stateKey({ type, name: spec.domain })));
       // Fail early if the endpoint could not take the record later.
       if (spec.for_endpoint && !taken) {
-        const record = await (await deps.dns(spec.dns_provider, spec.dns_zone)).get(spec.domain, "CNAME");
+        const record = await (await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token)).get(spec.domain, "CNAME");
         if (record) {
           throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);
         }

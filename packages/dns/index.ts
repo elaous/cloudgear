@@ -11,14 +11,18 @@ import {
 } from "./driver";
 
 export { createDnsDriver, registerDnsDriver, normalizeHostname, normalizeRecordName, relativeName, isWithinZone } from "./driver";
-export type { DnsDriver, DnsDriverFactory, DnsProvider, DnsRecord, DnsRecordType } from "./driver";
+export type { DnsDriver, DnsDriverFactory, DnsDriverOptions, DnsProvider, DnsRecord, DnsRecordType } from "./driver";
 
 export interface DnsOptions {
   // The DNS zone holding the records; defaults to the last two labels of the domain (three for
   // common second-level suffixes like co.uk). Set it for anything else.
   zone?: string;
+  // The provider's API token: a secret from a SecretStore, never a literal. Gandi reads GANDI_TOKEN without it.
+  token?: TokenSource;
   driver?: DnsDriver;
 }
+
+export type TokenSource = string | { get(): Promise<string> };
 
 // Registrations under these second-level labels (example.co.uk) span three labels.
 const SECOND_LEVEL = new Set(["co", "com", "org", "net", "gov", "edu", "ac", "ne", "or", "go"]);
@@ -36,6 +40,7 @@ export class DNS {
   readonly domain: string;
   readonly zone: string;
   private driverPromise?: Promise<DnsDriver>;
+  private readonly token?: TokenSource;
 
   constructor(
     readonly provider: DnsProvider,
@@ -45,6 +50,7 @@ export class DNS {
     this.domain = normalizeHostname(domain);
     this.zone = normalizeHostname(options.zone ?? defaultZone(this.domain));
     if (!isWithinZone(this.domain, this.zone)) throw new Error(`Domain "${this.domain}" is not inside zone "${this.zone}"`);
+    this.token = options.token;
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }
 
@@ -78,7 +84,10 @@ export class DNS {
   }
 
   private driver(): Promise<DnsDriver> {
-    this.driverPromise ??= createDnsDriver(this.provider, this.zone).catch((err) => {
+    this.driverPromise ??= (async () => {
+      const token = typeof this.token === "string" || !this.token ? this.token : await this.token.get();
+      return createDnsDriver(this.provider, this.zone, { token });
+    })().catch((err) => {
       this.driverPromise = undefined;
       throw err;
     });

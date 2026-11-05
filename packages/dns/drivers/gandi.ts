@@ -73,4 +73,4 @@ function format(type: DnsRecordType, value: string): string {
   return value;
 }
 
-export const createGandiDriver = (zone: string): DnsDriver => new GandiDnsDriver(zone);
+export const createGandiDriver = (zone: string, options: { token?: string } = {}): DnsDriver => new GandiDnsDriver(zone, { token: options.token });

@@ -16,7 +16,12 @@ export interface DnsDriver {
   get(name: string, type: DnsRecordType): Promise<DnsRecord | null>;
 }
 
-export type DnsDriverFactory = (zone: string) => DnsDriver | Promise<DnsDriver>;
+export interface DnsDriverOptions {
+  // The provider's API token, when it needs one (Gandi); otherwise read from the environment.
+  token?: string;
+}
+
+export type DnsDriverFactory = (zone: string, options: DnsDriverOptions) => DnsDriver | Promise<DnsDriver>;
 
 export const DEFAULT_TTL = 300;
 
@@ -31,7 +36,7 @@ export function registerDnsDriver(provider: DnsProvider, factory: DnsDriverFacto
   factories.set(provider, factory);
 }
 
-export async function createDnsDriver(provider: DnsProvider, zone: string): Promise<DnsDriver> {
+export async function createDnsDriver(provider: DnsProvider, zone: string, options: DnsDriverOptions = {}): Promise<DnsDriver> {
   if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") return (await import("./drivers/memory")).createMemoryDriver(zone);
   let factory = factories.get(provider);
   if (!factory) {
@@ -40,7 +45,7 @@ export async function createDnsDriver(provider: DnsProvider, zone: string): Prom
     factory = await load();
     factories.set(provider, factory);
   }
-  return factory(zone);
+  return factory(zone, options);
 }
 
 const HOSTNAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;

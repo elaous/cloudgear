@@ -31,3 +31,7 @@ const isDirectChild = (name: string, prefix: string) => name.startsWith(`${prefi
 export function createMemorySecretDriver(): MemorySecretDriver {
   return new MemorySecretDriver();
 }
+
+export function resetMemorySecrets(): void {
+  stores.clear();
+}

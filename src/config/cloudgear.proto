@@ -39,6 +39,32 @@ message Dns {
   string provider = 1;
   string domain = 2;
   string zone = 3;
+  // Read from a secret by `apply`; never stored here.
+  SecretRef token = 4;
+}
+
+// A secret by name, for infrastructure that needs a value while it is created.
+message SecretRef {
+  string provider = 1;
+  string service = 2;
+  string region = 3;
+  string path = 4;
+  string name = 5;
+  string kms_key = 6;
+}
+
+// A secret a function can read; `env` names the variable `generate` fills from it.
+message SecretBinding {
+  string provider = 1;
+  string service = 2;
+  string region = 3;
+  string path = 4;
+  // Empty with `all`: every secret under `path`.
+  string name = 5;
+  // Empty when the code reads the secret itself.
+  string env = 6;
+  bool all = 7;
+  string kms_key = 8;
 }
 
 message Certificate {
@@ -105,6 +131,7 @@ message Function {
   reserved 17;
   // "helper" or "writer": what the function receives after its first argument.
   string response_arg = 18;
+  repeated SecretBinding secret = 19;
 }
 
 message Source {

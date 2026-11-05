@@ -1,4 +1,4 @@
-import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec } from "../config/schema";
+import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec, SecretBindingSpec, SecretRefSpec } from "../config/schema";
 import { createHash } from "node:crypto";
 import { toEventBridgeCron } from "@cloudgear/functions";
 import { capability, providerOfType, validateConfigOptions } from "../providers";
@@ -31,6 +31,7 @@ export interface CertificateComparable {
   region: string;
   dns_provider: string;
   dns_zone: string;
+  dns_token?: SecretRefSpec;
   options?: Record<string, string>;
 }
 
@@ -45,6 +46,7 @@ export interface CdnComparable {
   domain: string;
   dns_provider: string;
   dns_zone: string;
+  dns_token?: SecretRefSpec;
   bucket: string;
   bucket_region: string;
   path: string;
@@ -60,6 +62,7 @@ export interface ApiComparable {
   region: string;
   dns_provider: string;
   dns_zone: string;
+  dns_token?: SecretRefSpec;
   routes: { key: string; function: string }[];
 }
 
@@ -87,12 +90,13 @@ export interface FunctionComparable {
   scheduled_only?: true;
   invokers: string[];
   permissions: { type: string; physical_name: string; path: string; actions: string[] }[];
+  secrets?: SecretBindingSpec[];
 }
 
 const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   code: ["code"],
   config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency", "options"],
-  permissions: ["permissions"],
+  permissions: ["permissions", "secrets"],
   auth: ["auth", "scheduled_only"],
   invokers: ["invokers"],
 };
@@ -145,6 +149,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         path: p.path,
         actions: [...p.action].sort(),
       })),
+      ...(fn.secret?.length ? { secrets: [...fn.secret].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) } : {}),
     };
     entries.push({
       kind: "function",
@@ -207,6 +212,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         ...optionsSpec(certificate.options),
         dns_provider: certificate.dns.provider,
         dns_zone: certificate.dns.zone,
+        ...(certificate.dns.token ? { dns_token: certificate.dns.token } : {}),
       } satisfies CertificateComparable,
       source: certificate,
       deps: [],
@@ -230,6 +236,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         domain: cdn.domain,
         dns_provider: certificate!.dns.provider,
         dns_zone: certificate!.dns.zone,
+        ...(certificate!.dns.token ? { dns_token: certificate!.dns.token } : {}),
         bucket: physicalOf(cdn.bucket),
         bucket_region: (bucket as ResourceSpec).region ?? "",
         path: cdn.path,
@@ -259,6 +266,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         domain: api.domain,
         dns_provider: certificate!.dns.provider,
         dns_zone: certificate!.dns.zone,
+        ...(certificate!.dns.token ? { dns_token: certificate!.dns.token } : {}),
         bucket: "",
         bucket_region: "",
         path: "",
@@ -291,6 +299,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         region: config.region ?? "",
         dns_provider: certificate!.dns.provider,
         dns_zone: certificate!.dns.zone,
+        ...(certificate!.dns.token ? { dns_token: certificate!.dns.token } : {}),
         routes: routed
           .flatMap((fn) => fn.route.map((route) => ({ key: `${route.method} ${route.path}`, function: fn.physical_name })))
           .sort((a, b) => a.key.localeCompare(b.key)),

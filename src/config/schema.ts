@@ -1,3 +1,4 @@
+import { assertSecretName, parseSecretPath } from "@cloudgear/secrets";
 import { encodePrototxt, parsePrototxt, type ProtoMessage } from "./prototxt";
 
 // Mirrors cloudgear.proto.
@@ -14,10 +15,25 @@ export interface CloudgearConfig {
   region?: string;
 }
 
+export interface SecretRefSpec {
+  provider: string;
+  service: string;
+  region?: string;
+  kms_key?: string;
+  path: string;
+  name: string;
+}
+
+export interface SecretBindingSpec extends SecretRefSpec {
+  env: string;
+  all?: boolean;
+}
+
 export interface DnsSpec {
   provider: string;
   domain: string;
   zone: string;
+  token?: SecretRefSpec;
 }
 
 export type Options = Record<string, string>;
@@ -76,6 +92,7 @@ export interface FunctionSpec {
   include?: string[];
   pass_request?: boolean;
   response_arg?: "helper" | "writer";
+  secret?: SecretBindingSpec[];
 }
 
 const REPEATED = new Set([
@@ -90,6 +107,7 @@ const REPEATED = new Set([
   "resource.options",
   "function.options",
   "function.schedule",
+  "function.secret",
   "function.include",
   "certificate.options",
   "api.options",
@@ -115,7 +133,12 @@ export function decodeConfig(text: string): CloudgearConfig {
     certificate: (raw.certificate ?? []).map((c: Record<string, any>) => ({
       provider: String(c.provider ?? "aws"),
       domain: str(c, "domain"),
-      dns: { provider: str(c.dns ?? {}, "provider"), domain: str(c.dns ?? {}, "domain"), zone: str(c.dns ?? {}, "zone") },
+      dns: {
+        provider: str(c.dns ?? {}, "provider"),
+        domain: str(c.dns ?? {}, "domain"),
+        zone: str(c.dns ?? {}, "zone"),
+        ...(c.dns?.token ? { token: secretRefFrom(c.dns.token) } : {}),
+      },
       ...(c.usage === "cdn" || c.usage === "api" ? { usage: c.usage } : {}),
       ...(c.region ? { region: String(c.region) } : {}),
       ...optionsFrom(c),
@@ -171,10 +194,32 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...(f.include?.length ? { include: f.include.map(String) } : {}),
       ...(f.pass_request === true ? { pass_request: true } : {}),
       ...(f.response_arg === "helper" || f.response_arg === "writer" ? { response_arg: f.response_arg } : {}),
+      ...(f.secret?.length ? { secret: f.secret.map((s: Record<string, any>) => ({ ...secretRefFrom(s), env: String(s.env ?? ""), ...(s.all === true ? { all: true } : {}) })) } : {}),
       ...optionsFrom(f),
     })),
   };
   return config;
+}
+
+const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
+// Policies are built from these, so a hand-edited config is checked as the analyzer would.
+function secretRefFrom(raw: Record<string, any>): SecretRefSpec {
+  const service = String(raw.service ?? "ssm");
+  if (service !== "ssm" && service !== "secretsmanager") throw new Error(`cloudgear config: unknown secret service "${service}"`);
+  const { prefix, all } = parseSecretPath(str(raw, "path"));
+  if (all) throw new Error(`cloudgear config: secret path "${raw.path}" must not end in /*`);
+  const name = String(raw.name ?? "");
+  if (name) assertSecretName(name);
+  if (raw.region && !REGION.test(String(raw.region))) throw new Error(`cloudgear config: invalid secret region "${raw.region}"`);
+  return {
+    provider: String(raw.provider ?? "aws"),
+    service,
+    ...(raw.region ? { region: String(raw.region) } : {}),
+    ...(raw.kms_key ? { kms_key: String(raw.kms_key) } : {}),
+    path: prefix,
+    name,
+  };
 }
 
 // A proto map is written as repeated { key, value } entries.

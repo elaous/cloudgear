@@ -51,13 +51,24 @@ export interface HandlerOptions {
   // The function takes a Vercel-style request instead of the input, and a response after it.
   request?: boolean;
   response?: ResponseKind;
+  // Awaited once before the first request or scheduled run (for example to load secrets); a failure is retried.
+  prepare?: () => Promise<void>;
 }
 
 export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec[], options: HandlerOptions = {}) {
   const compiled = routes.map((route) => ({ ...route, matcher: compilePath(route.path) }));
+  let prepared: Promise<void> | undefined;
+  const prepare = () =>
+    options.prepare
+      ? (prepared ??= options.prepare().catch((err) => {
+          prepared = undefined;
+          throw err;
+        }))
+      : undefined;
 
   return async (event: FunctionUrlEvent | ScheduledEvent): Promise<FunctionUrlResult> => {
     if (isScheduled(event)) {
+      await prepare();
       debug("lambda", "scheduled event", { time: event.time, rule: event.resources?.[0] });
       const input = { scheduledTime: event.time, rule: event.resources?.[0] };
       const request = options.request
@@ -66,6 +77,13 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       const result = await invoke(fn, input, {}, { request, response: options.response });
       if (result.status >= 400) throw new Error(`Scheduled run failed with status ${result.status}`);
       return toLambda(result);
+    }
+    try {
+      await prepare();
+    } catch (err) {
+      console.error(err);
+      debug("lambda", `preparation failed: ${errorSummary(err)}`);
+      return toLambda(json(500, { error: "Function initialization failed" }));
     }
     const headers = lowerCaseKeys(event.headers ?? {});
     const text = event.body

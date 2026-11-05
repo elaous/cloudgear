@@ -13,6 +13,7 @@ import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan"
 import { loadState, saveState, stateKey, type State } from "./deploy/state";
 import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
+import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
 const USAGE = `Usage: cloudgear <command> [options]
 
@@ -23,6 +24,9 @@ Commands:
   import <name> [physical-id]  Adopt an existing resource into state instead of creating it
   invalidate [path...]         Clear the CDN's cache (default: everything)
   destroy [--auto-approve]     Delete every managed resource (imported ones are only forgotten)
+  secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
+                               Store the secrets the app declares (NAME reads its value from stdin)
+  secrets list                 Show which declared secrets are stored; values are never printed
 
 Options:
   --config <file>    Config file (default: cloudgear.prototxt)
@@ -31,6 +35,10 @@ Options:
                      caller identities, not just to call (generate only, repeatable)
   --reserved-concurrency <n>  Cap each function's concurrent executions (generate only)
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
+  --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
+  --allow-unignored  Load an env file git does not ignore (secrets set)
+  --path <path>      Restrict secrets set to one declared path
+  --all              Also store undeclared names from the env file under the path (secrets set)
 `;
 
 async function main() {
@@ -42,6 +50,10 @@ async function main() {
       invoker: { type: "string", multiple: true },
       "reserved-concurrency": { type: "string" },
       region: { type: "string" },
+      "from-envfile": { type: "string" },
+      "allow-unignored": { type: "boolean", default: false },
+      path: { type: "string" },
+      all: { type: "boolean", default: false },
       "auto-approve": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -148,6 +160,38 @@ async function main() {
       console.log(`cloudgear: invalidation ${id} started for ${paths.join(", ")}`);
       return;
     }
+    case "secrets": {
+      const [sub, name] = args;
+      const config = readConfig(configPath);
+      const region = config.region || values.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+      if (sub === "list") {
+        for (const status of await secretStatus(config, region)) {
+          console.log(`${status.group.path} (${status.group.service})${status.group.all ? " [all]" : ""}`);
+          for (const n of status.present) console.log(`  ok       ${n}`);
+          for (const n of status.missing) console.log(`  missing  ${n}`);
+          for (const n of status.unused) console.log(`  unused   ${n}`);
+        }
+        return;
+      }
+      if (sub !== "set") throw new Error("Usage: cloudgear secrets set|list");
+      let input: Record<string, string>;
+      if (values["from-envfile"]) {
+        if (name) throw new Error("Pass either NAME or --from-envfile, not both");
+        checkEnvFileIgnored(values["from-envfile"], values["allow-unignored"]!);
+        input = parseEnvFile(fs.readFileSync(values["from-envfile"], "utf8"), values["from-envfile"]);
+      } else if (name) {
+        input = { [name]: (await Bun.stdin.text()).replace(/\r?\n$/, "") };
+      } else {
+        throw new Error("Usage: cloudgear secrets set <NAME> (value on stdin) | --from-envfile <file>");
+      }
+      const result = await setSecrets(config, input, { region, only: name, all: values.all, path: values.path });
+      for (const w of result.written) console.log(`cloudgear: stored ${w.names.join(", ")} under ${w.path}`);
+      if (!result.written.length) console.log("cloudgear: nothing stored");
+      if (result.missing.length) console.warn(`warning: not provided: ${result.missing.join(", ")}`);
+      if (result.empty.length) console.warn(`warning: empty values skipped: ${result.empty.join(", ")}`);
+      if (result.undeclared.length) console.warn(`warning: declared nowhere, skipped (use --all to store): ${result.undeclared.join(", ")}`);
+      return;
+    }
     case "import": {
       const [name, physicalId] = args;
       if (!name) throw new Error("Usage: cloudgear import <name> [physical-id]");
@@ -231,7 +275,8 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
   }
   return awsDrivers({
     region: resolvedRegion,
-    dns: (provider, zone) => createDnsDriver(provider as DnsProvider, zone),
+    dns: async (provider, zone, token) =>
+      createDnsDriver(provider as DnsProvider, zone, token ? { token: await readSecretRef(token, resolvedRegion) } : undefined),
     log: (message) => console.log(`cloudgear: ${message}`),
     readBundle: (fn) => {
       const file = path.resolve(configDir, fn.bundle.path);

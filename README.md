@@ -701,6 +701,69 @@ routes, `authenticated: "none"`, a router served through a CDN or API domain
 without `jwtAuth`, GCP, and scheduled runs (a scheduled run that a guard
 refuses fails, so do not guard a scheduled method).
 
+## Secrets: `@cloudgear/secrets`
+
+A function declares the secrets it reads, so IAM can grant exactly those and
+nothing else:
+
+```ts
+import { FunctionRouter } from "@cloudgear/functions";
+import { SecretStore } from "@cloudgear/secrets";
+
+const store = new SecretStore("aws"); // SSM SecureString; { service: "secretsmanager" } is the alternative
+const app = store.path("/cloudgear/myproject");
+
+new FunctionRouter("aws")
+  .url("POST", "/charge", "./charge.ts", { env: app(["STRIPE_KEY", "DB_URL"]) }) // process.env.STRIPE_KEY
+  .url("POST", "/refund", "./refund.ts", { env: app({ API_KEY: "stripe-key" }) }); // API_KEY from secret "stripe-key"
+```
+
+`env:` takes `app([...names])` or `app({ ENVVAR: "secret-name" })`, on a route
+or on the router. It MUST be literal: the analyzer never runs your code, so a
+computed name is an error. At cold start the Lambda adapter reads the declared
+secrets into `process.env` (a variable already set is never overwritten); a
+failure answers `500` and is retried on the next request. The role gets
+`ssm:GetParameter(s)` (or `secretsmanager:GetSecretValue`) on those exact
+parameters only. `kms:Decrypt` is granted only for an explicit `kmsKey` (a key
+id or ARN, never an alias).
+
+A path ending in `/*` (`store.path("/cloudgear/myproject/*")`, passed as
+`env: everything`) grants every secret under it, and so every secret added
+later. It is allowed and SHOULD be avoided. The SSM grant is a prefix, so it
+also matches deeper paths; cloudgear never writes secret names containing "/".
+
+Secrets are read once per cold start, so a rotated value reaches a warm
+function only after it restarts. They are in `process.env` before your handler
+runs but after your module's top level has loaded, so read them inside
+functions, not at import time.
+
+Code that reads a secret itself calls `app("NAME").get()`: the environment
+variable of that name first, then the store. Such a binding has no `env` and
+only grants IAM.
+
+Infrastructure setup uses the same references. `cloudgear apply` reads
+`app("GANDI_TOKEN")` with the deployer's own credentials, the environment
+variable of that name taking precedence; the value is never written to the
+config, state or logs:
+
+```ts
+const dns = new DNS("gandi", "api.example.com", { zone: "example.com", token: app("GANDI_TOKEN") });
+```
+
+```sh
+cloudgear secrets set --from-envfile .env.prod   # stores the declared names only
+cloudgear secrets set STRIPE_KEY                 # value on stdin
+cloudgear secrets list                           # ok / missing / unused, never values
+```
+
+`--from-envfile` refuses a file that git tracks, and one that git does not
+ignore (`--allow-unignored` overrides the latter); `.env*` and `*.env` are in
+this repository's `.gitignore`. A renamed binding (`{ API_KEY: "stripe-key" }`) is looked up in the file by
+either name. Names in the file that nothing declares are
+skipped with a warning (`--all` stores them under the only declared path, or
+`--path`). SSM values are limited to 4096 characters, Secrets Manager's to
+65536. Only the `aws` provider is supported; GCP is not implemented yet.
+
 ## Debugging
 
 Set `CG_DEBUG=true` (also `1`, `yes`, `on`) to print debug lines on stderr,

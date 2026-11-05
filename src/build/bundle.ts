@@ -18,6 +18,8 @@ export interface BundleRequest {
   include?: { rel: string; abs: string }[];
   passRequest?: boolean;
   responseKind?: "helper" | "writer";
+  // Secrets filled into the environment before the first request, and the services they come from.
+  secrets?: { bindings: Record<string, unknown>[]; services: string[] };
   outDir: string;
 }
 
@@ -54,6 +56,11 @@ export function hashBundle(file: string, filesDir: string, rels: string[]): stri
   return hashContents(fs.readFileSync(file), rels.map((rel) => ({ rel, data: fs.readFileSync(includedPath(filesDir, rel)) })));
 }
 
+const DRIVER_FACTORIES: Record<string, { name: string }> = {
+  ssm: { name: "createSsmDriver" },
+  secretsmanager: { name: "createSecretsManagerDriver" },
+};
+
 const ADAPTERS: Record<string, string> = {
   aws: "@cloudgear/functions/drivers/aws",
   gcp: "@cloudgear/functions/drivers/gcp",
@@ -76,12 +83,20 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
   const authPath = req.jwt ? Bun.resolveSync("@cloudgear/functions/auth", path.dirname(source)) : "";
   const handlerOptions = `{ trustContext: ${req.trustContext}${
     req.jwt ? `, authenticate: jwtAuth(${JSON.stringify(req.jwt.settings)}), anonymous: ${req.jwt.anonymous}` : ""
-  }${req.passRequest ? ", request: true" : ""}${req.responseKind ? `, response: ${JSON.stringify(req.responseKind)}` : ""} }`;
+  }${req.passRequest ? ", request: true" : ""}${req.responseKind ? `, response: ${JSON.stringify(req.responseKind)}` : ""}${req.secrets ? ", prepare" : ""} }`;
+  const secretServices = req.secrets?.services ?? [];
   fs.writeFileSync(
     entry,
     [
       `import { createHandler } from ${JSON.stringify(adapterPath)};`,
       ...(req.jwt ? [`import { jwtAuth } from ${JSON.stringify(authPath)};`] : []),
+      ...(req.secrets
+        ? [
+            `import { secretsLoader } from ${JSON.stringify(Bun.resolveSync("@cloudgear/secrets", path.dirname(source)))};`,
+            ...secretServices.map((service) => `import { ${DRIVER_FACTORIES[service]!.name} } from ${JSON.stringify(Bun.resolveSync(`@cloudgear/secrets/drivers/${service}`, path.dirname(source)))};`),
+            `const prepare = secretsLoader(${JSON.stringify(req.secrets.bindings)}, { ${secretServices.map((service) => `${service}: ${DRIVER_FACTORIES[service]!.name}`).join(", ")} });`,
+          ]
+        : []),
       ...(req.member
         ? [
             `import { ${req.exportName} as root } from ${JSON.stringify(source)};`,

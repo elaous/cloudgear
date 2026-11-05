@@ -15,7 +15,10 @@ interface Statement {
 const KMS_ID = /^(mrk-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^mrk-[0-9a-f]{32}$/i;
 
 function keyArn(key: string, region: string, account: string): string {
-  if (key.startsWith("arn:")) return key;
+  if (key.startsWith("arn:")) {
+    if (/:alias\//.test(key)) throw new Error(`kmsKey "${key}" must be a key id or ARN; an alias cannot be scoped in IAM`);
+    return key;
+  }
   if (KMS_ID.test(key)) return `arn:aws:kms:${region}:${account}:key/${key}`;
   throw new Error(`kmsKey "${key}" must be a key id or ARN; an alias cannot be scoped in IAM`);
 }
@@ -45,7 +48,7 @@ export function secretStatements(bindings: SecretBindingSpec[] | undefined, cont
       }
     } else {
       const secret = (suffix: string) => `${base("secretsmanager")}:secret:${binding.path}${suffix}`;
-      add(read, "secretsmanager:GetSecretValue", binding.all ? secret("/*") : secret(`/${binding.name}-*`));
+      add(read, "secretsmanager:GetSecretValue", binding.all ? secret("/*") : secret(`/${binding.name}-??????`));
       if (binding.all) list.add("*");
     }
     if (binding.kms_key) decrypt.add(keyArn(binding.kms_key, region, context.account));

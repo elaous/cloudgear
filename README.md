@@ -729,7 +729,13 @@ id or ARN, never an alias).
 
 A path ending in `/*` (`store.path("/cloudgear/myproject/*")`, passed as
 `env: everything`) grants every secret under it, and so every secret added
-later. It is allowed and SHOULD be avoided.
+later. It is allowed and SHOULD be avoided. The SSM grant is a prefix, so it
+also matches deeper paths; cloudgear never writes secret names containing "/".
+
+Secrets are read once per cold start, so a rotated value reaches a warm
+function only after it restarts. They are in `process.env` before your handler
+runs but after your module's top level has loaded, so read them inside
+functions, not at import time.
 
 Code that reads a secret itself calls `app("NAME").get()`: the environment
 variable of that name first, then the store. Such a binding has no `env` and
@@ -752,7 +758,8 @@ cloudgear secrets list                           # ok / missing / unused, never 
 
 `--from-envfile` refuses a file that git tracks, and one that git does not
 ignore (`--allow-unignored` overrides the latter); `.env*` and `*.env` are in
-this repository's `.gitignore`. Names in the file that nothing declares are
+this repository's `.gitignore`. A renamed binding (`{ API_KEY: "stripe-key" }`) is looked up in the file by
+either name. Names in the file that nothing declares are
 skipped with a warning (`--all` stores them under the only declared path, or
 `--path`). SSM values are limited to 4096 characters, Secrets Manager's to
 65536. Only the `aws` provider is supported; GCP is not implemented yet.

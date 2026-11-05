@@ -1,3 +1,4 @@
+import { assertSecretName, parseSecretPath } from "@cloudgear/secrets";
 import { encodePrototxt, parsePrototxt, type ProtoMessage } from "./prototxt";
 
 // Mirrors cloudgear.proto.
@@ -200,14 +201,24 @@ export function decodeConfig(text: string): CloudgearConfig {
   return config;
 }
 
+const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
+// Policies are built from these, so a hand-edited config is checked as the analyzer would.
 function secretRefFrom(raw: Record<string, any>): SecretRefSpec {
+  const service = String(raw.service ?? "ssm");
+  if (service !== "ssm" && service !== "secretsmanager") throw new Error(`cloudgear config: unknown secret service "${service}"`);
+  const { prefix, all } = parseSecretPath(str(raw, "path"));
+  if (all) throw new Error(`cloudgear config: secret path "${raw.path}" must not end in /*`);
+  const name = String(raw.name ?? "");
+  if (name) assertSecretName(name);
+  if (raw.region && !REGION.test(String(raw.region))) throw new Error(`cloudgear config: invalid secret region "${raw.region}"`);
   return {
     provider: String(raw.provider ?? "aws"),
-    service: String(raw.service ?? "ssm"),
+    service,
     ...(raw.region ? { region: String(raw.region) } : {}),
     ...(raw.kms_key ? { kms_key: String(raw.kms_key) } : {}),
-    path: str(raw, "path"),
-    name: String(raw.name ?? ""),
+    path: prefix,
+    name,
   };
 }
 

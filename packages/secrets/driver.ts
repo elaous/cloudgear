@@ -46,7 +46,7 @@ export async function createSecretDriver(provider: SecretProvider, options: Secr
   return factory(options);
 }
 
-const PATH_SEGMENT = /^[A-Za-z0-9_.-]+$/;
+const PATH_SEGMENT = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
 const MAX_DEPTH = 15;
 
 // "/cloudgear/app" or "/cloudgear/app/*"; the wildcard asks for every secret under the path.
@@ -60,7 +60,7 @@ export function parseSecretPath(path: string): { prefix: string; all: boolean } 
   return { prefix, all };
 }
 
-const NAME = /^[A-Za-z0-9_.-]+$/;
+const NAME = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
 
 export function assertSecretName(name: string): string {
   if (!NAME.test(name)) throw new Error(`Invalid secret name "${name}": use letters, digits, "_", "." and "-"`);

@@ -11,7 +11,7 @@ import {
   type SecretService,
 } from "./driver";
 
-export { createSecretDriver, registerSecretDriver, parseSecretPath } from "./driver";
+export { assertSecretName, createSecretDriver, registerSecretDriver, parseSecretPath } from "./driver";
 export type { SecretDriver, SecretDriverFactory, SecretDriverOptions, SecretProvider, SecretService } from "./driver";
 
 export interface SecretStoreOptions {
@@ -82,6 +82,9 @@ export class SecretStore {
   }
 }
 
+// Environment variables that hydration filled, with the secret each came from.
+const hydrated = new Map<string, string>();
+
 // One secret. A plain object: awaiting it does nothing, call get().
 export class SecretRef {
   readonly name: string;
@@ -102,7 +105,7 @@ export class SecretRef {
   // then the store.
   async get(): Promise<string> {
     const local = process.env[this.name];
-    if (local !== undefined) return local;
+    if (local !== undefined && (hydrated.get(this.name) ?? this.fullName) === this.fullName) return local;
     const value = await timed("secrets", `get ${this.fullName}`, async () => (await this.store.driver()).get(this.fullName));
     if (value === null) throw new Error(`Secret ${this.fullName} was not found; set it with \`cloudgear secrets set\``);
     return value;
@@ -145,12 +148,18 @@ async function hydrate(bindings: readonly SecretBindingSpec[], factories: Partia
     for (const binding of wanted) {
       const value = found[`${binding.path}/${binding.name}`];
       if (value === undefined) missing.push(`${binding.path}/${binding.name}`);
-      else process.env[binding.env] = value;
+      else {
+        process.env[binding.env] = value;
+        hydrated.set(binding.env, `${binding.path}/${binding.name}`);
+      }
     }
     for (const path of new Set(group.filter((b) => b.all).map((b) => b.path))) {
       for (const [name, value] of Object.entries(await driver.list(path))) {
         const env = name.slice(path.length + 1);
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(env) && process.env[env] === undefined) process.env[env] = value;
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(env) && process.env[env] === undefined) {
+          process.env[env] = value;
+          hydrated.set(env, name);
+        }
       }
     }
   }

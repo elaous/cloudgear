@@ -66,9 +66,9 @@ describe("IAM", () => {
     ]);
   });
 
-  test("a Secrets Manager binding allows the version suffix only", () => {
+  test("a Secrets Manager binding allows only the six-character version suffix", () => {
     expect(secretStatements([binding({ service: "secretsmanager", name: "k" })], context)).toEqual([
-      { Effect: "Allow", Action: ["secretsmanager:GetSecretValue"], Resource: "arn:aws:secretsmanager:us-east-1:123456789012:secret:/app/k-*" },
+      { Effect: "Allow", Action: ["secretsmanager:GetSecretValue"], Resource: "arn:aws:secretsmanager:us-east-1:123456789012:secret:/app/k-??????" },
     ]);
   });
 
@@ -274,5 +274,92 @@ describe("deploy", () => {
     await applyAll(config, emptyState(), aws);
     expect(tokens.length).toBeGreaterThan(0);
     expect(tokens.every((token) => JSON.stringify(token) === JSON.stringify(ref))).toBe(true);
+  });
+});
+
+describe("review fixes", () => {
+  const prior = process.env.CLOUDGEAR_SECRETS_DRIVER;
+  beforeEach(() => {
+    process.env.CLOUDGEAR_SECRETS_DRIVER = "memory";
+    resetMemorySecrets();
+  });
+  afterEach(() => {
+    if (prior === undefined) delete process.env.CLOUDGEAR_SECRETS_DRIVER;
+    else process.env.CLOUDGEAR_SECRETS_DRIVER = prior;
+  });
+
+  const withSecret = (over: Record<string, string>) =>
+    encodeConfig(baseConfig({ function: [fn({ secret: [{ provider: "aws", service: "ssm", path: "/app", name: "A", env: "A", ...over }] })] }));
+
+  test("a hand-edited config with a wildcard or dot name is refused", () => {
+    expect(() => decodeConfig(withSecret({ path: "/*" }))).toThrow(/secret path/);
+    expect(() => decodeConfig(withSecret({ name: ".." }))).toThrow(/Invalid secret name/);
+    expect(() => decodeConfig(withSecret({ name: "a*" }))).toThrow(/Invalid secret name/);
+    expect(() => decodeConfig(withSecret({ region: "../x" }))).toThrow(/invalid secret region/);
+    expect(() => decodeConfig(withSecret({ service: "s3" }))).toThrow(/unknown secret service/);
+    expect(decodeConfig(withSecret({})).function[0]!.secret![0]!.name).toBe("A");
+  });
+
+  test("dot segments are rejected in paths and names", async () => {
+    const { parseSecretPath, assertSecretName } = await import("@cloudgear/secrets");
+    expect(() => parseSecretPath("/app/..")).toThrow();
+    expect(() => assertSecretName(".")).toThrow();
+    expect(assertSecretName("a.b")).toBe("a.b");
+  });
+
+  test("a key alias ARN cannot be scoped", () => {
+    const binding: SecretBindingSpec = { provider: "aws", service: "ssm", path: "/app", name: "A", env: "A", kms_key: "arn:aws:kms:us-east-1:1:alias/mine" };
+    expect(() => secretStatements([binding], { account: "1", region: "us-east-1" })).toThrow(/alias/);
+  });
+
+  test("the same name under two paths is read from its own path", async () => {
+    const { SecretStore } = await import("@cloudgear/secrets");
+    const store = new SecretStore("aws");
+    const driver = createMemorySecretDriver();
+    await driver.put("/prod/db/PASSWORD", "db");
+    await driver.put("/prod/api/PASSWORD", "api");
+    const { secretsLoader } = await import("@cloudgear/secrets");
+    await secretsLoader([{ provider: "aws", service: "ssm", path: "/prod/db", name: "PASSWORD", env: "PASSWORD" }])();
+    try {
+      expect(await store.path("/prod/db")("PASSWORD").get()).toBe("db");
+      expect(await store.path("/prod/api")("PASSWORD").get()).toBe("api");
+    } finally {
+      delete process.env.PASSWORD;
+    }
+  });
+
+  test("a renamed binding reads its value from the env variable name in the file", async () => {
+    const { config } = await generated("renamed");
+    const result = await setSecrets(config, { API_KEY: "k" }, {});
+    expect(result.undeclared).toEqual([]);
+    expect(result.written).toEqual([{ path: "/cloudgear/myproject", names: ["stripe-key"] }]);
+    expect(await createMemorySecretDriver().get("/cloudgear/myproject/stripe-key")).toBe("k");
+  });
+
+  test("values are limited by bytes", async () => {
+    const { config } = await generated("basic");
+    await expect(setSecrets(config, { STRIPE_KEY: "é".repeat(2100) }, {})).rejects.toThrow(/4096 bytes/);
+  });
+
+  test("status of a wildcard path lists what is stored", async () => {
+    const { config } = await generated("wildcard");
+    await createMemorySecretDriver().put("/cloudgear/myproject/ANY", "v");
+    const [status] = await secretStatus(config);
+    expect(status!.present).toEqual(["ANY"]);
+    expect(status!.unused).toEqual([]);
+  });
+
+  test("a quoted value keeps # and escapes", () => {
+    expect(parseEnvFile('A="x # y"\nB="a\\\\b"\n')).toEqual({ A: "x # y", B: "a\\b" });
+  });
+
+  test("a changed DNS token is a certificate update", async () => {
+    const ref = { provider: "aws", service: "ssm", path: "/app", name: "TOK" };
+    const config = (token: typeof ref) =>
+      baseConfig({ function: [], certificate: [{ provider: "aws", domain: "cdn.example.com", dns: { provider: "gandi", domain: "cdn.example.com", zone: "example.com", token }, usage: "cdn" }] });
+    const state = emptyState();
+    await applyAll(config(ref), state);
+    expect(plan(config(ref), state).filter((a) => a.type === "@aws.Certificate").map((a) => a.op)).not.toContain("update");
+    expect(plan(config({ ...ref, name: "OTHER" }), state).find((a) => a.type === "@aws.Certificate")).toMatchObject({ op: "update" });
   });
 });

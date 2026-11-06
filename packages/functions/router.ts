@@ -33,6 +33,11 @@ export type ProviderOptions = Record<string, string | number | boolean>;
 export type Authentication = "iam" | "none";
 export type EndpointAuth = Authentication;
 
+// What @cloudgear/secrets (`store.path(...)([...])`, or a path ending in /*) and @cloudgear/events
+// (`bus.event(...)`) hand over, described by shape so this package needs neither.
+export type EnvOption = { readonly kind: "env"; readonly prefix: string; readonly names: object } | { readonly prefix: string; readonly all: true };
+export type EventOption = { readonly kind: "event"; readonly type: string };
+
 export interface RouteOptions {
   // Nickname for this route in listen()/urls() results; defaults to the function's name.
   name?: string;
@@ -49,6 +54,11 @@ export interface RouteOptions {
   response?: typeof response | typeof VercelResponse;
   // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
   schedule?: CronSchedule | CronSchedule[];
+  // Also run the function on events: `on: bus.event("order.created")` (see @cloudgear/events).
+  on?: EventOption | EventOption[];
+  // Secrets the function reads, filled into its environment: `env: store.path("/app")(["KEY"])`
+  // (see @cloudgear/secrets). `generate` reads it, so it MUST be written inline.
+  env?: EnvOption | EnvOption[];
 }
 
 export interface EndpointsFile {
@@ -90,6 +100,8 @@ export interface FunctionRouterOptions {
   cert?: { readonly domain: string };
   // Provider settings for every function; literals only.
   functionOptions?: ProviderOptions;
+  // Secrets every function reads (see RouteOptions.env).
+  env?: EnvOption | EnvOption[];
   // Per-process counters: instances of a serverless app do not share them.
   rateLimit?: RateLimit;
 }

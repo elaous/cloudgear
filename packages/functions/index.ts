@@ -3,7 +3,7 @@ export { jwtAuth } from "./auth";
 export { cron, schedule, normalizeCron, toEventBridgeCron } from "./cron";
 export type { CronSchedule } from "./cron";
 export type { Authenticator, JwtAuthOptions, JwtAuthenticator } from "./auth";
-export type { Authentication, EndpointAuth, EndpointsFile, FunctionRouterOptions, RateLimit, RouteOptions } from "./router";
+export type { Authentication, EndpointAuth, EnvOption, EventOption, EndpointsFile, FunctionRouterOptions, RateLimit, RouteOptions } from "./router";
 export { VercelRequest, VercelResponse } from "./vercel";
 export type { VercelRequestQuery } from "./vercel";
 export { response, isResponse, routeKey, METHODS, INVOKE_CONTENT_TYPE } from "./http";

@@ -15,7 +15,8 @@ message Config {
   string authenticated = 6;
   reserved 7;
   repeated Certificate certificate = 8;
-  Cdn cdn = 9;
+  // Static sites, each served from a bucket on its own domain.
+  repeated Cdn cdn = 9;
   // The router's own domain, served through API Gateway.
   Api api = 11;
   // Region of the functions; empty means the region the deployer chooses (--region or AWS_REGION).

@@ -32,7 +32,7 @@ describe("provider options in source", () => {
     });
     const edge = analyzeApp(fixture("edge.ts"));
     expect(edge.certificates[0]!.options).toEqual({ key_algorithm: "EC_prime256v1" });
-    expect(edge.cdn!.options).toEqual({ price_class: "PriceClass_100", default_root_object: "home.html" });
+    expect(edge.cdns[0]!.options).toEqual({ price_class: "PriceClass_100", default_root_object: "home.html" });
   });
 
   test.each([

@@ -10,7 +10,7 @@ export interface CloudgearConfig {
   invoker: string[];
   authenticated: "iam" | "none";
   certificate: CertificateSpec[];
-  cdn?: CdnSpec;
+  cdn: CdnSpec[];
   api?: ApiSpec;
   region?: string;
 }
@@ -113,6 +113,7 @@ const REPEATED = new Set([
   "function.env",
   "invoker",
   "certificate",
+  "cdn",
   "resource.options",
   "function.options",
   "function.schedule",
@@ -155,13 +156,13 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...(c.region ? { region: String(c.region) } : {}),
       ...optionsFrom(c),
     })),
-    cdn: raw.cdn && {
-      provider: str(raw.cdn, "provider"),
-      domain: str(raw.cdn, "domain"),
-      bucket: str(raw.cdn, "bucket"),
-      path: String(raw.cdn.path ?? ""),
-      ...optionsFrom(raw.cdn),
-    },
+    cdn: (raw.cdn ?? []).map((c: Record<string, any>) => ({
+      provider: str(c, "provider"),
+      domain: str(c, "domain"),
+      bucket: str(c, "bucket"),
+      path: String(c.path ?? ""),
+      ...optionsFrom(c),
+    })),
     api: raw.api && {
       provider: str(raw.api, "provider"),
       domain: str(raw.api, "domain"),
@@ -254,7 +255,7 @@ function optionsToProto(config: CloudgearConfig): unknown {
     resource: config.resource.map(withOptions),
     function: config.function.map((f) => ({ ...withOptions(f), query_schedule: f.query_schedule?.map((q) => ({ cron: q.cron, query: entries(q.query) })) })),
     certificate: config.certificate.map(withOptions),
-    cdn: config.cdn && withOptions(config.cdn),
+    cdn: config.cdn.map(withOptions),
     api: config.api && withOptions(config.api),
   };
 }

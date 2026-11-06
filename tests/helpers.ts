@@ -32,6 +32,7 @@ export const baseConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearC
   invoker: [],
   authenticated: "iam",
   certificate: [],
+  cdn: [],
   ...overrides,
 });
 

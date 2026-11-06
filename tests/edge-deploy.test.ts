@@ -19,7 +19,7 @@ const dnsSpec = { provider: "gandi", domain: DOMAIN, zone: "example.com" };
 const cdnConfig = (overrides: Partial<CloudgearConfig> = {}): CloudgearConfig => ({
   ...baseConfig(),
   certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
-  cdn: { provider: "aws", domain: DOMAIN, bucket: "data", path: "web/" },
+  cdn: [{ provider: "aws", domain: DOMAIN, bucket: "data", path: "web/" }],
   ...overrides,
 });
 
@@ -50,12 +50,12 @@ describe("planning the edge", () => {
 
   test("a CDN without its certificate, or with an unknown bucket, is a config error", () => {
     expect(() => plan(cdnConfig({ certificate: [] }), emptyState())).toThrow(/cdn needs a certificate for "cdn.example.com"/);
-    expect(() => plan(cdnConfig({ cdn: { ...cdnConfig().cdn!, bucket: "nope" } }), emptyState())).toThrow(/bucket "nope" is not a declared resource/);
+    expect(() => plan(cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, bucket: "nope" }] }), emptyState())).toThrow(/bucket "nope" is not a declared resource/);
     expect(() => plan(cdnConfig({ certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn", region: "eu-west-1" }] }), emptyState())).toThrow(/must be in us-east-1/);
   });
 
   test("a certificate can be planned without a CDN", () => {
-    const actions = plan(cdnConfig({ cdn: undefined }), emptyState());
+    const actions = plan(cdnConfig({ cdn: [] }), emptyState());
     expect(actions.map((a) => a.key)).toContain(CERT_KEY);
     expect(actions.map((a) => a.key)).not.toContain(CDN_KEY);
   });
@@ -64,7 +64,7 @@ describe("planning the edge", () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
     expect(plan(cdnConfig(), state).map((a) => a.op)).toEqual(["noop", "dry", "noop", "noop", "noop"]);
-    const changed = cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } });
+    const changed = cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, path: "other/" }] });
     expect(plan(changed, state).find((a) => a.key === CDN_KEY)).toMatchObject({ op: "update", changes: ["spec"] });
     delete state.entries["@aws.Lambda.foo"];
     expect(plan(cdnConfig(), state).find((a) => a.key === CDN_KEY)!.op).toBe("noop");
@@ -165,7 +165,7 @@ describe("applying the edge", () => {
     });
     const state = emptyState();
     await applyAll(cdnConfig(), state, aws);
-    await applyAll({ ...cdnConfig(), cdn: { ...cdnConfig().cdn!, path: "x/" } }, state, aws);
+    await applyAll({ ...cdnConfig(), cdn: [{ ...cdnConfig().cdn[0]!, path: "x/" }] }, state, aws);
 
     const sids = JSON.parse(stored).Statement.map((s: { Sid: string }) => s.Sid);
     expect(sids).toHaveLength(2);
@@ -188,7 +188,7 @@ describe("applying the edge", () => {
   test("updating reuses the distribution with its caller reference and etag", async () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
-    const changed = cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } });
+    const changed = cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, path: "other/" }] });
     const aws = await applyAll(changed, state);
 
     expect(aws.names()).not.toContain("CreateDistributionCommand");
@@ -315,7 +315,7 @@ describe("applying the edge", () => {
     expect(endpointsFrom(cdnConfig(), state).cdn).toEqual({ domain: DOMAIN, url: "https://d111.cloudfront.net", id: "E1" });
     delete state.entries[CDN_KEY]!.outputs.url;
     expect(endpointsFrom(cdnConfig(), state).cdn!.url).toBe("https://d111.cloudfront.net");
-    expect(endpointsFrom(cdnConfig({ cdn: undefined }), state).cdn).toBeUndefined();
+    expect(endpointsFrom(cdnConfig({ cdn: [] }), state).cdn).toBeUndefined();
   });
 });
 
@@ -331,7 +331,7 @@ describe("a CDN deployed when it still routed to functions", () => {
 
   test("the next update removes its Lambda origin access control and function permissions", async () => {
     const state = await legacy();
-    const aws = await applyAll(cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } }), state);
+    const aws = await applyAll(cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, path: "other/" }] }), state);
     expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-lambda"]);
     expect(statements(aws).map((i) => [i.FunctionName, i.StatementId.replace(/^cloudgear-cdn-[0-9a-f]+-/, "")])).toEqual([["app-foo", "url"], ["app-foo", "invoke"]]);
     expect(state.entries[CDN_KEY]!.outputs.oac_lambda).toBe("");
@@ -364,14 +364,14 @@ describe("records and cleanup the CDN does not own", () => {
     const dns = new MemoryDnsDriver();
     await dns.upsert(foreign);
     const aws = fakeAws({}, dns);
-    await applyAll(cdnConfig({ cdn: undefined, certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec }] }), emptyState(), aws);
+    await applyAll(cdnConfig({ cdn: [], certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec }] }), emptyState(), aws);
     expect(aws.names()).toContain("RequestCertificateCommand");
     expect(await dns.get(DOMAIN, "CNAME")).toMatchObject({ values: ["old-site.example.net."] });
   });
 
   test("the distribution's own check still protects a certificate that already exists", async () => {
     const state = emptyState();
-    await applyAll(cdnConfig({ cdn: undefined }), state);
+    await applyAll(cdnConfig({ cdn: [] }), state);
     const dns = new MemoryDnsDriver();
     await dns.upsert(foreign);
     const aws = fakeAws({}, dns);
@@ -425,7 +425,7 @@ describe("records and cleanup the CDN does not own", () => {
   test("an update that fails keeps the outputs it produced and is marked incomplete", async () => {
     const state = emptyState();
     await applyAll(cdnConfig(), state);
-    const next = cdnConfig({ cdn: { ...cdnConfig().cdn!, path: "other/" } });
+    const next = cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, path: "other/" }] });
     const failing = fakeAws({
       UpdateDistributionCommand: () => {
         throw error("InvalidArgument", "bad config");
@@ -471,7 +471,7 @@ describe("records and cleanup the CDN does not own", () => {
     const long = "a-very-long-subdomain-name-for-a-site.deeply.nested.example.com";
     const config = cdnConfig({
       certificate: [{ provider: "aws", domain: long, dns: { ...dnsSpec, domain: long }, usage: "cdn" }],
-      cdn: { ...cdnConfig().cdn!, domain: long },
+      cdn: [{ ...cdnConfig().cdn[0]!, domain: long }],
     });
     const pages: string[] = [];
     const aws = fakeAws({
@@ -506,7 +506,7 @@ describe("certificate", () => {
   const stateWithCertificate = async (overrides: Parameters<typeof fakeAws>[0] = {}) => {
     const state = emptyState();
     const aws = fakeAws(overrides);
-    await applyAll(cdnConfig({ cdn: undefined }), state, aws);
+    await applyAll(cdnConfig({ cdn: [] }), state, aws);
     return { state, aws };
   };
 
@@ -533,10 +533,10 @@ describe("certificate", () => {
         Certificate: { Status: "FAILED", DomainValidationOptions: [{ ResourceRecord: { Name: "_v1.cdn.example.com.", Value: "_v2." } }] },
       }),
     });
-    await expect(applyAll(cdnConfig({ cdn: undefined }), state, failing)).rejects.toThrow(/ended as FAILED/);
+    await expect(applyAll(cdnConfig({ cdn: [] }), state, failing)).rejects.toThrow(/ended as FAILED/);
     expect(state.entries[CERT_KEY]).toMatchObject({ spec: { incomplete: true }, outputs: { arn: "arn:aws:acm:us-east-1:1:certificate/c1" } });
 
-    const resumed = await applyAll(cdnConfig({ cdn: undefined }), state);
+    const resumed = await applyAll(cdnConfig({ cdn: [] }), state);
     expect(resumed.names()).not.toContain("RequestCertificateCommand");
     expect(state.entries[CERT_KEY]!.spec).not.toHaveProperty("incomplete");
   });
@@ -545,12 +545,12 @@ describe("certificate", () => {
     const dns = new MemoryDnsDriver();
     await dns.upsert({ name: "_v1.cdn.example.com", type: "CNAME", values: ["_v2.acm-validations.aws"], ttl: 300 });
     const reuse = fakeAws({}, dns);
-    await applyAll(cdnConfig({ cdn: undefined }), emptyState(), reuse);
+    await applyAll(cdnConfig({ cdn: [] }), emptyState(), reuse);
     expect(await dns.get("_v1.cdn.example.com", "CNAME")).toMatchObject({ values: ["_v2.acm-validations.aws"] });
 
     const other = new MemoryDnsDriver();
     await other.upsert({ name: "_v1.cdn.example.com", type: "CNAME", values: ["somewhere.else."], ttl: 300 });
-    await expect(applyAll(cdnConfig({ cdn: undefined }), emptyState(), fakeAws({}, other))).rejects.toThrow(/already exists with a different value \(somewhere\.else\.\)/);
+    await expect(applyAll(cdnConfig({ cdn: [] }), emptyState(), fakeAws({}, other))).rejects.toThrow(/already exists with a different value \(somewhere\.else\.\)/);
   });
 
   test("never being issued times out with the record to check", async () => {
@@ -560,12 +560,12 @@ describe("certificate", () => {
         Certificate: { Status: "PENDING_VALIDATION", DomainValidationOptions: [{ ResourceRecord: { Name: "_v1.cdn.example.com.", Value: "_v2." } }] },
       }),
     });
-    await expect(applyAll(cdnConfig({ cdn: undefined }), state, aws)).rejects.toThrow(/Timed out waiting for certificate .* _v1\.cdn\.example\.com/);
+    await expect(applyAll(cdnConfig({ cdn: [] }), state, aws)).rejects.toThrow(/Timed out waiting for certificate .* _v1\.cdn\.example\.com/);
   });
 
   test("ACM never offering a validation record is an error", async () => {
     const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { Status: "PENDING_VALIDATION", DomainValidationOptions: [{}] } }) });
-    await expect(applyAll(cdnConfig({ cdn: undefined }), emptyState(), aws)).rejects.toThrow(/did not provide a DNS validation record/);
+    await expect(applyAll(cdnConfig({ cdn: [] }), emptyState(), aws)).rejects.toThrow(/did not provide a DNS validation record/);
   });
 
   test("deleting leaves the validation record in place", async () => {
@@ -631,5 +631,107 @@ describe("CloudFront configuration", () => {
     );
     expect(id).toBe("I9");
     expect(sent[0]).toMatchObject({ DistributionId: "E1", InvalidationBatch: { Paths: { Quantity: 2, Items: ["/index.html", "/app/*"] } } });
+  });
+});
+
+describe("several CDNs in one app", () => {
+  const site = (domain: string, bucket: string) => ({ provider: "aws", domain, bucket, path: "" });
+  const certFor = (domain: string) => ({ provider: "aws", domain, dns: dnsSpec, usage: "cdn" as const });
+  const many = () =>
+    baseConfig({
+      resource: ["files", "web", "admin"].map((name) => ({ name, type: "@aws.S3", physical_name: `my-${name}`, dry: false, source: "a.ts:1" })),
+      function: [],
+      certificate: ["files.example.com", "www.example.com", "admin.example.com"].map(certFor),
+      cdn: [site("files.example.com", "files"), site("www.example.com", "web"), site("admin.example.com", "admin")],
+    });
+
+  test("every site gets its own certificate, distribution and bucket policy", async () => {
+    const state = emptyState();
+    const aws = await applyAll(many(), state);
+    expect(aws.of("CreateDistributionCommand")).toHaveLength(3);
+    expect(aws.of("RequestCertificateCommand")).toHaveLength(3);
+    expect(aws.of("PutBucketPolicyCommand").map((p) => p.Bucket).sort()).toEqual(["my-admin", "my-files", "my-web"]);
+    expect(Object.keys(state.entries).filter((key) => key.startsWith("@aws.CloudFront."))).toHaveLength(3);
+  });
+
+  test("an unchanged app plans nothing, and removing one site removes only its distribution", async () => {
+    const state = emptyState();
+    await applyAll(many(), state);
+    expect(plan(many(), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+    const fewer = many();
+    fewer.cdn = fewer.cdn.filter((c) => c.domain !== "admin.example.com");
+    fewer.certificate = fewer.certificate.filter((c) => c.domain !== "admin.example.com");
+    const deleted = plan(fewer, state).filter((a) => a.op === "delete").map((a) => a.name);
+    expect(deleted.sort()).toEqual(["admin.example.com", "admin.example.com"]);
+  });
+
+  test("the endpoints file lists every deployed site by domain, and the first as cdn", async () => {
+    const state = emptyState();
+    await applyAll(many(), state);
+    const endpoints = endpointsFrom(many(), state);
+    expect(Object.keys(endpoints.cdns ?? {}).sort()).toEqual(["admin.example.com", "files.example.com", "www.example.com"]);
+    expect(endpoints.cdn?.domain).toBe("files.example.com");
+    expect(endpointsFrom({ ...many(), cdn: [site("files.example.com", "files")] }, state).cdns).toBeUndefined();
+  });
+
+  test("the first declared site is `cdn` only once it is deployed, and cdns lists the deployed ones", async () => {
+    const state = emptyState();
+    await applyAll(many(), state);
+    delete state.entries["@aws.CloudFront.files.example.com"];
+    const endpoints = endpointsFrom(many(), state);
+    expect(endpoints.cdn).toBeUndefined();
+    expect(Object.keys(endpoints.cdns ?? {}).sort()).toEqual(["admin.example.com", "www.example.com"]);
+    expect(hasEndpoints(endpoints)).toBe(true);
+  });
+
+  describe("two sites on one bucket", () => {
+    const shared = () =>
+      baseConfig({
+        resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1" }],
+        function: [],
+        certificate: ["www.example.com", "admin.example.com"].map(certFor),
+        cdn: [{ ...site("www.example.com", "web"), path: "public/" }, { ...site("admin.example.com", "web"), path: "admin/" }],
+      });
+    // A bucket that remembers its policy between calls.
+    const bucket = () => {
+      let policy: string | undefined;
+      return fakeAws({
+        GetBucketPolicyCommand: () => {
+          if (!policy) throw Object.assign(new Error("no policy"), { name: "NoSuchBucketPolicy" });
+          return { Policy: policy };
+        },
+        PutBucketPolicyCommand: (input: { Policy: string }) => void (policy = input.Policy),
+        DeleteBucketPolicyCommand: () => void (policy = undefined),
+      });
+    };
+    const statements = (aws: { of: (n: string) => any[] }) => JSON.parse(aws.of("PutBucketPolicyCommand").at(-1).Policy).Statement as { Sid: string; Resource: string }[];
+
+    test("each site keeps its own statement, scoped to its path", async () => {
+      const aws = bucket();
+      await applyAll(shared(), emptyState(), aws);
+      const last = statements(aws);
+      expect(new Set(last.map((s) => s.Sid)).size).toBe(2);
+      expect(last.map((s) => s.Resource).sort()).toEqual(["arn:aws:s3:::my-web/admin/*", "arn:aws:s3:::my-web/public/*"]);
+    });
+
+    test("removing one site leaves the other's statement and does not delete the policy", async () => {
+      const aws = bucket();
+      const state = emptyState();
+      await applyAll(shared(), state, aws);
+      const fewer = shared();
+      fewer.cdn = fewer.cdn.filter((c) => c.domain === "www.example.com");
+      fewer.certificate = fewer.certificate.filter((c) => c.domain === "www.example.com");
+      await applyAll(fewer, state, aws);
+      expect(aws.of("DeleteBucketPolicyCommand")).toEqual([]);
+      expect(statements(aws).map((s) => s.Resource)).toEqual(["arn:aws:s3:::my-web/public/*"]);
+    });
+
+    test("removing the last site deletes the policy", async () => {
+      const aws = bucket();
+      const state = emptyState();
+      await applyAll(shared(), state, aws);
+      await applyAll(baseConfig({ resource: [], function: [] }), state, aws);
+      expect(aws.of("DeleteBucketPolicyCommand")).toEqual([{ Bucket: "my-web" }]);
+    });
   });
 });

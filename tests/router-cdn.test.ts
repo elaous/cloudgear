@@ -337,7 +337,7 @@ describe("generating for a CDN that serves the router", () => {
       const { config } = await generate({ entry: fixture("edge/cdn-router.ts"), configPath: path.join(dir, "cloudgear.prototxt"), buildDir: path.join(dir, "build") });
       expect(config.api).toEqual({ provider: "aws", domain: DOMAIN, via: "cloudfront" });
       expect(config.certificate).toMatchObject([{ domain: DOMAIN, usage: "cdn" }]);
-      expect(config.cdn).toBeUndefined();
+      expect(config.cdn).toEqual([]);
       expect(fs.readFileSync(path.join(dir, "build", "items", "entry.ts"), "utf8")).toContain("trustContext: false");
       const spec = plan(config, emptyState()).find((a) => a.key === CDN_KEY)!.desired!.spec as unknown as CdnComparable;
       expect(spec.behaviors!.map((b) => b.pattern)).toEqual(["/items/", "/items/*", "/items"]);

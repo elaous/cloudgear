@@ -131,8 +131,10 @@ function readDeployedCdn(domain: string): string | undefined {
   const file = process.env.CLOUDGEAR_ENDPOINTS_FILE ?? findUp(process.cwd(), ".cloudgear/endpoints.json");
   if (!file || !fs.existsSync(file)) return undefined;
   try {
-    const cdn = (JSON.parse(fs.readFileSync(file, "utf8")) as { cdn?: { domain?: string; url?: string } }).cdn;
-    return cdn?.domain === domain && cdn.url ? cdn.url : undefined;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { cdn?: { domain?: string; url?: string }; cdns?: Record<string, { url?: string }> };
+    const own = parsed.cdns?.[domain];
+    if (own?.url) return own.url;
+    return parsed.cdn?.domain === domain && parsed.cdn.url ? parsed.cdn.url : undefined;
   } catch {
     return undefined;
   }

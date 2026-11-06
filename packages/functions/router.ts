@@ -67,6 +67,8 @@ export interface EndpointsFile {
   auth?: EndpointAuth;
   // The deployed CDN, written by `cloudgear apply`; read by `CDN.url()`.
   cdn?: { domain: string; url: string; id?: string };
+  // Every deployed site by domain, written when an app has several CDNs.
+  cdns?: Record<string, { domain: string; url: string; id?: string }>;
   api?: { domain: string; url: string; id?: string };
 }
 

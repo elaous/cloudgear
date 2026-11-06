@@ -251,8 +251,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     });
   }
 
-  if (config.cdn) {
-    const { cdn } = config;
+  for (const cdn of config.cdn) {
     const certificate = certificates.get(cdn.domain);
     const certificateKey = certificateKeyOf(cdn.domain, "cdn");
     const profile = capability(cdn.provider, "cdn");

@@ -121,6 +121,18 @@ describe("CDN status() and url()", () => {
     await expect(inDir({}, () => cdn.url())).rejects.toThrow("no calls expected");
   });
 
+  test("url() finds its own site among several in the endpoints file", async () => {
+    const driver: CdnDriver = { describe: async () => Promise.reject(new Error("no calls expected")) };
+    const cdn = make(driver);
+    const written = {
+      provider: "aws",
+      routes: {},
+      cdn: { domain: "files.example.com", url: "https://d111.cloudfront.net" },
+      cdns: { "files.example.com": { domain: "files.example.com", url: "https://d111.cloudfront.net" }, "cdn.example.com": { domain: "cdn.example.com", url: "https://d222.cloudfront.net" } },
+    };
+    expect(await inDir({ "endpoints.json": written }, () => cdn.url())).toBe("https://d222.cloudfront.net");
+  });
+
   test("registered drivers and CLOUDGEAR_CDN_DRIVER=memory replace the built-in one", async () => {
     process.env.CLOUDGEAR_CDN_DRIVER = "memory";
     try {
@@ -160,7 +172,7 @@ describe("a Cert without a CDN", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cert-only-"));
     const { config } = await generate({ entry: fixture("edge/cert-only.ts"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "certonly" });
     expect(config.certificate).toEqual([{ provider: "aws", domain: "example.com", dns: { provider: "aws", domain: "example.com", zone: "example.com" } }]);
-    expect(config.cdn).toBeUndefined();
+    expect(config.cdn).toEqual([]);
     expect(config.api).toBeUndefined();
   });
 });
@@ -199,7 +211,7 @@ describe("generate with certificates, a CDN and an API domain", () => {
         { provider: "aws", domain: "www.example.com", dns: { provider: "gandi", domain: "www.example.com", zone: "example.com" }, usage: "cdn" },
         { provider: "aws", domain: "api.example.com", dns: { provider: "gandi", domain: "api.example.com", zone: "example.com" }, usage: "api" },
       ]);
-      expect(config.cdn).toEqual({ provider: "aws", domain: "www.example.com", bucket: "my-site", path: "web/" });
+      expect(config.cdn).toEqual([{ provider: "aws", domain: "www.example.com", bucket: "my-site", path: "web/" }]);
       expect(config.api).toEqual({ provider: "aws", domain: "api.example.com" });
 
       const text = fs.readFileSync(configPath, "utf8");
@@ -241,7 +253,7 @@ describe("generate with certificates, a CDN and an API domain", () => {
         buildDir: path.join(dir, "build"),
       });
       expect(config.certificate).toEqual([]);
-      expect(config.cdn).toBeUndefined();
+      expect(config.cdn).toEqual([]);
       expect(config.api).toBeUndefined();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

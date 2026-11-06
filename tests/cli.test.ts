@@ -137,11 +137,39 @@ describe("cloudgear CLI with a CDN", () => {
         version: 1,
         project: "edge",
         provider: "aws",
-        entries: { "@aws.CloudFront.cdn.example.com": { kind: "resource", type: "@aws.CloudFront", name: "cdn.example.com", physical_name: "cdn.example.com", spec: {}, outputs: { id: "E1" } } },
+        entries: { "@aws.CloudFront.www.example.com": { kind: "resource", type: "@aws.CloudFront", name: "www.example.com", physical_name: "www.example.com", spec: { bucket: "my-site" }, outputs: { id: "E1" } } },
       }),
     );
     const res = run("invalidate", "index.html");
     expect(res.code).toBe(1);
     expect(res.err).toMatch(/Invalidation path "index.html" must start with "\/"/);
+  });
+});
+
+describe("choosing the CDN to invalidate", () => {
+  const entry = (name: string, bucket: string, id = "E") => ({ kind: "resource" as const, type: "@aws.CloudFront", name, physical_name: name, spec: { bucket }, outputs: { id } });
+  const config = (cdn: string[], api?: string) => ({ project: "p", provider: "aws", resource: [], function: [], invoker: [], authenticated: "iam" as const, certificate: [], cdn: cdn.map((domain) => ({ provider: "aws", domain, bucket: "b", path: "" })), ...(api ? { api: { provider: "aws", domain: api, via: "cloudfront" as const } } : {}) });
+  const state = (...entries: ReturnType<typeof entry>[]) => ({ version: 1 as const, project: "p", provider: "aws", entries: Object.fromEntries(entries.map((e) => [`@aws.CloudFront.${e.name}`, e])) });
+
+  test("one site and the router's distribution needs no --domain", async () => {
+    const { siteDistributions, pickDistribution } = await import("../src/cdnselect");
+    const sites = siteDistributions(config(["www.example.com"], "api.example.com"), state(entry("www.example.com", "web", "E1"), entry("api.example.com", "", "E2")));
+    expect(pickDistribution(sites, undefined).outputs.id).toBe("E1");
+  });
+
+  test("the router's distribution cannot be picked, with or without being the api domain in the config", async () => {
+    const { siteDistributions, pickDistribution } = await import("../src/cdnselect");
+    const stale = siteDistributions(config(["www.example.com"]), state(entry("www.example.com", "web", "E1"), entry("old-api.example.com", "", "E2")));
+    expect(stale.map((e) => e.name)).toEqual(["www.example.com"]);
+    expect(() => pickDistribution(stale, "old-api.example.com")).toThrow(/router's distribution cannot be invalidated/);
+  });
+
+  test("a site removed from the config is not offered, and --domain picks one of several", async () => {
+    const { siteDistributions, pickDistribution } = await import("../src/cdnselect");
+    const sites = siteDistributions(config(["a.example.com", "b.example.com"]), state(entry("a.example.com", "x", "EA"), entry("b.example.com", "y", "EB"), entry("gone.example.com", "z", "EG")));
+    expect(sites.map((e) => e.name).sort()).toEqual(["a.example.com", "b.example.com"]);
+    expect(pickDistribution(sites, "b.example.com").outputs.id).toBe("EB");
+    expect(() => pickDistribution(sites, undefined)).toThrow(/Several CDNs are deployed/);
+    expect(() => pickDistribution([], undefined)).toThrow(/No CDN has been deployed/);
   });
 });

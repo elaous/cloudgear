@@ -423,13 +423,20 @@ Rules the analyzer enforces:
   certificate (it may then cover the zone apex). `new Cert(provider, dns, {
   region })` sets the region of a certificate that nothing uses; for a CDN it
   MUST be `us-east-1` and for the router it MUST be the function region.
+- An app MAY have several CDNs: one per static site, each with its own `Cert`
+  (a `Cert` serves one CDN) and bucket, for example one for files and images,
+  one for the frontend and one for an admin app, plus one more for the router
+  (`{ router }`). Several CDNs MAY serve the same bucket, each under its own
+  path. Each distribution has its own bucket-policy statement and is removed
+  separately.
 - `DNS`, `Cert` and `CDN` do nothing at runtime except report what `apply`
   deployed. `cert.status()` asks the provider (ACM, in the `Cert`'s region) and
   returns `{ state: "none" | "pending" | "issued" | "failed", id? }`.
   `cdn.status()` returns the same shape with `none`, `deploying` or `deployed`.
   `await cdn.url()` returns the distribution's own URL
   (`https://d111.cloudfront.net`; the custom domain is `cdn.domain`): it reads
-  the `cdn` entry that `apply` writes into `.cloudgear/endpoints.json` and
+  the entry for its own domain that `apply` writes into `.cloudgear/endpoints.json`
+  (`cdn`, or `cdns` by domain once the app has several) and
   otherwise asks the provider (`CloudFront` by alias), and throws until the
   CDN is deployed. Register drivers with `registerCertDriver()` and
   `registerCdnDriver()`, or use `CLOUDGEAR_CERT_DRIVER=memory` and
@@ -491,7 +498,9 @@ is requested, and `destroy` only removes a record while it still points at what
 cloudgear created. A certificate's validation record is left in place on
 destroy, because ACM shares it between certificates for a domain.
 
-`cloudgear invalidate [path...]` clears the CDN's cache (`/*` by default).
+`cloudgear invalidate [path...]` clears a site CDN's cache (`/*` by default); the
+router's distribution is not offered. An app with several CDNs needs
+`--domain <cdn domain>` to say which one.
 Uploading the site's files is not part of cloudgear yet.
 
 Things that have not been checked against real services: all of the

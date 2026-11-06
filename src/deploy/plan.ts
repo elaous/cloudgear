@@ -55,6 +55,8 @@ export interface EventRuleComparable {
 
 export interface CdnComparable {
   domain: string;
+  // The wildcard certificate serving `domain`, when it is not the domain's own.
+  certificate_domain?: string;
   dns_provider: string;
   dns_zone: string;
   dns_token?: SecretRefSpec;
@@ -252,8 +254,9 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
   }
 
   for (const cdn of config.cdn) {
-    const certificate = certificates.get(cdn.domain);
-    const certificateKey = certificateKeyOf(cdn.domain, "cdn");
+    const certificateDomain = cdn.certificate ?? cdn.domain;
+    const certificate = certificates.get(certificateDomain);
+    const certificateKey = certificateKeyOf(certificateDomain, "cdn");
     const profile = capability(cdn.provider, "cdn");
     const bucket = resources.get(cdn.bucket);
     if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
@@ -265,6 +268,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       dry: false,
       spec: {
         domain: cdn.domain,
+        ...(certificateDomain !== cdn.domain ? { certificate_domain: certificateDomain } : {}),
         dns_provider: certificate!.dns.provider,
         dns_zone: certificate!.dns.zone,
         ...(certificate!.dns.token ? { dns_token: certificate!.dns.token } : {}),
@@ -280,8 +284,9 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
 
   if (config.api?.via === "cloudfront") {
     const { api } = config;
-    const certificate = certificates.get(api.domain);
-    const certificateKey = certificateKeyOf(api.domain, "cdn");
+    const certificateDomain = api.certificate ?? api.domain;
+    const certificate = certificates.get(certificateDomain);
+    const certificateKey = certificateKeyOf(certificateDomain, "cdn");
     const routed = config.function.filter((fn) => fn.route.length > 0);
     const routes = routed.flatMap((fn) => fn.route.map((route) => ({ method: route.method, path: route.path, function: fn.physical_name })));
     if (!api.method_routing && conflictingGroups(routes).length) {
@@ -295,6 +300,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       dry: false,
       spec: {
         domain: api.domain,
+        ...(certificateDomain !== api.domain ? { certificate_domain: certificateDomain } : {}),
         dns_provider: certificate!.dns.provider,
         dns_zone: certificate!.dns.zone,
         ...(certificate!.dns.token ? { dns_token: certificate!.dns.token } : {}),

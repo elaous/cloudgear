@@ -14,7 +14,7 @@ import {
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
-import { DNS } from "@cloudgear/dns";
+import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
@@ -143,6 +143,8 @@ export interface CdnModel {
   provider: string;
   domain: string;
   options?: Record<string, string>;
+  // Domain of the Cert that serves it, when that is a wildcard covering `domain`.
+  certificate: string;
   // Name of the bucket resource and the key prefix of the static site within it.
   bucket: string;
   path: string;
@@ -153,7 +155,7 @@ export interface EdgeModel {
   // Each CDN serves one site from a bucket, on its own domain.
   cdns: CdnModel[];
   // The router's own domain, through API Gateway or a CDN.
-  api?: { provider: string; domain: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
+  api?: { provider: string; domain: string; certificate?: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
 }
 
 export interface AppModel extends EdgeModel {
@@ -849,10 +851,33 @@ export function analyzeApp(entryPath: string): AppModel {
       if (!model) throw new Error(`${at}: ${what} must be a Cert declared in your project`);
       return model;
     };
-    const subdomain = (cert: CertificateModel, at: string, what: string) => {
-      if (cert.domain === cert.dns.zone) {
-        throw new Error(`${at}: "${cert.domain}" is the zone apex, which cannot be a CNAME; serve ${what} from a subdomain`);
+    const subdomain = (domain: string, cert: CertificateModel, at: string, what: string) => {
+      if (domain === cert.dns.zone) {
+        throw new Error(`${at}: "${domain}" is the zone apex, which cannot be a CNAME; serve ${what} from a subdomain`);
       }
+    };
+    // The hostname a CDN serves: the Cert's own domain, or `domain` under a wildcard Cert.
+    const servedHost = (cert: CertificateModel, optionsArg: Node | undefined, at: string): string => {
+      const given = readStringOption(optionsArg, "domain", `${at}: CDN options`);
+      let host: string;
+      try {
+        host = given === undefined ? cert.domain : normalizeHostname(given);
+      } catch (err) {
+        throw new Error(`${at}: ${(err as Error).message}`);
+      }
+      if (isWildcardDomain(cert.domain)) {
+        if (given === undefined) throw new Error(`${at}: the Cert is for "${cert.domain}", so the CDN needs the hostname it serves: { domain: "files${cert.domain.slice(1)}" }`);
+        if (!wildcardCovers(cert.domain, host)) throw new Error(`${at}: "${host}" is not covered by "${cert.domain}"; a wildcard covers exactly one label`);
+      } else if (given !== undefined && host !== cert.domain) {
+        throw new Error(`${at}: the CDN's domain "${host}" is not the Cert's "${cert.domain}"; use a wildcard Cert to serve other hostnames`);
+      }
+      return host;
+    };
+    const hostnames = new Map<string, string>();
+    const claimHost = (host: string, at: string) => {
+      const earlier = hostnames.get(host);
+      if (earlier) throw new Error(`${at}: "${host}" is already served by the CDN at ${earlier}`);
+      hostnames.set(host, at);
     };
 
     const cdns: CdnModel[] = [];
@@ -862,9 +887,11 @@ export function analyzeApp(entryPath: string): AppModel {
       const [providerArg, certArg, optionsArg] = cdnExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
       const cdnCert = certOf(certArg, "the CDN's cert", at);
-      if (cdnCerts.has(cdnCert)) throw new Error(`${at}: two CDNs cannot share a Cert; give each its own domain`);
+      if (cdnCerts.has(cdnCert) && !isWildcardDomain(cdnCert.domain)) throw new Error(`${at}: two CDNs cannot share a Cert unless it is a wildcard (*.example.com); give each its own domain`);
       cdnCerts.add(cdnCert);
-      subdomain(cdnCert, at, "the site");
+      const host = servedHost(cdnCert, optionsArg, at);
+      claimHost(host, at);
+      subdomain(host, cdnCert, at, "the site");
       if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with a bucket`);
 
       let bucketStore: Store | undefined;
@@ -899,7 +926,8 @@ export function analyzeApp(entryPath: string): AppModel {
       cdnCert.usage = "cdn";
       cdns.push({
         provider: "aws",
-        domain: cdnCert.domain,
+        domain: host,
+        certificate: cdnCert.domain,
         options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
         bucket: bucketStore.resource.name,
         path: bucketStore.path,
@@ -928,7 +956,10 @@ export function analyzeApp(entryPath: string): AppModel {
       const at = where(router);
       const cert = certOf(routerCert, "the router's cert", at);
       if (cdnCerts.has(cert)) throw new Error(`${at}: the router and the CDN cannot share a Cert; give each its own domain`);
-      subdomain(cert, at, "the API");
+      if (isWildcardDomain(cert.domain)) {
+        throw new Error(`${at}: a wildcard Cert cannot serve the router through API Gateway; use a Cert for the exact domain, or serve the router through a CDN`);
+      }
+      subdomain(cert.domain, cert, at, "the API");
       if (provider !== "aws") {
         throw new Error(`${at}: serving the router on a Cert's domain uses API Gateway, which needs provider "aws", but the router uses "${provider}"`);
       }
@@ -944,8 +975,11 @@ export function analyzeApp(entryPath: string): AppModel {
       const [providerArg, certArg, optionsArg] = routerCdnExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
       const cert = certOf(certArg, "the CDN's cert", at);
-      if (cdnCerts.has(cert)) throw new Error(`${at}: two CDNs cannot share a Cert; give each its own domain`);
-      subdomain(cert, at, "the API");
+      if (cdnCerts.has(cert) && !isWildcardDomain(cert.domain)) throw new Error(`${at}: two CDNs cannot share a Cert unless it is a wildcard (*.example.com); give each its own domain`);
+      cdnCerts.add(cert);
+      const routerHost = servedHost(cert, optionsArg, at);
+      claimHost(routerHost, at);
+      subdomain(routerHost, cert, at, "the API");
       if (cert.region && cert.region !== "us-east-1") throw new Error(`${at}: a CDN needs its certificate in us-east-1, but the Cert says ${cert.region}`);
       if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with a router`);
       let routerOk = false;
@@ -1001,7 +1035,8 @@ export function analyzeApp(entryPath: string): AppModel {
       cert.usage = "cdn";
       api = {
         provider: "aws",
-        domain: cert.domain,
+        domain: routerHost,
+        ...(routerHost !== cert.domain ? { certificate: cert.domain } : {}),
         via: "cloudfront",
         ...(methodRouting === "function" && conflicts.length ? { method_routing: true } : {}),
         options: readOptionsMap(optionsArg, "options", `${at}: CDN`),

@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
-import type { CloudgearConfig } from "../src/config/schema";
+import { decodeConfig, type CloudgearConfig } from "../src/config/schema";
 import { apply, endpointsFrom, hasEndpoints } from "../src/deploy/apply";
 import { awsDrivers } from "../src/deploy/aws";
 import { certificateDriver } from "../src/deploy/aws/certificate";
 import { buildDistributionConfig, invalidateDistribution } from "../src/deploy/aws/cloudfront";
 import { formatPlan, plan, type CdnComparable } from "../src/deploy/plan";
 import type { State } from "../src/deploy/state";
+import { generate } from "../src/generate";
 import { applyAll, baseConfig, emptyState, fakeAws } from "./helpers";
 
 const DOMAIN = "cdn.example.com";
@@ -733,5 +737,61 @@ describe("several CDNs in one app", () => {
       await applyAll(baseConfig({ resource: [], function: [] }), state, aws);
       expect(aws.of("DeleteBucketPolicyCommand")).toEqual([{ Bucket: "my-web" }]);
     });
+  });
+});
+
+describe("sites on a wildcard certificate", () => {
+  const wildcard = { provider: "aws", domain: "*.example.com", dns: { provider: "gandi", domain: "*.example.com", zone: "example.com" }, usage: "cdn" as const };
+  const site = (host: string, bucket: string) => ({ provider: "aws", domain: host, certificate: "*.example.com", bucket, path: "" });
+  const config = () =>
+    baseConfig({
+      resource: ["files", "web"].map((name) => ({ name, type: "@aws.S3", physical_name: `my-${name}`, dry: false, source: "a.ts:1" })),
+      function: [],
+      certificate: [wildcard],
+      cdn: [site("files.example.com", "files"), site("www.example.com", "web")],
+    });
+
+  test("one certificate serves every site, each distribution answers to its own hostname", async () => {
+    const dns = new MemoryDnsDriver();
+    const state = emptyState();
+    const aws = await applyAll(config(), state, fakeAws({}, dns));
+    expect(aws.of("RequestCertificateCommand")).toMatchObject([{ DomainName: "*.example.com" }]);
+    const created = aws.of("CreateDistributionCommand").map((c) => c.DistributionConfig);
+    expect(created.map((d) => d.Aliases.Items).sort()).toEqual([["files.example.com"], ["www.example.com"]]);
+    expect(created.every((d) => d.ViewerCertificate.ACMCertificateArn === "arn:aws:acm:us-east-1:1:certificate/c1")).toBe(true);
+    expect((await dns.get("files.example.com", "CNAME"))?.values).toEqual(["d111.cloudfront.net"]);
+    expect((await dns.get("www.example.com", "CNAME"))?.values).toEqual(["d111.cloudfront.net"]);
+    expect(Object.keys(state.entries).filter((key) => key.startsWith("@aws.Certificate."))).toEqual(["@aws.Certificate.*.example.com"]);
+  });
+
+  test("an unchanged app plans nothing, and the distributions go before the certificate on removal", async () => {
+    const state = emptyState();
+    await applyAll(config(), state, fakeAws({}, new MemoryDnsDriver()));
+    expect(plan(config(), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+    const aws = fakeAws({}, new MemoryDnsDriver());
+    await applyAll(baseConfig({ resource: [], function: [] }), state, aws);
+    const names = aws.names();
+    expect(names.lastIndexOf("DeleteDistributionCommand")).toBeLessThan(names.indexOf("DeleteCertificateCommand"));
+    expect(aws.of("DeleteCertificateCommand")).toHaveLength(1);
+  });
+
+  test("generate writes the wildcard and each hostname, and plan wires the router's CDN to the same certificate", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wildcard-"));
+    try {
+      const { config: generated } = await generate({ entry: path.join(import.meta.dir, "fixtures", "router", "edge", "wildcard.ts"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "app" });
+      expect(generated.certificate).toMatchObject([{ domain: "*.example.com", usage: "cdn" }]);
+      expect(generated.cdn.map((c) => [c.domain, c.certificate])).toEqual([["files.example.com", "*.example.com"], ["www.example.com", "*.example.com"]]);
+      expect(generated.api).toMatchObject({ domain: "api.example.com", certificate: "*.example.com", via: "cloudfront" });
+      const decoded = decodeConfig(fs.readFileSync(path.join(dir, "c.prototxt"), "utf8"));
+      expect(decoded.cdn).toEqual(generated.cdn);
+      expect(decoded.api).toEqual(generated.api);
+      const entries = plan(decoded, emptyState());
+      expect(entries.filter((a) => a.type === "@aws.Certificate").map((a) => a.name)).toEqual(["*.example.com"]);
+      expect(entries.filter((a) => a.type === "@aws.CloudFront").map((a) => a.name).sort()).toEqual(["api.example.com", "files.example.com", "www.example.com"]);
+      const spec = (name: string) => entries.find((a) => a.type === "@aws.CloudFront" && a.name === name)!.desired!.spec as { certificate_domain?: string };
+      expect(["api.example.com", "files.example.com", "www.example.com"].map((n) => spec(n).certificate_domain)).toEqual(["*.example.com", "*.example.com", "*.example.com"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

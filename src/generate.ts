@@ -219,7 +219,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       ...(c.region ? { region: c.region } : {}),
       options: c.options,
     })),
-    cdn: model.cdns.map((cdn) => ({ provider: cdn.provider, domain: cdn.domain, bucket: cdn.bucket, path: cdn.path, options: cdn.options })),
+    cdn: model.cdns.map((cdn) => ({ provider: cdn.provider, domain: cdn.domain, ...(cdn.certificate !== cdn.domain ? { certificate: cdn.certificate } : {}), bucket: cdn.bucket, path: cdn.path, options: cdn.options })),
     api: model.api,
   };
   for (const cdn of config.cdn) providerProfile(cdn.provider);

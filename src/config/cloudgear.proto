@@ -33,6 +33,8 @@ message Api {
   bool method_routing = 4;
   // Provider settings of the CDN.
   map<string, string> options = 5;
+  // Domain of the wildcard Certificate serving `domain`; empty when `domain` is the Certificate's own.
+  string certificate = 6;
 }
 
 message Dns {
@@ -89,6 +91,8 @@ message Cdn {
   string path = 4;
   reserved 5;
   map<string, string> options = 6;
+  // Domain of the wildcard Certificate serving `domain`; empty when `domain` is the Certificate's own.
+  string certificate = 7;
 }
 
 message Resource {

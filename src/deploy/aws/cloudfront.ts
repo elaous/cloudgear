@@ -233,8 +233,8 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   // Creates or brings an existing distribution up to date; every step tolerates being run again.
   async function converge(entry: { deps: string[]; spec: Record<string, unknown> }, context: DriverContext, outputs: Record<string, string>) {
     const spec = entry.spec as unknown as CdnComparable;
-    const certificate = context.entry(stateKey({ type: "@aws.Certificate", name: spec.domain }));
-    if (!certificate?.outputs.arn) throw new Error(`Certificate for ${spec.domain} is not issued yet`);
+    const certificate = context.entry(stateKey({ type: "@aws.Certificate", name: spec.certificate_domain ?? spec.domain }));
+    if (!certificate?.outputs.arn) throw new Error(`Certificate for ${spec.certificate_domain ?? spec.domain} is not issued yet`);
 
     // Fail before creating anything if the name already points somewhere that is not ours.
     const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);

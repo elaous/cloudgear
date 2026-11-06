@@ -1,5 +1,5 @@
 import type { BlobStore, ProviderOptions } from "@cloudgear/blob";
-import type { DNS } from "@cloudgear/dns";
+import { isWildcardDomain, normalizeHostname, wildcardCovers, type DNS } from "@cloudgear/dns";
 import { debug, timed } from "@cloudgear/debug";
 import fs from "node:fs";
 import path from "node:path";
@@ -62,6 +62,9 @@ export interface CdnOptions {
   bucket?: BlobStore;
   // Serves the router's routes on the certificate's domain.
   router?: { readonly provider: string };
+  // The hostname served, for a CDN on a wildcard Cert: one label under the wildcard
+  // ("files.example.com" under "*.example.com"). Literal only.
+  domain?: string;
   // Runs a CloudFront Function per request to route same-path methods; literal only.
   methodRouting?: "function";
   options?: ProviderOptions;
@@ -94,11 +97,18 @@ export class CDN {
     if (options.methodRouting && !options.router) {
       throw new Error("methodRouting only applies to a CDN that serves a router");
     }
+    if (isWildcardDomain(cert.domain)) {
+      if (!options.domain) throw new Error(`The Cert is for "${cert.domain}", so the CDN needs the hostname it serves: { domain: "files${cert.domain.slice(1)}" }`);
+      const host = normalizeHostname(options.domain);
+      if (!wildcardCovers(cert.domain, host)) throw new Error(`"${host}" is not covered by "${cert.domain}": a wildcard covers exactly one label`);
+    } else if (options.domain !== undefined && normalizeHostname(options.domain) !== cert.domain) {
+      throw new Error(`The CDN's domain "${options.domain}" is not the Cert's "${cert.domain}"; use a wildcard Cert to serve other hostnames`);
+    }
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }
 
   get domain(): string {
-    return this.cert.domain;
+    return this.options.domain ? normalizeHostname(this.options.domain) : this.cert.domain;
   }
 
   // The distribution's own URL: from the endpoints file `cloudgear apply` wrote, else from the

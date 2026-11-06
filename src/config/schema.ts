@@ -50,6 +50,8 @@ export interface CertificateSpec {
 export interface ApiSpec {
   provider: string;
   domain: string;
+  // Wildcard Cert serving the domain, when it is not the domain's own.
+  certificate?: string;
   via?: "cloudfront";
   method_routing?: boolean;
   options?: Options;
@@ -58,6 +60,8 @@ export interface ApiSpec {
 export interface CdnSpec {
   provider: string;
   domain: string;
+  // Wildcard Cert serving the domain, when it is not the domain's own.
+  certificate?: string;
   bucket: string;
   path: string;
   options?: Options;
@@ -161,11 +165,13 @@ export function decodeConfig(text: string): CloudgearConfig {
       domain: str(c, "domain"),
       bucket: str(c, "bucket"),
       path: String(c.path ?? ""),
+      ...(c.certificate ? { certificate: String(c.certificate) } : {}),
       ...optionsFrom(c),
     })),
     api: raw.api && {
       provider: str(raw.api, "provider"),
       domain: str(raw.api, "domain"),
+      ...(raw.api.certificate ? { certificate: String(raw.api.certificate) } : {}),
       ...(raw.api.via === "cloudfront" ? { via: "cloudfront" as const } : {}),
       ...(raw.api.method_routing === true ? { method_routing: true } : {}),
       ...optionsFrom(raw.api),

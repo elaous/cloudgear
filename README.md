@@ -423,6 +423,16 @@ Rules the analyzer enforces:
   certificate (it may then cover the zone apex). `new Cert(provider, dns, {
   region })` sets the region of a certificate that nothing uses; for a CDN it
   MUST be `us-east-1` and for the router it MUST be the function region.
+- A `Cert` MAY be a wildcard: `new DNS("gandi", "*.example.com", { zone: "example.com" })`
+  and a `Cert` on it. Every CDN on it then names the hostname it serves, one
+  label under the wildcard, with the `domain` option
+  (`new CDN("aws", wildcard, { bucket: files, domain: "files.example.com" })`),
+  so several CDNs, including the router's, share one certificate, validated by a
+  single CNAME. Each hostname gets its own distribution alias and CNAME record.
+  A wildcard does not cover the apex (`example.com`) or deeper names
+  (`a.b.example.com`), and a CDN on an exact `Cert` takes no other `domain`. A
+  wildcard `Cert` cannot serve the router through API Gateway (its certificate
+  lives in the function region, not us-east-1); use an exact `Cert` there.
 - An app MAY have several CDNs: one per static site, each with its own `Cert`
   (a `Cert` serves one CDN) and bucket, for example one for files and images,
   one for the frontend and one for an admin app, plus one more for the router

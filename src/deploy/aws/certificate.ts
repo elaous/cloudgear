@@ -74,7 +74,8 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       const outputs: Record<string, string> = {};
       const taken = ["@aws.CloudFront", "@aws.ApiGateway"].some((type) => context.entry(stateKey({ type, name: spec.domain })));
       // Fail early if the endpoint could not take the record later.
-      if (spec.for_endpoint && !taken) {
+      // A wildcard has no record of its own; each hostname it serves is checked when its distribution is made.
+      if (spec.for_endpoint && !taken && !spec.domain.startsWith("*.")) {
         const record = await (await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token)).get(spec.domain, "CNAME");
         if (record) {
           throw new Error(`DNS record ${spec.domain} already exists (CNAME ${record.values[0]}); remove it or serve the site from another name`);

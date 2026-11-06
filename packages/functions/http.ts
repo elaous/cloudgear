@@ -36,6 +36,7 @@ export interface RequestContext {
 }
 
 export interface RouteSpec {
+  name?: string;
   method: Method;
   path: string;
 }

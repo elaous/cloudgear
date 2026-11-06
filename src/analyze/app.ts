@@ -11,6 +11,7 @@ import {
   type Symbol as MorphSymbol,
   type VariableDeclaration,
 } from "ts-morph";
+import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
@@ -92,6 +93,8 @@ export interface AnalyzedFunction {
   // Five-field UTC cron expressions that also trigger the function.
   schedules: ScheduleModel[];
   secrets: SecretBindingModel[];
+  // What the function's code reads from the environment.
+  envUse: EnvUse;
   // Events that start the function.
   events: EventTriggerModel[];
   // Names of the buses the function publishes to.
@@ -569,6 +572,7 @@ export function analyzeApp(entryPath: string): AppModel {
   const publicRoutes = new Map<string, boolean>();
 
   const functions = new Map<Node, AnalyzedFunction>();
+  const functionNodes = new Map<AnalyzedFunction, Node>();
   const isCdnRouterOption = (node: Node) => {
     if (!Node.isShorthandPropertyAssignment(node) && !Node.isPropertyAssignment(node)) return false;
     if (propName(node) !== "router") return false;
@@ -653,6 +657,11 @@ export function analyzeApp(entryPath: string): AppModel {
     fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
     const merged = { ...routerFunctionOptions, ...fn.options };
     fn.options = Object.keys(merged).length ? merged : undefined;
+  }
+
+  for (const [fn, node] of functionNodes) {
+    const others = [...functionNodes].filter(([other]) => other !== fn).map(([, otherNode]) => otherNode).filter((otherNode) => otherNode.getSourceFile() === node.getSourceFile() && otherNode !== node && !node.getAncestors().includes(otherNode));
+    fn.envUse = scanEnvUse(node.getSourceFile(), isAppFile, relative, others);
   }
 
   const byName = new Map<string, AnalyzedFunction>();
@@ -1180,6 +1189,7 @@ export function analyzeApp(entryPath: string): AppModel {
       secrets: [],
       events: [],
       publishes: [],
+      envUse: { variables: {}, dynamic: [] },
       include: [],
       passRequest: false,
       uses: new Map(),
@@ -1224,6 +1234,7 @@ export function analyzeApp(entryPath: string): AppModel {
       fn.uses.set(key, { resource, path: storePath, accesses });
     }
     functions.set(decl, fn);
+    functionNodes.set(fn, fnNode);
     return fn;
   }
 

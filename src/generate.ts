@@ -6,8 +6,12 @@ import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
+import { envReportPath, type EnvReport, type EnvSource } from "./envreport";
 import { fitName, sanitizeName } from "./names";
-import { capability, crossProviderAccess, providerProfile, validateConfigOptions } from "./providers";
+import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
+
+// Set by the Lambda runtime itself.
+const PLATFORM_ENV = new Set(["TZ", "LANG", "PATH", "LD_LIBRARY_PATH", "NODE_PATH"]);
 
 export interface GenerateOptions {
   entry: string;
@@ -228,8 +232,28 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   if (config.api) providerProfile(config.api.provider);
   validateConfigOptions(config);
 
+  const report: EnvReport = { version: 1, functions: {} };
+  model.functions.forEach((fn, index) => {
+    const spec = functions[index]!;
+    const optionEnv = environmentOptions(fn.options);
+    const provided = (name: string): EnvSource =>
+      spec.env.some((e) => e.key === name) ? "resource"
+      : name in optionEnv ? "option"
+      : fn.secrets.some((s) => s.env === name) ? "secret"
+      : fn.secrets.some((s) => s.all) ? "secret-wildcard"
+      : profile.reservedEnv.test(name) || PLATFORM_ENV.has(name) ? "platform"
+      : null;
+    report.functions[fn.name] = {
+      routes: fn.routes.map((r) => `${r.method} ${r.path}`),
+      variables: Object.fromEntries(Object.entries(fn.envUse.variables).map(([name, use]) => [name, { ...use, provided: provided(name) }])),
+      dynamic: fn.envUse.dynamic,
+    };
+    if (fn.envUse.dynamic.length) warnings.push(`${fn.file}: "${fn.name}" reads the environment in ways that cannot be listed (${fn.envUse.dynamic.join(", ")}); those variables are not checked`);
+  });
+
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, encodeConfig(config));
+  fs.writeFileSync(envReportPath(options.configPath), `${JSON.stringify(report, null, 2)}\n`);
   debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
   if (functions.some((f) => f.secret?.length) || config.certificate.some((c) => c.dns.token)) {
     for (const file of trackedEnvFiles(path.dirname(path.resolve(options.entry)))) {

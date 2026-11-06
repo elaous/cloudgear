@@ -981,6 +981,46 @@ function {
 }
 ```
 
+### Environment variables the code reads
+
+`cloudgear generate` also lists what each function's code reads from the
+environment (`process.env.X`, `process.env["X"]`, `Bun.env.X`, `import.meta.env.X`
+and destructuring) in `cloudgear.env.json`, next to the config, by function name:
+
+```json
+{
+  "version": 1,
+  "functions": {
+    "api-items": {
+      "routes": ["GET /api/items"],
+      "variables": {
+        "ITEMS_CURSOR_SECRET": { "required": true, "files": ["api/items.ts"], "provided": "secret" },
+        "DB_URL": { "required": true, "files": ["lib/db.ts"], "provided": null }
+      },
+      "dynamic": []
+    }
+  }
+}
+```
+
+- The scan covers the function's file and the project files it imports, not
+  `node_modules`. A function shares its imports with the other functions in the
+  same file, so give a function its own file to keep its list exact.
+- A variable is `required` unless every read has a fallback (`?? x`, `|| x`), is
+  a presence check (`if (process.env.X)`, `!process.env.X`, `typeof`) or has a
+  destructuring default. `provided` says how it reaches the function: `resource`
+  (set by cloudgear), `option` (`functionOptions: { "env.X": "..." }`), `secret`
+  (an `env` binding), `secret-wildcard` (a `/*` path may hold it), `platform`
+  (`AWS_*`, `LAMBDA_*`, `TZ` and the like) or `null`.
+- A computed read (`process.env[name]`) or a spread is listed under `dynamic`
+  and warned about; those variables cannot be checked.
+- `cloudgear apply` reads the report and refuses to deploy while a required
+  variable has `provided: null`, and while a declared secret is not stored (see
+  `cloudgear secrets list`). `cloudgear plan` only warns. Pass
+  `--skip-env-check` to deploy anyway. If the report is missing, `apply` asks
+  for `generate` first. The report holds names and file paths, never values, so
+  it MAY be committed.
+
 ## `cloudgear plan` / `apply` / `destroy`
 
 State lives in `.cloudgear/state.json` next to the config. `plan` compares

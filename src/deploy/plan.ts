@@ -42,6 +42,15 @@ export interface ScheduleComparable {
   function_key: string;
 }
 
+export interface EventRuleComparable {
+  // Physical name of the bus.
+  bus: string;
+  event_type: string;
+  source: string;
+  function: string;
+  function_key: string;
+}
+
 export interface CdnComparable {
   domain: string;
   dns_provider: string;
@@ -178,6 +187,25 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         spec: { cron, expression: toEventBridgeCron(cron), function: fn.physical_name, function_key: stateKey(fn) } satisfies ScheduleComparable,
         source: fn,
         deps: [stateKey(fn)],
+        refresh: true,
+      });
+    }
+  }
+
+  for (const fn of config.function) {
+    for (const event of fn.event ?? []) {
+      const bus = resources.get(event.bus);
+      if (!bus) throw new Error(`cloudgear config references unknown event bus "${event.bus}"`);
+      const id = createHash("sha256").update(`${fn.physical_name}\0${physicalOf(event.bus)}\0${event.type}\0${event.source ?? ""}`).digest("hex").slice(0, 8);
+      entries.push({
+        kind: "resource",
+        type: capability(providerOfType(fn.type), "events").rule,
+        name: `${fn.name}@${id}`,
+        physical_name: `${fn.physical_name.slice(0, 55)}-${id}`,
+        dry: false,
+        spec: { bus: physicalOf(event.bus), event_type: event.type, source: event.source ?? "", function: fn.physical_name, function_key: stateKey(fn) } satisfies EventRuleComparable,
+        source: fn,
+        deps: [stateKey(fn), stateKey(bus)],
         refresh: true,
       });
     }

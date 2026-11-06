@@ -20,6 +20,7 @@ export interface ProviderProfile {
   cdn?: { type: string; certificate: string };
   api?: { type: string };
   schedule?: { type: string };
+  events?: { type: string; rule: string };
 }
 
 const oneOf =
@@ -55,6 +56,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     cdn: { type: "@aws.CloudFront", certificate: "@aws.Certificate" },
     api: { type: "@aws.ApiGateway" },
     schedule: { type: "@aws.Schedule" },
+    events: { type: "@aws.EventBus", rule: "@aws.EventRule" },
     blobStore: {
       type: "@aws.S3",
       actions: {
@@ -96,9 +98,9 @@ export function profileOfType(type: string): ProviderProfile {
   return providerProfile(providerOfType(type));
 }
 
-export function capability<K extends "cdn" | "api" | "schedule">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
+export function capability<K extends "cdn" | "api" | "schedule" | "events">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
   const found = providerProfile(provider)[name];
-  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : "schedules"} yet`);
+  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : "schedules"} yet`);
   return found as NonNullable<ProviderProfile[K]>;
 }
 

@@ -43,6 +43,7 @@ import { certificateDriver } from "./certificate";
 import { apiGatewayDriver } from "./apigateway";
 import { cloudFrontDriver } from "./cloudfront";
 import { scheduleDriver } from "./schedule";
+import { eventBusDriver, eventRuleDriver } from "./eventbus";
 
 export interface SendClient {
   send(command: any): Promise<any>;
@@ -126,7 +127,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       return;
     }
     await iam.send(
-      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec, spec.secrets?.length ? { account: accountOf(roleArn), region: options.region } : undefined) }),
+      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec, spec.secrets?.length || spec.permissions.some((p) => p.type === "@aws.EventBus") ? { account: accountOf(roleArn), region: options.region } : undefined) }),
     );
   }
 
@@ -230,6 +231,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
 
   return {
     "@aws.Schedule": scheduleDriver({ events, lambda, log, tags: tagger }),
+    "@aws.EventBus": eventBusDriver({ events, lambda, log, tags: tagger }),
+    "@aws.EventRule": eventRuleDriver({ events, lambda, log, tags: tagger }),
     "@aws.Certificate": certificateDriver({ tags: tagger, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
     "@aws.CloudFront": cloudFrontDriver({ tags: tagger, cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
     "@aws.ApiGateway": apiGatewayDriver({ tags: tagger, apigateway, lambda, dns: requireDns, region: options.region, log }),
@@ -415,6 +418,10 @@ function accountOf(roleArn: string | undefined): string {
 
 export function policyDocument(spec: FunctionComparable, secrets?: SecretContext): string {
   const statements = spec.permissions.flatMap((p) => {
+    if (p.type === "@aws.EventBus") {
+      if (!secrets) throw new Error("The account and region are needed to grant a function its event buses");
+      return [{ Effect: "Allow", Action: p.actions, Resource: `arn:aws:events:${secrets.region}:${secrets.account}:event-bus/${p.physical_name}` }];
+    }
     if (p.type !== "@aws.S3") throw new Error(`No IAM mapping for permissions on ${p.type}`);
     const bucketArn = `arn:aws:s3:::${p.physical_name}`;
     const prefix = p.path ?? "";

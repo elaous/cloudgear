@@ -132,6 +132,16 @@ message Function {
   // "helper" or "writer": what the function receives after its first argument.
   string response_arg = 18;
   repeated SecretBinding secret = 19;
+  // Events that also start the function.
+  repeated EventTrigger event = 20;
+}
+
+message EventTrigger {
+  // Logical name of the bus Resource ("bus.<name>").
+  string bus = 1;
+  string type = 2;
+  // Empty matches any source.
+  string source = 3;
 }
 
 message Source {

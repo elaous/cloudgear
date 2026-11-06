@@ -31,8 +31,17 @@ export interface Principal {
   claims: Record<string, unknown>;
 }
 
+// The event that started a function: set for runs triggered by an EventBus rule.
+export interface EventInfo {
+  id: string;
+  type: string;
+  source: string;
+  time?: string;
+}
+
 export interface RequestContext {
   auth?: Principal;
+  event?: EventInfo;
 }
 
 export interface RouteSpec {

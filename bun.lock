@@ -20,6 +20,7 @@
         "@cloudgear/core": "workspace:*",
         "@cloudgear/debug": "workspace:*",
         "@cloudgear/dns": "workspace:*",
+        "@cloudgear/events": "workspace:*",
         "@cloudgear/functions": "workspace:*",
         "@cloudgear/secrets": "workspace:*",
         "ts-morph": "^24.0.0",
@@ -80,6 +81,19 @@
       },
       "optionalPeers": [
         "@aws-sdk/client-route-53",
+      ],
+    },
+    "packages/events": {
+      "name": "@cloudgear/events",
+      "version": "0.1.0",
+      "dependencies": {
+        "@cloudgear/debug": "workspace:*",
+      },
+      "peerDependencies": {
+        "@aws-sdk/client-eventbridge": "^3.700.0",
+      },
+      "optionalPeers": [
+        "@aws-sdk/client-eventbridge",
       ],
     },
     "packages/functions": {
@@ -180,6 +194,8 @@
     "@cloudgear/debug": ["@cloudgear/debug@workspace:packages/debug"],
 
     "@cloudgear/dns": ["@cloudgear/dns@workspace:packages/dns"],
+
+    "@cloudgear/events": ["@cloudgear/events@workspace:packages/events"],
 
     "@cloudgear/functions": ["@cloudgear/functions@workspace:packages/functions"],
 

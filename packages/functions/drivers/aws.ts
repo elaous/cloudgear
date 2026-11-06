@@ -11,6 +11,7 @@ import {
   vercelRequestFromOriginal,
   type OriginalRequest,
   type ResponseKind,
+  type EventInfo,
   type RequestContext,
   type HttpResult,
   type RouteSpec,
@@ -31,6 +32,15 @@ export interface ScheduledEvent {
   source: "aws.events";
   time?: string;
   resources?: string[];
+}
+
+// An EventBridge event delivered to a function by a rule.
+export interface BusEvent {
+  id?: string;
+  source: string;
+  "detail-type": string;
+  time?: string;
+  detail?: unknown;
 }
 
 export interface FunctionUrlResult {
@@ -66,17 +76,28 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
         }))
       : undefined;
 
-  return async (event: FunctionUrlEvent | ScheduledEvent): Promise<FunctionUrlResult> => {
+  // A run nobody is waiting on: a failure is thrown so Lambda records and retries it.
+  const runAsync = async (what: string, input: unknown, context: RequestContext) => {
+    await prepare();
+    const request = options.request
+      ? vercelRequestFrom({ method: "POST", url: `https://${what}.invalid/`, headers: { "content-type": "application/json" }, raw: new TextEncoder().encode(JSON.stringify(input)) })
+      : undefined;
+    const result = await invoke(fn, input, context, { request, response: options.response });
+    if (result.status >= 400) throw new Error(`${what === "schedule" ? "Scheduled" : "Event"} run failed with status ${result.status}`);
+    return toLambda(result);
+  };
+
+  return async (event: FunctionUrlEvent | ScheduledEvent | BusEvent): Promise<FunctionUrlResult> => {
     if (isScheduled(event)) {
-      await prepare();
       debug("lambda", "scheduled event", { time: event.time, rule: event.resources?.[0] });
-      const input = { scheduledTime: event.time, rule: event.resources?.[0] };
-      const request = options.request
-        ? vercelRequestFrom({ method: "POST", url: "https://schedule.invalid/", headers: { "content-type": "application/json" }, raw: new TextEncoder().encode(JSON.stringify(input)) })
-        : undefined;
-      const result = await invoke(fn, input, {}, { request, response: options.response });
-      if (result.status >= 400) throw new Error(`Scheduled run failed with status ${result.status}`);
-      return toLambda(result);
+      return runAsync("schedule", { scheduledTime: event.time, rule: event.resources?.[0] }, {});
+    }
+    if (isBusEvent(event)) {
+      debug("lambda", "bus event", { type: event["detail-type"], source: event.source, id: event.id });
+      const info: EventInfo = { id: event.id ?? "", type: event["detail-type"], source: event.source, ...(event.time ? { time: event.time } : {}) };
+      const detail = event.detail;
+      const input = typeof detail === "object" && detail !== null && !Array.isArray(detail) ? detail : { detail };
+      return runAsync("event", input, { event: info });
     }
     try {
       await prepare();
@@ -137,8 +158,12 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
   };
 }
 
-function isScheduled(event: FunctionUrlEvent | ScheduledEvent): event is ScheduledEvent {
+function isScheduled(event: FunctionUrlEvent | ScheduledEvent | BusEvent): event is ScheduledEvent {
   return !("requestContext" in event) && (event as ScheduledEvent).source === "aws.events";
+}
+
+function isBusEvent(event: FunctionUrlEvent | ScheduledEvent | BusEvent): event is BusEvent {
+  return !("requestContext" in event) && typeof (event as BusEvent)["detail-type"] === "string" && typeof (event as BusEvent).source === "string";
 }
 
 interface Resolved {

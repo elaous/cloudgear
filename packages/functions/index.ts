@@ -7,5 +7,5 @@ export type { Authentication, EndpointAuth, EndpointsFile, FunctionRouterOptions
 export { VercelRequest, VercelResponse } from "./vercel";
 export type { VercelRequestQuery } from "./vercel";
 export { response, isResponse, routeKey, METHODS, INVOKE_CONTENT_TYPE } from "./http";
-export type { CloudgearResponse, Handler, Method, PathParams, Principal, Provider, RequestContext, RouteSpec } from "./http";
+export type { CloudgearResponse, EventInfo, Handler, Method, PathParams, Principal, Provider, RequestContext, RouteSpec } from "./http";
 export type { AwsCredentials, AwsCredentialsProvider } from "./sign";

@@ -35,6 +35,7 @@
     "@cloudgear/core": "workspace:*",
     "@cloudgear/debug": "workspace:*",
     "@cloudgear/dns": "workspace:*",
+    "@cloudgear/events": "workspace:*",
     "@cloudgear/functions": "workspace:*",
     "@cloudgear/secrets": "workspace:*",
     "ts-morph": "^24.0.0"

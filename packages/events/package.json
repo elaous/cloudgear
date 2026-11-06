@@ -1,0 +1,20 @@
+{
+  "name": "@cloudgear/events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./drivers/eventbridge": "./drivers/eventbridge.ts",
+    "./drivers/memory": "./drivers/memory.ts"
+  },
+  "dependencies": {
+    "@cloudgear/debug": "workspace:*"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-eventbridge": "^3.700.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-eventbridge": { "optional": true }
+  }
+}

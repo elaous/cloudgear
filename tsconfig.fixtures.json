@@ -1,18 +1,10 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "experimentalDecorators": false },
-  "include": [],
-  "exclude": [],
-  "files": [
-    "tests/fixtures/router/secrets/basic.ts",
-    "tests/fixtures/router/secrets/renamed.ts",
-    "tests/fixtures/router/secrets/wildcard.ts",
-    "tests/fixtures/router/secrets/dns-token.ts",
-    "tests/fixtures/router/events/basic.ts",
-    "tests/fixtures/router/events/default-bus.ts",
-    "tests/fixtures/router/events/only-events.ts",
-    "tests/fixtures/router/events/alias.ts",
-    "tests/fixtures/router/events/loop.ts",
-    "tests/fixtures/router/types/forms.ts"
+  "include": ["tests/fixtures/router/secrets/*.ts", "tests/fixtures/router/events/*.ts", "tests/fixtures/router/types/*.ts"],
+  "exclude": [
+    "node_modules",
+    "tests/fixtures/router/secrets/computed-name.ts",
+    "tests/fixtures/router/events/bad-trigger.ts",
+    "tests/fixtures/router/events/not-a-trigger.ts"
   ]
 }

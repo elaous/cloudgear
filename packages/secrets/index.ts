@@ -32,13 +32,13 @@ export interface EnvBinding {
   readonly names: Readonly<Record<string, string>>;
 }
 
-export interface SecretPath {
+export interface SecretPath<All extends boolean = boolean> {
   (names: readonly string[] | Readonly<Record<string, string>>): EnvBinding;
   (name: string): SecretRef;
   readonly store: SecretStore;
   readonly prefix: string;
   // The path ended in "/*": every secret under it.
-  readonly all: boolean;
+  readonly all: All;
 }
 
 // Constructing it does nothing; `cloudgear apply` grants functions what they declare.
@@ -57,7 +57,7 @@ export class SecretStore {
     return this.options.service ?? DEFAULT_SERVICE;
   }
 
-  path(path: string): SecretPath {
+  path<P extends string>(path: P): SecretPath<P extends `${string}/*` ? true : false> {
     const { prefix, all } = parseSecretPath(path);
     const bound = ((arg: string | readonly string[] | Readonly<Record<string, string>>) => {
       if (typeof arg === "string") return new SecretRef(this, prefix, arg);
@@ -70,7 +70,7 @@ export class SecretStore {
       store: { value: this },
       prefix: { value: prefix },
       all: { value: all },
-    });
+    }) as never;
   }
 
   driver(): Promise<SecretDriver> {

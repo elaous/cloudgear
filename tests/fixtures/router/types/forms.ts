@@ -25,5 +25,8 @@ new FunctionRouter("aws", { env: [app(["A"]), app({ B: "b" })] })
 // @ts-expect-error a single secret is read in code, not bound to the environment
 new FunctionRouter("aws").url("GET", "/c", a, { env: app("A") });
 
+// @ts-expect-error a path without /* needs the names to read
+new FunctionRouter("aws").url("GET", "/e", a, { env: app });
+
 // @ts-expect-error a trigger is bus.event(...), not a string
 new FunctionRouter("aws").url("GET", "/d", a, { on: "x" });

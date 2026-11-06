@@ -1018,6 +1018,11 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
   (set by cloudgear), `option` (`functionOptions: { "env.X": "..." }`), `secret`
   (an `env` binding), `secret-wildcard` (a `/*` path may hold it), `platform`
   (`AWS_*`, `LAMBDA_*`, `TZ`, `NODE_ENV`, `CI` and the like) or `null`.
+- A variable the code tolerates being unset in a way the scan cannot see (for
+  example one passed to a library that accepts `undefined`) is listed in the
+  router's `optionalEnv: ["SENTRY_DSN"]` (string literals), so it is no longer
+  required. A conversion before a fallback (`Number(process.env.X) || 0`) is
+  already optional.
 - A computed read (`process.env[name]`) or a spread is listed under `dynamic`
   and warned about; those variables cannot be checked.
 - `cloudgear apply` reads the report and refuses to deploy while a required

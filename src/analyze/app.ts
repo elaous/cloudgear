@@ -162,6 +162,8 @@ export interface AppModel extends EdgeModel {
   jwt?: JwtSettings;
   entry: string;
   resources: AnalyzedResource[];
+  // Variables the router says the code tolerates being unset.
+  optionalEnv: string[];
   // Buses some function triggers on or publishes to.
   buses: AnalyzedBus[];
   functions: AnalyzedFunction[];
@@ -691,6 +693,7 @@ export function analyzeApp(entryPath: string): AppModel {
     authenticated,
     entry: relative(entry),
     resources: [...resources.values()],
+    optionalEnv: readOptionalEnv(router.getArguments()[1], `${where(router)}: FunctionRouter`),
     buses: [...usedBuses.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
@@ -1421,6 +1424,20 @@ function readRegion(options: Node | undefined, at: string): string | undefined {
   const region = readStringOption(options, "region", `${at} options`);
   if (region !== undefined && !REGION.test(region)) throw new Error(`${at}: "${region}" is not an AWS region such as "eu-west-1"`);
   return region;
+}
+
+function readOptionalEnv(options: Node | undefined, at: string): string[] {
+  if (!options || !Node.isObjectLiteralExpression(options)) return [];
+  const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "optionalEnv");
+  if (!prop) return [];
+  let value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+  while (value && (Node.isAsExpression(value) || Node.isSatisfiesExpression(value) || Node.isParenthesizedExpression(value))) value = value.getExpression();
+  if (!value || !Node.isArrayLiteralExpression(value)) throw new Error(`${at}: optionalEnv must be an array of string literals`);
+  return value.getElements().map((item) => {
+    const name = stringLiteral(item, `${at}: optionalEnv`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`${at}: optionalEnv "${name}" is not an environment variable name`);
+    return name;
+  });
 }
 
 function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {

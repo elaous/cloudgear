@@ -48,17 +48,32 @@ const isGuardBranch = (statement: Node): boolean =>
 
 // A read the code survives the variable being unset: a fallback, a comparison or a presence check.
 // A check whose failure throws or exits is the opposite: the code requires the variable.
+// NaN is falsy but not nullish; String(undefined) is a truthy string, so only these keep a `||` fallback working.
+const NUMERIC = new Set(["Number", "parseInt", "parseFloat"]);
+
 function isOptionalRead(read: Node): boolean {
-  const at = outer(read);
-  for (const ancestor of at.getAncestors()) {
+  for (const ancestor of outer(read).getAncestors()) {
     if (Node.isFunctionLikeDeclaration(ancestor) || Node.isSourceFile(ancestor)) break;
-    if (Node.isIfStatement(ancestor) && ancestor.getExpression().containsRange(at.getPos(), at.getEnd())) return !isGuardBranch(ancestor.getThenStatement());
+    const here = outer(read);
+    if (Node.isIfStatement(ancestor) && ancestor.getExpression().containsRange(here.getPos(), here.getEnd())) return !isGuardBranch(ancestor.getThenStatement());
   }
+  let at = outer(read);
+  // `Number(process.env.X) || 0`: NaN is falsy, so the fallback still runs; `Number(x) ?? 0` never falls back.
+  let numeric = false;
+  let wrapped = false;
+  for (let call = at.getParent(); call && Node.isCallExpression(call) && (NUMERIC.has(call.getExpression().getText()) || call.getExpression().getText() === "String") && call.getArguments()[0] === at; call = at.getParent()) {
+    numeric = NUMERIC.has(call.getExpression().getText());
+    wrapped = true;
+    at = outer(call);
+  }
+  // The outermost conversion decides: a String is truthy even for undefined, so no fallback runs.
+  if (wrapped && !numeric) return false;
   const parent = at.getParent();
   if (!parent) return false;
   if (Node.isBinaryExpression(parent)) {
     const operator = parent.getOperatorToken().getKind();
     if (ASSIGNMENTS.has(operator)) return parent.getLeft() === at;
+    if (numeric && operator === SyntaxKind.QuestionQuestionToken) return false;
     return OPTIONAL_OPERATORS.has(operator) && (parent.getLeft() === at || operator !== SyntaxKind.QuestionQuestionToken && operator !== SyntaxKind.BarBarToken && operator !== SyntaxKind.AmpersandAmpersandToken);
   }
   if (Node.isPrefixUnaryExpression(parent)) return parent.getOperatorToken() === SyntaxKind.ExclamationToken;

@@ -1,5 +1,6 @@
 import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec, SecretBindingSpec, SecretRefSpec } from "../config/schema";
 import { createHash } from "node:crypto";
+import { wildcardCovers } from "@cloudgear/dns";
 import { toEventBridgeCron } from "@cloudgear/functions";
 import { capability, providerOfType, validateConfigOptions } from "../providers";
 import { behaviorsFor, conflictingGroups, routeShape } from "../routes";
@@ -255,6 +256,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
 
   for (const cdn of config.cdn) {
     const certificateDomain = cdn.certificate ?? cdn.domain;
+    if (!wildcardCovers(certificateDomain, cdn.domain)) throw new Error(`cloudgear config: the certificate "${certificateDomain}" does not cover the CDN's domain "${cdn.domain}"`);
     const certificate = certificates.get(certificateDomain);
     const certificateKey = certificateKeyOf(certificateDomain, "cdn");
     const profile = capability(cdn.provider, "cdn");
@@ -285,6 +287,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
   if (config.api?.via === "cloudfront") {
     const { api } = config;
     const certificateDomain = api.certificate ?? api.domain;
+    if (!wildcardCovers(certificateDomain, api.domain)) throw new Error(`cloudgear config: the certificate "${certificateDomain}" does not cover the API's domain "${api.domain}"`);
     const certificate = certificates.get(certificateDomain);
     const certificateKey = certificateKeyOf(certificateDomain, "cdn");
     const routed = config.function.filter((fn) => fn.route.length > 0);

@@ -549,6 +549,8 @@ describe("a wildcard Cert shared by CDNs", () => {
     ["wildcard-dup-host.ts", /"www\.example\.com" is already served by the CDN/],
     ["exact-other-domain.ts", /use a wildcard Cert to serve other hostnames/],
     ["wildcard-router-cert.ts", /wildcard Cert cannot serve the router through API Gateway/],
+    ["router-cert-host-clash.ts", /"api\.example\.com" is already served by the CDN/],
+    ["wildcard-region.ts", /a CDN needs its certificate in us-east-1, but the Cert says eu-west-1/],
   ])("%s is rejected", (name, message) => {
     expect(() => analyzeApp(fixture(`edge/${name}`))).toThrow(message);
   });

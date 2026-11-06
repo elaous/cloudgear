@@ -960,6 +960,7 @@ export function analyzeApp(entryPath: string): AppModel {
         throw new Error(`${at}: a wildcard Cert cannot serve the router through API Gateway; use a Cert for the exact domain, or serve the router through a CDN`);
       }
       subdomain(cert.domain, cert, at, "the API");
+      claimHost(cert.domain, at);
       if (provider !== "aws") {
         throw new Error(`${at}: serving the router on a Cert's domain uses API Gateway, which needs provider "aws", but the router uses "${provider}"`);
       }

@@ -432,7 +432,9 @@ Rules the analyzer enforces:
   A wildcard does not cover the apex (`example.com`) or deeper names
   (`a.b.example.com`), and a CDN on an exact `Cert` takes no other `domain`. A
   wildcard `Cert` cannot serve the router through API Gateway (its certificate
-  lives in the function region, not us-east-1); use an exact `Cert` there.
+  lives in the function region, not us-east-1); use an exact `Cert` there. A
+  hostname that already has a foreign record is found when its distribution is
+  made, which is after the certificate is issued.
 - An app MAY have several CDNs: one per static site, each with its own `Cert`
   (a `Cert` serves one CDN) and bucket, for example one for files and images,
   one for the frontend and one for an admin app, plus one more for the router

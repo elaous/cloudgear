@@ -794,4 +794,40 @@ describe("sites on a wildcard certificate", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("a hand-edited config whose certificate does not cover the host is refused", () => {
+    const bad = config();
+    bad.cdn = [{ ...site("a.b.example.com", "files") }];
+    expect(() => plan(bad, emptyState())).toThrow(/does not cover the CDN's domain "a\.b\.example\.com"/);
+    const api = { ...config(), api: { provider: "aws", domain: "a.b.example.com", certificate: "*.example.com", via: "cloudfront" as const } };
+    expect(() => plan(api, emptyState())).toThrow(/does not cover the API's domain/);
+  });
+
+  test("an exact certificate leaves certificate_domain out of the spec", () => {
+    const exact = baseConfig({
+      resource: [{ name: "files", type: "@aws.S3", physical_name: "my-files", dry: false, source: "a.ts:1" }],
+      function: [],
+      certificate: [{ provider: "aws", domain: "www.example.com", dns: { provider: "gandi", domain: "www.example.com", zone: "example.com" }, usage: "cdn" }],
+      cdn: [{ provider: "aws", domain: "www.example.com", bucket: "files", path: "" }],
+    });
+    const spec = plan(exact, emptyState()).find((a) => a.type === "@aws.CloudFront")!.desired!.spec;
+    expect(Object.hasOwn(spec, "certificate_domain")).toBe(false);
+  });
+
+  test("a foreign record on one served hostname fails that distribution, not the certificate", async () => {
+    const dns = new MemoryDnsDriver();
+    await dns.upsert({ name: "files.example.com", type: "CNAME", values: ["elsewhere.example.net."], ttl: 300 });
+    const aws = fakeAws({}, dns);
+    await expect(applyAll(config(), emptyState(), aws)).rejects.toThrow(/DNS record files\.example\.com already exists/);
+    expect(aws.of("RequestCertificateCommand")).toHaveLength(1);
+    expect(aws.of("CreateDistributionCommand")).toEqual([]);
+  });
+
+  test("a wildcard certificate does not look up a record named after the wildcard", async () => {
+    const dns = new MemoryDnsDriver();
+    await dns.upsert({ name: "foreign.example.com", type: "CNAME", values: ["x.example.net."], ttl: 300 });
+    const aws = fakeAws({}, dns);
+    await applyAll(baseConfig({ function: [], resource: [], certificate: [wildcard] }), emptyState(), aws);
+    expect(aws.of("RequestCertificateCommand")).toHaveLength(1);
+  });
 });

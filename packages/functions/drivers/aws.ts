@@ -160,7 +160,7 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
 }
 
 function isScheduled(event: FunctionUrlEvent | ScheduledEvent | BusEvent): event is ScheduledEvent {
-  return !("requestContext" in event) && (event as ScheduledEvent).source === "aws.events" && (event as { "detail-type"?: string })["detail-type"] === "Scheduled Event";
+  return !("requestContext" in event) && (event as ScheduledEvent).source === "aws.events" && [undefined, "Scheduled Event"].includes((event as { "detail-type"?: string })["detail-type"]);
 }
 
 function isBusEvent(event: FunctionUrlEvent | ScheduledEvent | BusEvent): event is BusEvent {

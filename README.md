@@ -498,8 +498,9 @@ is requested, and `destroy` only removes a record while it still points at what
 cloudgear created. A certificate's validation record is left in place on
 destroy, because ACM shares it between certificates for a domain.
 
-`cloudgear invalidate [path...]` clears the CDN's cache (`/*` by default). An
-app with several CDNs needs `--domain <cdn domain>` to say which one.
+`cloudgear invalidate [path...]` clears a site CDN's cache (`/*` by default); the
+router's distribution is not offered. An app with several CDNs needs
+`--domain <cdn domain>` to say which one.
 Uploading the site's files is not part of cloudgear yet.
 
 Things that have not been checked against real services: all of the

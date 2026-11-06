@@ -59,3 +59,12 @@ describe("prototxt", () => {
     expect(() => decodeConfig('provider: "aws"')).toThrow(/missing string field "project"/);
   });
 });
+
+describe("a config with a single cdn block", () => {
+  test("decodes to one site, as before the app could have several", () => {
+    const text = encodeConfig({ ...config, cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "" }] });
+    expect(text).toContain("cdn {");
+    expect(decodeConfig(text).cdn).toEqual([{ provider: "aws", domain: "www.example.com", bucket: "web", path: "" }]);
+    expect(decodeConfig(encodeConfig(config)).cdn).toEqual([]);
+  });
+});

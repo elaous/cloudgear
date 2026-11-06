@@ -15,6 +15,7 @@ import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
+import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
@@ -170,13 +171,7 @@ async function main() {
     case "invalidate": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
-      const sites = Object.values(state.entries).filter((entry) => entry.type === "@aws.CloudFront" && entry.name !== config.api?.domain && entry.outputs.id);
-      if (!sites.length) throw new Error("No CDN has been deployed; run `cloudgear apply` first");
-      const names = sites.map((entry) => entry.name).sort();
-      const wanted = values.domain;
-      if (wanted && !names.includes(wanted)) throw new Error(`No CDN is deployed on "${wanted}" (deployed: ${names.join(", ")})`);
-      if (!wanted && sites.length > 1) throw new Error(`Several CDNs are deployed; choose one with --domain (${names.join(", ")})`);
-      const distribution = wanted ? sites.find((entry) => entry.name === wanted)! : sites[0]!;
+      const distribution = pickDistribution(siteDistributions(config, state), values.domain);
       const paths = args.length ? args : ["/*"];
       for (const p of paths) if (!p.startsWith("/")) throw new Error(`Invalidation path "${p}" must start with "/"`);
       const id = await invalidateDistribution(new CloudFrontClient({ region: "us-east-1" }), distribution.outputs.id!, paths);

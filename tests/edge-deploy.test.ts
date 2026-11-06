@@ -673,4 +673,65 @@ describe("several CDNs in one app", () => {
     expect(endpoints.cdn?.domain).toBe("files.example.com");
     expect(endpointsFrom({ ...many(), cdn: [site("files.example.com", "files")] }, state).cdns).toBeUndefined();
   });
+
+  test("the first declared site is `cdn` only once it is deployed, and cdns lists the deployed ones", async () => {
+    const state = emptyState();
+    await applyAll(many(), state);
+    delete state.entries["@aws.CloudFront.files.example.com"];
+    const endpoints = endpointsFrom(many(), state);
+    expect(endpoints.cdn).toBeUndefined();
+    expect(Object.keys(endpoints.cdns ?? {}).sort()).toEqual(["admin.example.com", "www.example.com"]);
+    expect(hasEndpoints(endpoints)).toBe(true);
+  });
+
+  describe("two sites on one bucket", () => {
+    const shared = () =>
+      baseConfig({
+        resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1" }],
+        function: [],
+        certificate: ["www.example.com", "admin.example.com"].map(certFor),
+        cdn: [{ ...site("www.example.com", "web"), path: "public/" }, { ...site("admin.example.com", "web"), path: "admin/" }],
+      });
+    // A bucket that remembers its policy between calls.
+    const bucket = () => {
+      let policy: string | undefined;
+      return fakeAws({
+        GetBucketPolicyCommand: () => {
+          if (!policy) throw Object.assign(new Error("no policy"), { name: "NoSuchBucketPolicy" });
+          return { Policy: policy };
+        },
+        PutBucketPolicyCommand: (input: { Policy: string }) => void (policy = input.Policy),
+        DeleteBucketPolicyCommand: () => void (policy = undefined),
+      });
+    };
+    const statements = (aws: { of: (n: string) => any[] }) => JSON.parse(aws.of("PutBucketPolicyCommand").at(-1).Policy).Statement as { Sid: string; Resource: string }[];
+
+    test("each site keeps its own statement, scoped to its path", async () => {
+      const aws = bucket();
+      await applyAll(shared(), emptyState(), aws);
+      const last = statements(aws);
+      expect(new Set(last.map((s) => s.Sid)).size).toBe(2);
+      expect(last.map((s) => s.Resource).sort()).toEqual(["arn:aws:s3:::my-web/admin/*", "arn:aws:s3:::my-web/public/*"]);
+    });
+
+    test("removing one site leaves the other's statement and does not delete the policy", async () => {
+      const aws = bucket();
+      const state = emptyState();
+      await applyAll(shared(), state, aws);
+      const fewer = shared();
+      fewer.cdn = fewer.cdn.filter((c) => c.domain === "www.example.com");
+      fewer.certificate = fewer.certificate.filter((c) => c.domain === "www.example.com");
+      await applyAll(fewer, state, aws);
+      expect(aws.of("DeleteBucketPolicyCommand")).toEqual([]);
+      expect(statements(aws).map((s) => s.Resource)).toEqual(["arn:aws:s3:::my-web/public/*"]);
+    });
+
+    test("removing the last site deletes the policy", async () => {
+      const aws = bucket();
+      const state = emptyState();
+      await applyAll(shared(), state, aws);
+      await applyAll(baseConfig({ resource: [], function: [] }), state, aws);
+      expect(aws.of("DeleteBucketPolicyCommand")).toEqual([{ Bucket: "my-web" }]);
+    });
+  });
 });

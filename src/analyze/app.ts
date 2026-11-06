@@ -11,6 +11,7 @@ import {
   type Symbol as MorphSymbol,
   type VariableDeclaration,
 } from "ts-morph";
+import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
@@ -45,6 +46,21 @@ export interface SecretBindingModel {
 
 export type SecretRefModel = Omit<SecretBindingModel, "env" | "all">;
 
+// An EventBus the app declares; `name` is "default" for the account's default bus.
+export interface AnalyzedBus {
+  name: string;
+  provider: "aws";
+  file: string;
+  line: number;
+}
+
+// What starts a function: events of a type on a bus.
+export interface EventTriggerModel {
+  bus: string;
+  type: string;
+  source?: string;
+}
+
 export interface StoreUse {
   resource: string;
   // Key prefix the store is confined to ("" for the whole bucket).
@@ -70,6 +86,10 @@ export interface AnalyzedFunction {
   // Five-field UTC cron expressions that also trigger the function.
   schedules: string[];
   secrets: SecretBindingModel[];
+  // Events that start the function.
+  events: EventTriggerModel[];
+  // Names of the buses the function publishes to.
+  publishes: string[];
   // Files copied into the function's package, by path from the project root.
   include: { rel: string; abs: string }[];
   // The function takes a Vercel-style request instead of its input, and a response after it.
@@ -133,6 +153,8 @@ export interface AppModel extends EdgeModel {
   jwt?: JwtSettings;
   entry: string;
   resources: AnalyzedResource[];
+  // Buses some function triggers on or publishes to.
+  buses: AnalyzedBus[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
@@ -243,6 +265,117 @@ export function analyzeApp(entryPath: string): AppModel {
     });
   }
   let secretUses: SecretBindingModel[] | undefined;
+
+  const busDecls = new Map<Node, AnalyzedBus>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/events", "EventBus"))) {
+    const at = where(expr);
+    const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
+    if (!decl || decl.getInitializer() !== expr) throw new Error(`${at}: assign new EventBus(...) to a variable so its triggers and publishes can be traced`);
+    const [providerArg, optionsArg] = expr.getArguments();
+    if (stringLiteral(providerArg, `${at}: EventBus provider`) !== "aws") throw new Error(`${at}: EventBus provider must be "aws"`);
+    const busName = readStringOption(optionsArg, "name", `${at}: EventBus options`);
+    try {
+      if (busName !== undefined) assertBusName(busName);
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    busDecls.set(decl, {
+      name: busName ?? "default",
+      provider: "aws",
+      file: relative(expr.getSourceFile().getFilePath()),
+      line: expr.getStartLineNumber(),
+    });
+  }
+  const usedBuses = new Map<string, AnalyzedBus>();
+  const useBus = (bus: AnalyzedBus, _at: string) => {
+    if (!usedBuses.has(bus.name)) usedBuses.set(bus.name, bus);
+  };
+  let publishUses: Set<string> | undefined;
+
+  const busOf = (node: Node | undefined): AnalyzedBus | undefined => {
+    if (!node || !Node.isIdentifier(node)) return undefined;
+    const decl = resolveSymbol(node.getSymbol())?.getDeclarations()[0];
+    return decl ? busDecls.get(decl) : undefined;
+  };
+
+  // `bus.event("type")` or `bus.event({ type, source })`, written inline or held by a variable.
+  function triggerOf(node: Node | undefined, at: string): EventTriggerModel {
+    const e = initOf(node);
+    const callee = e && Node.isCallExpression(e) ? e.getExpression() : undefined;
+    const bus = callee && Node.isPropertyAccessExpression(callee) && callee.getName() === "event" ? busOf(callee.getExpression()) : undefined;
+    if (!e || !Node.isCallExpression(e) || !bus) {
+      throw new Error(`${at}: an event trigger must be bus.event("type") on an EventBus variable declared in your project, got: ${node?.getText() ?? "nothing"}`);
+    }
+    const arg = initOf(e.getArguments()[0]);
+    let type: string;
+    let source: string | undefined;
+    if (arg && Node.isObjectLiteralExpression(arg)) {
+      type = readStringOption(arg, "type", `${at}: event`) ?? "";
+      source = readStringOption(arg, "source", `${at}: event`);
+      if (!type) throw new Error(`${at}: an event needs a type`);
+    } else {
+      type = stringLiteral(arg, `${at}: event type`);
+    }
+    try {
+      assertEventType(type);
+      if (source !== undefined) assertEventSource(source);
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    useBus(bus, at);
+    return { bus: bus.name, type, ...(source !== undefined ? { source } : {}) };
+  }
+
+  function triggersOf(node: Node | undefined, at: string): EventTriggerModel[] {
+    const e = initOf(node);
+    const nodes = e && Node.isArrayLiteralExpression(e) ? e.getElements() : [node];
+    return nodes.map((item) => triggerOf(item, at));
+  }
+
+  function readEventOption(options: Node | undefined, at: string): EventTriggerModel[] {
+    if (!options || !Node.isObjectLiteralExpression(options)) return [];
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "on");
+    if (!prop) return [];
+    const shorthand = Node.isShorthandPropertyAssignment(prop) ? resolveSymbol(prop.getValueSymbol())?.getDeclarations()[0] : undefined;
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : shorthand && Node.isVariableDeclaration(shorthand) ? shorthand.getInitializer() : undefined;
+    return triggersOf(value, at);
+  }
+
+  function addEvents(fn: AnalyzedFunction, events: EventTriggerModel[]) {
+    for (const event of events) if (!fn.events.some((e) => JSON.stringify(e) === JSON.stringify(event))) fn.events.push(event);
+  }
+
+  function noteBusCall(call: CallExpression) {
+    if (!publishUses) return;
+    const callee = call.getExpression();
+    if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "publish") return;
+    const bus = busOf(callee.getExpression());
+    if (!bus) return;
+    useBus(bus, where(call));
+    publishUses.add(bus.name);
+  }
+
+  function isOnDecorator(decorator: Node): boolean {
+    if (!Node.isDecorator(decorator)) return false;
+    const callee = decorator.getCallExpression()?.getExpression();
+    const decl = callee && Node.isIdentifier(callee) ? resolveSymbol(callee.getSymbol())?.getDeclarations()[0] : undefined;
+    return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "on" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/events";
+  }
+
+  // Methods carrying `@on(bus.event(...))`, routed or not.
+  function findEventMethods(): { node: Node; label: string; events: EventTriggerModel[] }[] {
+    const found: { node: Node; label: string; events: EventTriggerModel[] }[] = [];
+    for (const file of localFiles) {
+      for (const method of file.getDescendantsOfKind(SyntaxKind.MethodDeclaration)) {
+        const decorators = method.getDecorators().filter(isOnDecorator);
+        if (!decorators.length) continue;
+        if (!Node.isClassDeclaration(method.getParent())) throw new Error(`${where(method)}: @on applies to a method of a class declaration`);
+        const events = decorators.flatMap((decorator) => triggersOf(decorator.getCallExpression()?.getArguments()[0], `${where(decorator)}: @on`));
+        found.push({ node: method, label: method.getName(), events });
+      }
+    }
+    return found;
+  }
 
   const initOf = (node: Node | undefined, depth = 0): Node | undefined => {
     if (!node) return undefined;
@@ -419,7 +552,8 @@ export function analyzeApp(entryPath: string): AppModel {
   };
   const addCalls = collectAddCalls(router, where, isCdnRouterOption);
   const scheduledMethods = findScheduledMethods();
-  if (addCalls.length === 0 && scheduledMethods.length === 0) {
+  const eventMethods = findEventMethods();
+  if (addCalls.length === 0 && scheduledMethods.length === 0 && eventMethods.length === 0) {
     throw new Error(`${where(router)}: FunctionRouter has no .url(...) routes`);
   }
   for (const call of addCalls) {
@@ -469,6 +603,7 @@ export function analyzeApp(entryPath: string): AppModel {
     routeNames.set(routeName, `${method} ${routePath}`);
     fn.routes.push({ method, path: routePath, name: routeName });
     addSchedules(fn, readScheduleOption(call.getArguments()[3], `${where(call)}: route`));
+    addEvents(fn, readEventOption(call.getArguments()[3], `${where(call)}: route`));
     fn.secrets = uniqueSecrets([...fn.secrets, ...readEnvOption(call.getArguments()[3], `${where(call)}: route`)]);
     const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
     const earlier = routeOptionsOf.get(fn);
@@ -483,6 +618,10 @@ export function analyzeApp(entryPath: string): AppModel {
     const fnNode = functionNode(method.node)!;
     const fn = functionFor(method.node, fnNode, method.label);
     addSchedules(fn, method.schedules);
+  }
+  for (const method of eventMethods) {
+    const fnNode = functionNode(method.node)!;
+    addEvents(functionFor(method.node, fnNode, method.label), method.events);
   }
 
   for (const fn of functions.values()) {
@@ -521,6 +660,7 @@ export function analyzeApp(entryPath: string): AppModel {
     authenticated,
     entry: relative(entry),
     resources: [...resources.values()],
+    buses: [...usedBuses.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };
@@ -531,7 +671,10 @@ export function analyzeApp(entryPath: string): AppModel {
       if (!visited.has(target)) collectUsage(target, tallies, visited);
     };
     const visit = (node: Node) => {
-      if (Node.isCallExpression(node)) noteSecretCall(node);
+      if (Node.isCallExpression(node)) {
+        noteSecretCall(node);
+        noteBusCall(node);
+      }
       if (!Node.isIdentifier(node)) return;
       for (const decl of declarationsOf(node)) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
@@ -982,15 +1125,20 @@ export function analyzeApp(entryPath: string): AppModel {
       routes: [],
       schedules: [],
       secrets: [],
+      events: [],
+      publishes: [],
       include: [],
       passRequest: false,
       uses: new Map(),
     };
     const tallies = new Map<string, Tally>();
     secretUses = [];
+    publishUses = new Set();
     collectUsage(fnNode, tallies, new Set());
     fn.secrets = uniqueSecrets(secretUses);
+    fn.publishes = [...publishUses].sort();
     secretUses = undefined;
+    publishUses = undefined;
     const policies = readPolicies(fnNode, fn.name);
     for (const [key, allowed] of policies) {
       const tally = tallies.get(key);

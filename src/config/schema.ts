@@ -93,6 +93,14 @@ export interface FunctionSpec {
   pass_request?: boolean;
   response_arg?: "helper" | "writer";
   secret?: SecretBindingSpec[];
+  event?: EventTriggerSpec[];
+}
+
+export interface EventTriggerSpec {
+  // Logical name of the bus resource.
+  bus: string;
+  type: string;
+  source?: string;
 }
 
 const REPEATED = new Set([
@@ -108,6 +116,7 @@ const REPEATED = new Set([
   "function.options",
   "function.schedule",
   "function.secret",
+  "function.event",
   "function.include",
   "certificate.options",
   "api.options",
@@ -195,6 +204,9 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...(f.pass_request === true ? { pass_request: true } : {}),
       ...(f.response_arg === "helper" || f.response_arg === "writer" ? { response_arg: f.response_arg } : {}),
       ...(f.secret?.length ? { secret: f.secret.map((s: Record<string, any>) => ({ ...secretRefFrom(s), env: String(s.env ?? ""), ...(s.all === true ? { all: true } : {}) })) } : {}),
+      ...(f.event?.length
+        ? { event: f.event.map((e: Record<string, any>) => ({ bus: str(e, "bus"), type: str(e, "type"), ...(e.source ? { source: String(e.source) } : {}) })) }
+        : {}),
       ...optionsFrom(f),
     })),
   };

@@ -582,6 +582,56 @@ new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * 
   `src/providers.ts`), so another provider's scheduler (Cloud Scheduler on GCP)
   is a new deployer, not yet implemented.
 
+### Events: `@cloudgear/events`
+
+A function can also run when an event is published on a bus, as an alternative
+to a schedule (the two MAY be combined):
+
+```ts
+import { FunctionRouter } from "@cloudgear/functions";
+import { EventBus, on } from "@cloudgear/events";
+
+const orders = new EventBus("aws", { name: "orders" }); // omit the name for the account's default bus
+
+export async function charge({ id }: { id: string }) {
+  await orders.publish("order.created", { id });       // source defaults to "cloudgear"
+  return { id };
+}
+
+export class Mail {
+  @on(orders.event({ type: "order.created", source: "cloudgear" }))
+  static async receipt(order: { id: string }, context: { event?: { id: string; type: string; source: string } }) { /* ... */ }
+}
+
+new FunctionRouter("aws")
+  .url("POST", "/charge", charge)
+  .url("POST", "/refund", refund, { on: orders.event("order.refunded") });
+```
+
+- `bus.event("type")` or `bus.event({ type, source })` is the trigger. It goes in
+  a route's `on` option (one, or an array) or in `@on(...)` on a class method,
+  like `schedule` and `@schedule`. `@on` makes a function with no route and no
+  function URL. Everything MUST be a literal, and the bus MUST be assigned to a
+  variable, since `generate` reads it without running your code.
+- On AWS a named bus is created as `<project>-<name>` and removed again by
+  `destroy`; the default bus is never created or deleted. Each trigger becomes
+  an EventBridge rule (`@aws.EventRule`) matching `detail-type` (and `source`,
+  when given) that targets the function, plus a Lambda permission for
+  `events.amazonaws.com`.
+- The function receives the event's `detail` as its input (an object; any other
+  JSON value arrives as `{ detail }`) and the event's `id`, `type`, `source` and
+  `time` as `context.event`. A run that ends in a 4xx or 5xx is thrown, so
+  Lambda retries it as for any asynchronous invocation, like a scheduled run.
+- `bus.publish(type, detail, { source })` returns the event id. A function that
+  calls it is granted `events:PutEvents` on exactly that bus and finds the bus
+  name in `CLOUDGEAR_EVENTBUS_<NAME>`. A bus passed around as a value is not
+  traced, so call `publish` on the variable.
+- Publishers MUST NOT use a `source` starting with `aws.`. Matching is on type
+  and source only for now; a `detail` pattern is not supported. Events are
+  delivered at least once, so handlers SHOULD be idempotent. Only `aws` is
+  supported; set `CLOUDGEAR_EVENTS_DRIVER=memory` to record published events
+  in tests (`memoryEvents()` from `@cloudgear/events/drivers/memory`).
+
 ### Provider options
 
 Settings that have no dedicated option go in `options`, a map of string,

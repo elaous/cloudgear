@@ -1,7 +1,7 @@
 import { timed } from "@cloudgear/debug";
 import { assertBusName, assertEventSource, assertEventType, createEventDriver, type EventDriver, type EventProvider } from "./driver";
 
-export { createEventDriver, registerEventDriver } from "./driver";
+export { assertBusName, assertEventSource, assertEventType, createEventDriver, registerEventDriver } from "./driver";
 export type { EventDriver, EventDriverFactory, EventDriverOptions, EventProvider, PublishedEvent } from "./driver";
 
 export const DEFAULT_SOURCE = "cloudgear";
@@ -9,8 +9,6 @@ export const DEFAULT_SOURCE = "cloudgear";
 export interface EventBusOptions {
   // Name of a bus cloudgear creates for the app; omit it for the account's default bus. Literal only.
   name?: string;
-  // Region of the bus; defaults to the function's. Literal only.
-  region?: string;
   driver?: EventDriver;
 }
 
@@ -73,7 +71,7 @@ export class EventBus {
   }
 
   driver(): Promise<EventDriver> {
-    this.driverPromise ??= createEventDriver(this.provider, { region: this.options.region }).catch((err) => {
+    this.driverPromise ??= createEventDriver(this.provider).catch((err) => {
       this.driverPromise = undefined;
       throw err;
     });

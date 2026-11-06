@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
 import { debug, timed } from "@cloudgear/debug";
+import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
@@ -88,6 +89,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     throw new Error(`Invalid reserved concurrency "${reservedConcurrency}"; expected a non-negative integer`);
   }
 
+  const busResource = (name: string) => `bus.${name}`;
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
     if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.responseKind)) {
@@ -99,6 +101,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     }
     if (includedBytes > WARN_INCLUDED_BYTES) {
       warnings.push(`${fn.file}: the files included in "${fn.name}" are ${Math.ceil(includedBytes / 1e6)} MB; a zipped package over 50 MB cannot be uploaded directly`);
+    }
+    if (model.provider !== "aws" && (fn.events.length || fn.publishes.length)) {
+      throw new Error(`${fn.file}: EventBus is not supported for provider "${model.provider}" yet`);
     }
     checkSecrets(fn, model.provider, profile.reservedEnv, warnings);
     const hydrated = fn.secrets.filter((s) => s.env || s.all);
@@ -136,12 +141,18 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       source: { file: fromConfig(fn.file), export: fn.exportName, member: fn.member, input_type: fn.inputType },
       route: fn.routes,
       bundle: { path: fromConfig(bundle.file), sha256: bundle.sha256 },
-      permission: used.map((use) => ({
-        resource: use.resource,
-        path: use.path,
-        action: [...new Set([...use.accesses].flatMap((a) => providerProfile(resourceProvider.get(use.resource) ?? model.provider).blobStore.actions[a]))].sort(),
-      })),
-      env: usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
+      permission: [
+        ...used.map((use) => ({
+          resource: use.resource,
+          path: use.path,
+          action: [...new Set([...use.accesses].flatMap((a) => providerProfile(resourceProvider.get(use.resource) ?? model.provider).blobStore.actions[a]))].sort(),
+        })),
+        ...fn.publishes.map((bus) => ({ resource: busResource(bus), path: "", action: ["events:PutEvents"] })),
+      ],
+      env: [
+        ...usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
+        ...fn.publishes.map((bus) => ({ key: EventBus.envVarFor(bus), value_from: busResource(bus) })),
+      ],
       reserved_concurrency: reservedConcurrency,
       options: fn.options,
       schedule: fn.schedules.length ? fn.schedules : undefined,
@@ -149,6 +160,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       pass_request: fn.passRequest || undefined,
       response_arg: fn.responseKind,
       secret: fn.secrets.length ? fn.secrets.map(bindingSpec) : undefined,
+      event: fn.events.length ? fn.events.map((e) => ({ bus: busResource(e.bus), type: e.type, ...(e.source !== undefined ? { source: e.source } : {}) })) : undefined,
     });
   }
 
@@ -163,7 +175,17 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       source: `${fromConfig(r.file)}:${r.line}`,
       region: r.region,
       options: r.options,
-    })),
+    })).concat(
+      model.buses.map((bus) => ({
+        name: busResource(bus.name),
+        type: capability(model.provider, "events").type,
+        physical_name: bus.name === "default" ? "default" : fitName(`${project}-${sanitizeName(bus.name)}`, 64),
+        dry: bus.name === "default",
+        source: `${fromConfig(bus.file)}:${bus.line}`,
+        region: undefined,
+        options: undefined,
+      })),
+    ),
     function: functions,
     invoker: invokers,
     authenticated: model.authenticated,

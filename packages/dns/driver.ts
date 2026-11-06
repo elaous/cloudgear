@@ -56,6 +56,22 @@ export function normalizeHostname(name: string): string {
   return normalized;
 }
 
+// A certificate's domain MAY be a wildcard: "*.example.com" covers one label under example.com.
+export function normalizeCertDomain(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed.startsWith("*.")) return normalizeHostname(trimmed);
+  return `*.${normalizeHostname(trimmed.slice(2))}`;
+}
+
+export const isWildcardDomain = (domain: string): boolean => domain.startsWith("*.");
+
+// The hostname `host` when a wildcard certificate for `pattern` covers it: exactly one label under the base.
+export function wildcardCovers(pattern: string, host: string): boolean {
+  if (!isWildcardDomain(pattern)) return pattern === host;
+  const base = pattern.slice(2);
+  return host.endsWith(`.${base}`) && !host.slice(0, -(base.length + 1)).includes(".") && host.length > base.length + 1;
+}
+
 // Record names may start labels with "_" (ACM validation records do); site domains may not.
 const RECORD_NAME = /^(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 

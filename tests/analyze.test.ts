@@ -533,3 +533,25 @@ describe("several CDNs in one app", () => {
     expect(() => analyzeApp(fixture("edge/shared-cert-cdns.ts"))).toThrow(/two CDNs cannot share a Cert/);
   });
 });
+
+describe("a wildcard Cert shared by CDNs", () => {
+  test("sites and the router's CDN each serve their own hostname", () => {
+    const model = analyzeApp(fixture("edge/wildcard.ts"));
+    expect(model.cdns.map((c) => [c.domain, c.certificate])).toEqual([["files.example.com", "*.example.com"], ["www.example.com", "*.example.com"]]);
+    expect(model.api).toMatchObject({ domain: "api.example.com", certificate: "*.example.com", via: "cloudfront" });
+    expect(model.certificates.map((c) => [c.domain, c.usage])).toEqual([["*.example.com", "cdn"]]);
+  });
+
+  test.each([
+    ["wildcard-missing-domain.ts", /needs the hostname it serves/],
+    ["wildcard-nested.ts", /covers exactly one label/],
+    ["wildcard-apex.ts", /covers exactly one label/],
+    ["wildcard-dup-host.ts", /"www\.example\.com" is already served by the CDN/],
+    ["exact-other-domain.ts", /use a wildcard Cert to serve other hostnames/],
+    ["wildcard-router-cert.ts", /wildcard Cert cannot serve the router through API Gateway/],
+    ["router-cert-host-clash.ts", /"api\.example\.com" is already served by the CDN/],
+    ["wildcard-region.ts", /a CDN needs its certificate in us-east-1, but the Cert says eu-west-1/],
+  ])("%s is rejected", (name, message) => {
+    expect(() => analyzeApp(fixture(`edge/${name}`))).toThrow(message);
+  });
+});

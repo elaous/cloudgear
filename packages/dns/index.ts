@@ -1,7 +1,9 @@
 import { timed } from "@cloudgear/debug";
 import {
   createDnsDriver,
+  isWildcardDomain,
   isWithinZone,
+  normalizeCertDomain,
   normalizeHostname,
   normalizeRecordName,
   type DnsDriver,
@@ -10,7 +12,7 @@ import {
   type DnsRecordType,
 } from "./driver";
 
-export { createDnsDriver, registerDnsDriver, normalizeHostname, normalizeRecordName, relativeName, isWithinZone } from "./driver";
+export { createDnsDriver, registerDnsDriver, normalizeCertDomain, normalizeHostname, normalizeRecordName, relativeName, isWithinZone, isWildcardDomain, wildcardCovers } from "./driver";
 export type { DnsDriver, DnsDriverFactory, DnsDriverOptions, DnsProvider, DnsRecord, DnsRecordType } from "./driver";
 
 export interface DnsOptions {
@@ -37,6 +39,7 @@ function defaultZone(domain: string): string {
 // The domain a site is served from, and the provider whose zone holds its records.
 // Constructing it does nothing; `cloudgear apply` creates the records.
 export class DNS {
+  // "*.example.com" for a wildcard: the certificate then covers any one label under example.com.
   readonly domain: string;
   readonly zone: string;
   private driverPromise?: Promise<DnsDriver>;
@@ -47,9 +50,10 @@ export class DNS {
     domain: string,
     options: DnsOptions = {},
   ) {
-    this.domain = normalizeHostname(domain);
-    this.zone = normalizeHostname(options.zone ?? defaultZone(this.domain));
-    if (!isWithinZone(this.domain, this.zone)) throw new Error(`Domain "${this.domain}" is not inside zone "${this.zone}"`);
+    this.domain = normalizeCertDomain(domain);
+    const base = isWildcardDomain(this.domain) ? this.domain.slice(2) : this.domain;
+    this.zone = normalizeHostname(options.zone ?? defaultZone(base));
+    if (!isWithinZone(base, this.zone)) throw new Error(`Domain "${this.domain}" is not inside zone "${this.zone}"`);
     this.token = options.token;
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }

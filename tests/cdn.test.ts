@@ -260,3 +260,25 @@ describe("generate with certificates, a CDN and an API domain", () => {
     }
   });
 });
+
+describe("a CDN on a wildcard Cert", () => {
+  const wildcard = () => new Cert("aws", new DNS("gandi", "*.example.com", { zone: "example.com" }));
+
+  test("serves the hostname it is given, under the wildcard", () => {
+    const cdn = new CDN("aws", wildcard(), { bucket: site(), domain: "Files.Example.com" });
+    expect(cdn.domain).toBe("files.example.com");
+    expect(cdn.cert.domain).toBe("*.example.com");
+  });
+
+  test("needs a hostname the wildcard covers", () => {
+    expect(() => new CDN("aws", wildcard(), { bucket: site() })).toThrow(/needs the hostname it serves/);
+    expect(() => new CDN("aws", wildcard(), { bucket: site(), domain: "a.b.example.com" })).toThrow(/exactly one label/);
+    expect(() => new CDN("aws", wildcard(), { bucket: site(), domain: "example.com" })).toThrow(/exactly one label/);
+  });
+
+  test("an exact Cert takes no other hostname", () => {
+    const exact = new Cert("aws", new DNS("gandi", "www.example.com", { zone: "example.com" }));
+    expect(new CDN("aws", exact, { bucket: site(), domain: "www.example.com" }).domain).toBe("www.example.com");
+    expect(() => new CDN("aws", exact, { bucket: site(), domain: "other.example.com" })).toThrow(/use a wildcard Cert/);
+  });
+});

@@ -215,3 +215,21 @@ describe("Route53DnsDriver", () => {
     await expect(new Route53DnsDriver("example.com", wrongName.client).get("a.example.com", "CNAME")).rejects.toThrow(/No public Route 53 hosted zone/);
   });
 });
+
+describe("a wildcard domain", () => {
+  test("the zone is that of the base, and a wildcard covers exactly one label", async () => {
+    const { DNS, wildcardCovers, isWildcardDomain, normalizeCertDomain } = await import("@cloudgear/dns");
+    const dns = new DNS("gandi", "*.Example.com.");
+    expect([dns.domain, dns.zone]).toEqual(["*.example.com", "example.com"]);
+    expect(new DNS("gandi", "*.app.example.co.uk").zone).toBe("example.co.uk");
+    expect(isWildcardDomain("*.example.com")).toBe(true);
+    expect(wildcardCovers("*.example.com", "www.example.com")).toBe(true);
+    expect(wildcardCovers("*.example.com", "example.com")).toBe(false);
+    expect(wildcardCovers("*.example.com", "a.b.example.com")).toBe(false);
+    expect(wildcardCovers("*.example.com", "www.other.com")).toBe(false);
+    expect(wildcardCovers("www.example.com", "www.example.com")).toBe(true);
+    expect(() => normalizeCertDomain("*.*.example.com")).toThrow(/Invalid domain name/);
+    expect(() => normalizeCertDomain("a.*.example.com")).toThrow(/Invalid domain name/);
+    expect(() => new DNS("gandi", "*.example.com", { zone: "other.com" })).toThrow(/not inside zone/);
+  });
+});

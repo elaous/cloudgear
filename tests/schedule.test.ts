@@ -310,6 +310,36 @@ describe("schedules that carry a query", () => {
     await expect(generatedFixture("query-bad.ts")).rejects.toThrow(/may only use letters, digits/);
   });
 
+  test("the same schedule in another key order is one schedule; different queries are different ones", async () => {
+    const { config } = await generatedFixture("query-forms.ts");
+    expect(config.function[0]!.query_schedule).toEqual([
+      { cron: "0 0 * * *", query: { a: "1", b: "2" } },
+      { cron: "0 0 * * *", query: { a: "other" } },
+      { cron: "0 2 * * *", query: { flag: "" } },
+    ]);
+    expect(config.function[0]!.schedule).toEqual(["0 1 * * *"]);
+    const aws = await applyAll(config, emptyState());
+    expect(aws.of("PutRuleCommand")).toHaveLength(4);
+  });
+
+  test("a duplicate or __proto__ query name is rejected", async () => {
+    await expect(generatedFixture("query-dup.ts")).rejects.toThrow(/job is given twice|is given twice/);
+    await expect(generatedFixture("query-proto.ts")).rejects.toThrow(/may only use letters/);
+  });
+
+  test("a query written into a hand-edited config is checked before it reaches the template", async () => {
+    const { queryTransformer } = await import("../src/deploy/aws/schedule");
+    expect(() => queryTransformer({ job: 'a"b' })).toThrow(/Invalid schedule query/);
+    expect(() => queryTransformer({ job: "x".repeat(9000).replace(/./g, "a") })).toThrow(/too long/);
+    expect(queryTransformer({ flag: "" }).InputTemplate).toContain('"flag":""');
+  });
+
+  test("an empty query in the config is a plain schedule", async () => {
+    const config = baseConfig({ resource: [], function: [fn({ permission: [], env: [], schedule: undefined, query_schedule: [{ cron: "0 3 * * *", query: {} }] })] });
+    const aws = await applyAll(config, emptyState());
+    expect(aws.of("PutTargetsCommand")[0].Targets[0].InputTransformer).toBeUndefined();
+  });
+
   test("each schedule is its own rule and the query is sent to the target", async () => {
     const { config } = await generatedFixture("query.ts");
     const state = emptyState();
@@ -365,6 +395,19 @@ describe("schedules that carry a query", () => {
       const handler = createHandler(async (input: unknown) => ((seen = input), {}), []);
       await handler(event as never);
       expect(seen).toEqual({ scheduledTime: "2026-01-01T00:00:00Z", rule: "arn:rule", query: { job: "db-backup", task: "x" } });
+    });
+
+    test("a plain schedule sends neither the secret nor the cron user agent", async () => {
+      let seen: any;
+      process.env.CRON_SECRET = "s3cret";
+      try {
+        const handler = createHandler(async (request: unknown) => ((seen = request), {}), [], { request: true });
+        await handler({ source: "aws.events", "detail-type": "Scheduled Event", time: "t" } as never);
+      } finally {
+        delete process.env.CRON_SECRET;
+      }
+      expect(seen.headers.authorization).toBeUndefined();
+      expect(seen.headers["user-agent"]).toBeUndefined();
     });
 
     test("an event without a query behaves as before", async () => {

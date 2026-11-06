@@ -165,7 +165,8 @@ export interface AppModel extends EdgeModel {
   warnings: string[];
 }
 
-const QUERY_PART = /^[A-Za-z0-9_.:/-]+$/;
+const QUERY_NAME = /^[A-Za-z0-9_.:/-]+$/;
+const QUERY_VALUE = /^[A-Za-z0-9_.:/-]*$/;
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
 const KNOWN_DIRECTIVES = new Set(["dry"]);
 const PERMISSIONS = { Get: "read", Put: "write", Delete: "delete", List: "list" } as const;
@@ -1063,14 +1064,16 @@ export function analyzeApp(entryPath: string): AppModel {
       if (key === "cron") cronNode = value;
       else if (key === "query") {
         if (!value || !Node.isObjectLiteralExpression(value)) throw new Error(`${at}: a schedule's query must be an object literal of strings`);
-        query = {};
+        const pairs = new Map<string, string>();
         for (const entry of value.getProperties()) {
           const name = Node.isPropertyAssignment(entry) ? propName(entry) : undefined;
           if (!name || !Node.isPropertyAssignment(entry)) throw new Error(`${at}: a schedule's query entries must be name: "value"`);
           const text = stringLiteral(entry.getInitializer(), `${at}: query ${name}`);
-          if (!QUERY_PART.test(name) || !QUERY_PART.test(text)) throw new Error(`${at}: query ${name}=${text} may only use letters, digits and _ . : / -`);
-          query[name] = text;
+          if (!QUERY_NAME.test(name) || !QUERY_VALUE.test(text) || name === "__proto__") throw new Error(`${at}: query ${name}=${text} may only use letters, digits and _ . : / -`);
+          if (pairs.has(name)) throw new Error(`${at}: query ${name} is given twice`);
+          pairs.set(name, text);
         }
+        query = Object.fromEntries([...pairs].sort(([a], [b]) => a.localeCompare(b)));
       } else throw new Error(`${at}: a schedule takes cron and query, not "${key}"`);
     }
     return { cron: readCron(cronNode, at), ...(query && Object.keys(query).length ? { query } : {}) };

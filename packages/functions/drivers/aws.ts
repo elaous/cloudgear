@@ -81,13 +81,13 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
   // A run nobody is waiting on: a failure is thrown so Lambda records and retries it.
   const runAsync = async (what: string, input: unknown, context: RequestContext, failsAt = 400, query?: Record<string, string>) => {
     await prepare();
-    // Like a Vercel cron call: the query in the URL, and the CRON_SECRET as a bearer token when the function has one.
-    const secret = what === "schedule" ? process.env.CRON_SECRET : undefined;
+    // A schedule with a query looks like a Vercel cron call: the query in the URL, and the CRON_SECRET as a bearer token when the function has one.
+    const secret = query ? process.env.CRON_SECRET : undefined;
     const request = options.request
       ? vercelRequestFrom({
           method: "POST",
           url: `https://${what}.invalid/${query ? `?${new URLSearchParams(query)}` : ""}`,
-          headers: { "content-type": "application/json", ...(what === "schedule" ? { "user-agent": "vercel-cron/1.0" } : {}), ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
+          headers: { "content-type": "application/json", ...(query ? { "user-agent": "vercel-cron/1.0" } : {}), ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
           raw: new TextEncoder().encode(JSON.stringify(input)),
         })
       : undefined;

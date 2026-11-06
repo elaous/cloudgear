@@ -17,9 +17,14 @@ const TARGET_ID = "cloudgear";
 
 // Keeps the scheduled event and adds the query the run carries: the adapter reads it from `cloudgear.query`.
 export function queryTransformer(query: Record<string, string>) {
+  for (const [name, value] of Object.entries(query)) {
+    if (!/^[A-Za-z0-9_.:/-]+$/.test(name) || !/^[A-Za-z0-9_.:/-]*$/.test(value)) throw new Error(`Invalid schedule query ${name}=${value}: use letters, digits and _ . : / -`);
+  }
+  const template = `{"source":"aws.events","detail-type":"Scheduled Event","time":"<time>","resources":["<rule>"],"cloudgear":{"query":${JSON.stringify(query)}}}`;
+  if (template.length > 8192) throw new Error("The schedule's query is too long for an EventBridge input template (8192 characters)");
   return {
     InputPathsMap: { time: "$.time", rule: "$.resources[0]" },
-    InputTemplate: `{"source":"aws.events","detail-type":"Scheduled Event","time":"<time>","resources":["<rule>"],"cloudgear":{"query":${JSON.stringify(query)}}}`,
+    InputTemplate: template,
   };
 }
 

@@ -579,7 +579,7 @@ new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * 
   letters, digits and `_ . : / -`. Each one is its own EventBridge rule, so
   changing a query replaces the rule. The run gets the query in its input
   (`{ scheduledTime, rule, query }`), and with `request: true` in `request.query`.
-  A scheduled run with `request: true` also looks like a Vercel cron call: its
+  A scheduled run with a query and `request: true` also looks like a Vercel cron call: its
   `User-Agent` is `vercel-cron/1.0` and, when the function has a `CRON_SECRET`
   environment variable (declare it with `env`, see Secrets), it sends
   `Authorization: Bearer <CRON_SECRET>`, which is what such handlers check.

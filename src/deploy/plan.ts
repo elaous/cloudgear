@@ -178,7 +178,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
   }
 
   for (const fn of config.function) {
-    const schedules = [...(fn.schedule ?? []).map((cron) => ({ cron })), ...(fn.query_schedule ?? [])] as { cron: string; query?: Record<string, string> }[];
+    const schedules = [...(fn.schedule ?? []).map((cron) => ({ cron })), ...(fn.query_schedule ?? []).map((q) => (Object.keys(q.query).length ? q : { cron: q.cron }))] as { cron: string; query?: Record<string, string> }[];
     for (const { cron, query } of schedules) {
       const queryText = query ? JSON.stringify(Object.entries(query).sort(([a], [b]) => a.localeCompare(b))) : "";
       const id = createHash("sha256").update(queryText ? `${fn.physical_name}\0${cron}\0${queryText}` : `${fn.physical_name}\0${cron}`).digest("hex").slice(0, 8);

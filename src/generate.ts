@@ -90,6 +90,22 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   }
 
   const busResource = (name: string) => `bus.${name}`;
+  const busPhysical = new Map<string, string>();
+  const busEnv = new Map<string, string>();
+  for (const bus of model.buses) {
+    const physical = bus.name === "default" ? "default" : fitName(`${project}-${sanitizeName(bus.name)}`, 64);
+    const physicalClash = busPhysical.get(physical);
+    if (physicalClash) throw new Error(`EventBus "${physicalClash}" and "${bus.name}" both deploy as "${physical}"; rename one`);
+    busPhysical.set(physical, bus.name);
+    const envClash = busEnv.get(EventBus.envVarFor(bus.name));
+    if (envClash) throw new Error(`EventBus "${envClash}" and "${bus.name}" map to the same env var ${EventBus.envVarFor(bus.name)}; rename one`);
+    busEnv.set(EventBus.envVarFor(bus.name), bus.name);
+  }
+  for (const fn of model.functions) {
+    for (const bus of new Set(fn.events.map((e) => e.bus).filter((name) => fn.publishes.includes(name)))) {
+      warnings.push(`${fn.file}: "${fn.name}" runs on events of bus "${bus}" and publishes to it; make sure it never publishes the event type it handles, or it will run forever`);
+    }
+  }
   const functions: FunctionSpec[] = [];
   for (const fn of model.functions) {
     if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.responseKind)) {

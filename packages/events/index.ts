@@ -6,6 +6,9 @@ export type { EventDriver, EventDriverFactory, EventDriverOptions, EventProvider
 
 export const DEFAULT_SOURCE = "cloudgear";
 
+// PutEvents takes 256 KB per entry, which also holds the envelope.
+const MAX_DETAIL_BYTES = 250_000;
+
 export interface EventBusOptions {
   // Name of a bus cloudgear creates for the app; omit it for the account's default bus. Literal only.
   name?: string;
@@ -66,6 +69,7 @@ export class EventBus {
   async publish(type: string, detail: unknown, options: { source?: string } = {}): Promise<string> {
     assertEventType(type);
     const source = assertEventSource(options.source ?? DEFAULT_SOURCE);
+    if (Buffer.byteLength(JSON.stringify(detail ?? null)) > MAX_DETAIL_BYTES) throw new Error(`The detail of ${type} is over ${MAX_DETAIL_BYTES} bytes; EventBridge accepts events up to 256 KB`);
     const driver = await this.driver();
     return timed("events", `publish ${type}`, () => driver.publish({ bus: this.location, source, type, detail }));
   }

@@ -620,12 +620,17 @@ new FunctionRouter("aws")
   `events.amazonaws.com`.
 - The function receives the event's `detail` as its input (an object; any other
   JSON value arrives as `{ detail }`) and the event's `id`, `type`, `source` and
-  `time` as `context.event`. A run that ends in a 4xx or 5xx is thrown, so
-  Lambda retries it as for any asynchronous invocation, like a scheduled run.
+  `time` as `context.event`. A run that ends in a 5xx is thrown, so Lambda
+  retries it as for any asynchronous invocation; a 4xx answer is logged and not
+  retried, since the same event would fail again.
 - `bus.publish(type, detail, { source })` returns the event id. A function that
   calls it is granted `events:PutEvents` on exactly that bus and finds the bus
-  name in `CLOUDGEAR_EVENTBUS_<NAME>`. A bus passed around as a value is not
-  traced, so call `publish` on the variable.
+  name in `CLOUDGEAR_EVENTBUS_<NAME>`. `publish` is traced through aliases of the
+  bus variable; a bus passed to another function as a value is not, and
+  `generate` warns. Declare each bus once and import it, and use bus names
+  that stay different after `-`, `.` and `_` are treated alike. A function that
+  handles a bus's events and publishes to it gets a warning, since publishing
+  the type it handles loops. A detail is limited to about 250 KB.
 - Publishers MUST NOT use a `source` starting with `aws.`. Matching is on type
   and source only for now; a `detail` pattern is not supported. Events are
   delivered at least once, so handlers SHOULD be idempotent. Only `aws` is

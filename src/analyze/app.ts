@@ -279,6 +279,8 @@ export function analyzeApp(entryPath: string): AppModel {
     } catch (err) {
       throw new Error(`${at}: ${(err as Error).message}`);
     }
+    const declared = [...busDecls.values()].find((b) => b.name === (busName ?? "default"));
+    if (declared) throw new Error(`${at}: EventBus "${declared.name}" is also declared at ${declared.file}:${declared.line}; declare each bus once and import it`);
     busDecls.set(decl, {
       name: busName ?? "default",
       provider: "aws",
@@ -293,9 +295,14 @@ export function analyzeApp(entryPath: string): AppModel {
   let publishUses: Set<string> | undefined;
 
   const busOf = (node: Node | undefined): AnalyzedBus | undefined => {
-    if (!node || !Node.isIdentifier(node)) return undefined;
-    const decl = resolveSymbol(node.getSymbol())?.getDeclarations()[0];
-    return decl ? busDecls.get(decl) : undefined;
+    for (let current = node, depth = 0; current && Node.isIdentifier(current) && depth < 8; depth++) {
+      const decl = resolveSymbol(current.getSymbol())?.getDeclarations()[0];
+      if (!decl) return undefined;
+      const bus = busDecls.get(decl);
+      if (bus) return bus;
+      current = Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
+    }
+    return undefined;
   };
 
   // `bus.event("type")` or `bus.event({ type, source })`, written inline or held by a variable.
@@ -343,6 +350,16 @@ export function analyzeApp(entryPath: string): AppModel {
 
   function addEvents(fn: AnalyzedFunction, events: EventTriggerModel[]) {
     for (const event of events) if (!fn.events.some((e) => JSON.stringify(e) === JSON.stringify(event))) fn.events.push(event);
+  }
+
+  // A bus handed around as a value is not traced, so what is done with it needs no permission here.
+  function noteBusValue(node: Node, decl: Node) {
+    if (!publishUses || !busDecls.has(decl)) return;
+    const parent = node.getParent();
+    const member = Node.isPropertyAccessExpression(parent) && parent.getExpression() === node ? parent.getName() : undefined;
+    if (member === "event" || member === "publish") return;
+    if (Node.isVariableDeclaration(parent) && parent.getNameNode() === node) return;
+    warnings.push(`${where(node)}: EventBus "${busDecls.get(decl)!.name}" is used as a value; publishes made through it are not traced, so call bus.publish on the variable`);
   }
 
   function noteBusCall(call: CallExpression) {
@@ -679,6 +696,7 @@ export function analyzeApp(entryPath: string): AppModel {
       for (const decl of declarationsOf(node)) {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
         noteSecretRef(decl);
+        noteBusValue(node, decl);
         // `@policy(store, ...)` is read separately, and is not a use of the store.
         const decorator = node.getFirstAncestorByKind(SyntaxKind.Decorator);
         if (decorator && isPolicyDecorator(decorator)) continue;

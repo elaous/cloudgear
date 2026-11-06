@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { response } from "@cloudgear/functions";
 import { createHandler } from "@cloudgear/functions/drivers/aws";
 import { EventBus, on } from "@cloudgear/events";
 import { memoryEvents, resetMemoryEvents } from "@cloudgear/events/drivers/memory";
@@ -42,6 +43,11 @@ describe("EventBus", () => {
 
   test("returns the id the driver gave", async () => {
     expect(await new EventBus("aws").publish("x", {})).toBe("memory-1");
+  });
+
+  test("a detail over the PutEvents limit is refused before it is sent", async () => {
+    await expect(new EventBus("aws").publish("big", { text: "x".repeat(260_000) })).rejects.toThrow(/over 250000 bytes/);
+    expect(memoryEvents()).toHaveLength(0);
   });
 
   test("an event type and a source are validated; aws. sources are reserved", async () => {
@@ -88,6 +94,24 @@ describe("handler for bus events", () => {
     await handler(busEvent({ detail: [1, 2] }) as never);
     await handler(busEvent({ detail: "text" }) as never);
     expect(seen).toEqual([{ detail: [1, 2] }, { detail: "text" }]);
+  });
+
+  test("a 4xx answer is logged, not retried", async () => {
+    const handler = createHandler(async () => response({ error: "bad" }, { status: 400 }), []);
+    expect((await handler(busEvent() as never)).statusCode).toBe(400);
+  });
+
+  test("an AWS service event or another scheduled-looking event is a bus event", async () => {
+    const seen: unknown[] = [];
+    const handler = createHandler(async (input: unknown, context: unknown) => void seen.push(input, context), []);
+    await handler({ id: "s3", source: "aws.s3", "detail-type": "Object Created", detail: { key: "a" } } as never);
+    await handler({ id: "x", source: "aws.events", "detail-type": "Other", detail: { a: 1 } } as never);
+    expect(seen).toEqual([
+      { key: "a" },
+      { event: { id: "s3", type: "Object Created", source: "aws.s3" } },
+      { a: 1 },
+      { event: { id: "x", type: "Other", source: "aws.events" } },
+    ]);
   });
 
   test("a failing run is thrown so Lambda retries it", async () => {

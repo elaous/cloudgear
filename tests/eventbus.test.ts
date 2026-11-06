@@ -59,6 +59,29 @@ describe("analysis", () => {
     await expect(generated(name)).rejects.toThrow(message);
   });
 
+  test("a bus reached through an alias is traced", async () => {
+    const { config } = await generated("alias");
+    expect(config.function[0]!.permission).toEqual([{ resource: "bus.orders", path: "", action: ["events:PutEvents"] }]);
+  });
+
+  test("a bus passed as a value is warned about", async () => {
+    const { warnings } = await generated("as-value");
+    expect(warnings.some((w) => /used as a value/.test(w))).toBe(true);
+  });
+
+  test("a bus declared twice is rejected", async () => {
+    await expect(generated("duplicate")).rejects.toThrow(/declare each bus once/);
+  });
+
+  test("buses that deploy under one name are rejected", async () => {
+    await expect(generated("collide")).rejects.toThrow(/both deploy as "app-a-b"/);
+  });
+
+  test("a function that handles events of a bus and publishes to it is warned about", async () => {
+    const { warnings } = await generated("loop");
+    expect(warnings.some((w) => /never publishes the event type it handles/.test(w))).toBe(true);
+  });
+
   test("the config round-trips", async () => {
     const { config } = await generated("basic");
     expect(decodeConfig(encodeConfig(config)).function.map((f) => f.event)).toEqual(config.function.map((f) => f.event));
@@ -149,5 +172,44 @@ describe("deploying", () => {
     await applyAll(app(), emptyState(), withTags);
     expect(withTags.of("CreateEventBusCommand")[0].Tags).toEqual([{ Key: "cloudgear:managed-by", Value: "cloudgear" }, { Key: "cloudgear:resource", Value: "bus.orders" }]);
     expect(withTags.of("PutRuleCommand")[0].Tags.map((t: { Key: string }) => t.Key)).toContain("cloudgear:managed-by");
+  });
+
+  test("a rule on a bus that was renamed is replaced, not updated in place", async () => {
+    const state = emptyState();
+    await applyAll(app(), state, aws());
+    const renamed = app({ resource: [{ name: "bus.orders", type: "@aws.EventBus", physical_name: "app-orders-v2", dry: false, source: "a.ts:1" }] });
+    const ops = plan(renamed, state).filter((a) => a.type === "@aws.EventRule").map((a) => a.op);
+    expect(ops.sort()).toEqual(["create", "delete"]);
+  });
+
+  test("a failure after the rule exists is resumable and the next apply does not duplicate it", async () => {
+    const state = emptyState();
+    let failed = false;
+    const flaky = fakeAws({
+      CreateEventBusCommand: () => ({ EventBusArn: "arn" }),
+      PutTargetsCommand: () => {
+        if (!failed) {
+          failed = true;
+          return { FailedEntryCount: 1, FailedEntries: [{ ErrorMessage: "denied" }] };
+        }
+        return { FailedEntryCount: 0 };
+      },
+    });
+    await expect(applyAll(app(), state, flaky)).rejects.toThrow(/rejected the target/);
+    const again = await applyAll(app(), state, flaky);
+    expect(again.names().filter((n) => n === "CreateEventBusCommand")).toHaveLength(1);
+    expect(plan(app(), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+  });
+
+  test("an existing permission statement is accepted", async () => {
+    const conflict = fakeAws({
+      CreateEventBusCommand: () => ({ EventBusArn: "arn" }),
+      AddPermissionCommand: (input: { Principal: string }) => {
+        if (input.Principal === "events.amazonaws.com") throw Object.assign(new Error("The statement id (x) provided already exists."), { name: "ResourceConflictException" });
+        return {};
+      },
+    });
+    await applyAll(app(), emptyState(), conflict);
+    expect(conflict.of("PutTargetsCommand")).toHaveLength(1);
   });
 });

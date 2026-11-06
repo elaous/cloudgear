@@ -77,13 +77,14 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       : undefined;
 
   // A run nobody is waiting on: a failure is thrown so Lambda records and retries it.
-  const runAsync = async (what: string, input: unknown, context: RequestContext) => {
+  const runAsync = async (what: string, input: unknown, context: RequestContext, failsAt = 400) => {
     await prepare();
     const request = options.request
       ? vercelRequestFrom({ method: "POST", url: `https://${what}.invalid/`, headers: { "content-type": "application/json" }, raw: new TextEncoder().encode(JSON.stringify(input)) })
       : undefined;
     const result = await invoke(fn, input, context, { request, response: options.response });
-    if (result.status >= 400) throw new Error(`${what === "schedule" ? "Scheduled" : "Event"} run failed with status ${result.status}`);
+    if (result.status >= failsAt) throw new Error(`${what === "schedule" ? "Scheduled" : "Event"} run failed with status ${result.status}`);
+    if (result.status >= 400) debug("lambda", `${what} run answered ${result.status}; not retried`);
     return toLambda(result);
   };
 
@@ -97,7 +98,7 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       const info: EventInfo = { id: event.id ?? "", type: event["detail-type"], source: event.source, ...(event.time ? { time: event.time } : {}) };
       const detail = event.detail;
       const input = typeof detail === "object" && detail !== null && !Array.isArray(detail) ? detail : { detail };
-      return runAsync("event", input, { event: info });
+      return runAsync("event", input, { event: info }, 500);
     }
     try {
       await prepare();
@@ -159,7 +160,7 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
 }
 
 function isScheduled(event: FunctionUrlEvent | ScheduledEvent | BusEvent): event is ScheduledEvent {
-  return !("requestContext" in event) && (event as ScheduledEvent).source === "aws.events";
+  return !("requestContext" in event) && (event as ScheduledEvent).source === "aws.events" && (event as { "detail-type"?: string })["detail-type"] === "Scheduled Event";
 }
 
 function isBusEvent(event: FunctionUrlEvent | ScheduledEvent | BusEvent): event is BusEvent {

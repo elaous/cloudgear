@@ -196,7 +196,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     for (const event of fn.event ?? []) {
       const bus = resources.get(event.bus);
       if (!bus) throw new Error(`cloudgear config references unknown event bus "${event.bus}"`);
-      const id = createHash("sha256").update(`${fn.physical_name}\0${event.bus}\0${event.type}\0${event.source ?? ""}`).digest("hex").slice(0, 8);
+      const id = createHash("sha256").update(`${fn.physical_name}\0${physicalOf(event.bus)}\0${event.type}\0${event.source ?? ""}`).digest("hex").slice(0, 8);
       entries.push({
         kind: "resource",
         type: capability(providerOfType(fn.type), "events").rule,

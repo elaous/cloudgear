@@ -35,7 +35,7 @@ export type EndpointAuth = Authentication;
 
 // What @cloudgear/secrets (`store.path(...)([...])`, or a path ending in /*) and @cloudgear/events
 // (`bus.event(...)`) hand over, described by shape so this package needs neither.
-export type EnvOption = { readonly kind: "env" } | { readonly prefix: string; readonly all: boolean };
+export type EnvOption = { readonly kind: "env"; readonly prefix: string; readonly names: object } | { readonly prefix: string; readonly all: boolean };
 export type EventOption = { readonly kind: "event"; readonly type: string };
 
 export interface RouteOptions {

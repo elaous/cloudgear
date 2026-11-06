@@ -1,7 +1,7 @@
 export { FunctionRouter, request, DEFAULT_ENDPOINTS_FILE } from "./router";
 export { jwtAuth } from "./auth";
 export { cron, schedule, normalizeCron, toEventBridgeCron } from "./cron";
-export type { CronSchedule } from "./cron";
+export type { CronSchedule, ScheduleSpec } from "./cron";
 export type { Authenticator, JwtAuthOptions, JwtAuthenticator } from "./auth";
 export type { Authentication, EndpointAuth, EnvOption, EventOption, EndpointsFile, FunctionRouterOptions, RateLimit, RouteOptions } from "./router";
 export { VercelRequest, VercelResponse } from "./vercel";

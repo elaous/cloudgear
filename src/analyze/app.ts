@@ -139,16 +139,19 @@ export interface CertificateModel {
   options?: Record<string, string>;
 }
 
+export interface CdnModel {
+  provider: string;
+  domain: string;
+  options?: Record<string, string>;
+  // Name of the bucket resource and the key prefix of the static site within it.
+  bucket: string;
+  path: string;
+}
+
 export interface EdgeModel {
   certificates: CertificateModel[];
-  cdn?: {
-    provider: string;
-    domain: string;
-    options?: Record<string, string>;
-    // Name of the bucket resource and the key prefix of the static site within it.
-    bucket: string;
-    path: string;
-  };
+  // Each CDN serves one site from a bucket, on its own domain.
+  cdns: CdnModel[];
   // The router's own domain, through API Gateway or a CDN.
   api?: { provider: string; domain: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
 }
@@ -795,7 +798,7 @@ export function analyzeApp(entryPath: string): AppModel {
 
     if (!certExprs.length && !cdnExprs.length) {
       if (routerCert) throw new Error(`${where(router)}: the router's cert needs a Cert declared with new Cert(...)`);
-      return { certificates: [] };
+      return { certificates: [], cdns: [] };
     }
     const servesRouter = (expr: NewExpression) => {
       const options = expr.getArguments()[2];
@@ -803,7 +806,6 @@ export function analyzeApp(entryPath: string): AppModel {
     };
     const siteCdnExprs = cdnExprs.filter((expr) => !servesRouter(expr));
     const routerCdnExprs = cdnExprs.filter(servesRouter);
-    if (siteCdnExprs.length > 1) throw new Error(`Only one CDN per app can serve a bucket, found: ${siteCdnExprs.map(where).join(", ")}`);
     if (routerCdnExprs.length > 1) throw new Error(`Only one CDN per app can serve the router, found: ${routerCdnExprs.map(where).join(", ")}`);
 
     const initializerOf = (node: Node | undefined, what: string, at: string): NewExpression => {
@@ -853,14 +855,15 @@ export function analyzeApp(entryPath: string): AppModel {
       }
     };
 
-    let cdn: EdgeModel["cdn"];
-    let cdnCert: CertificateModel | undefined;
-    const [cdnExpr] = siteCdnExprs;
-    if (cdnExpr) {
+    const cdns: CdnModel[] = [];
+    const cdnCerts = new Set<CertificateModel>();
+    for (const cdnExpr of siteCdnExprs) {
       const at = where(cdnExpr);
       const [providerArg, certArg, optionsArg] = cdnExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
-      cdnCert = certOf(certArg, "the CDN's cert", at);
+      const cdnCert = certOf(certArg, "the CDN's cert", at);
+      if (cdnCerts.has(cdnCert)) throw new Error(`${at}: two CDNs cannot share a Cert; give each its own domain`);
+      cdnCerts.add(cdnCert);
       subdomain(cdnCert, at, "the site");
       if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with a bucket`);
 
@@ -894,13 +897,13 @@ export function analyzeApp(entryPath: string): AppModel {
         throw new Error(`${at}: a CDN needs its certificate in us-east-1, but the Cert says ${cdnCert.region}`);
       }
       cdnCert.usage = "cdn";
-      cdn = {
+      cdns.push({
         provider: "aws",
         domain: cdnCert.domain,
         options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
         bucket: bucketStore.resource.name,
         path: bucketStore.path,
-      };
+      });
     }
 
     let api: EdgeModel["api"];
@@ -924,7 +927,7 @@ export function analyzeApp(entryPath: string): AppModel {
     if (routerCert !== undefined) {
       const at = where(router);
       const cert = certOf(routerCert, "the router's cert", at);
-      if (cert === cdnCert) throw new Error(`${at}: the router and the CDN cannot share a Cert; give each its own domain`);
+      if (cdnCerts.has(cert)) throw new Error(`${at}: the router and the CDN cannot share a Cert; give each its own domain`);
       subdomain(cert, at, "the API");
       if (provider !== "aws") {
         throw new Error(`${at}: serving the router on a Cert's domain uses API Gateway, which needs provider "aws", but the router uses "${provider}"`);
@@ -941,7 +944,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const [providerArg, certArg, optionsArg] = routerCdnExpr.getArguments();
       if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
       const cert = certOf(certArg, "the CDN's cert", at);
-      if (cert === cdnCert) throw new Error(`${at}: two CDNs cannot share a Cert; give each its own domain`);
+      if (cdnCerts.has(cert)) throw new Error(`${at}: two CDNs cannot share a Cert; give each its own domain`);
       subdomain(cert, at, "the API");
       if (cert.region && cert.region !== "us-east-1") throw new Error(`${at}: a CDN needs its certificate in us-east-1, but the Cert says ${cert.region}`);
       if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: CDN options must be an object literal with a router`);
@@ -1004,7 +1007,7 @@ export function analyzeApp(entryPath: string): AppModel {
         options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
       };
     }
-    return { certificates: [...certificates.values()], cdn, api };
+    return { certificates: [...certificates.values()], cdns, api };
   }
 
   // Declarations an identifier refers to; `{ store }` and `obj.store` lead back to the variable.

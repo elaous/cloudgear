@@ -25,7 +25,7 @@ Commands:
   plan                         Show what apply would change
   apply [--auto-approve]       Create, update and delete cloud resources to match the config
   import <name> [physical-id]  Adopt an existing resource into state instead of creating it
-  invalidate [path...]         Clear the CDN's cache (default: everything)
+  invalidate [path...] [--domain <cdn>]  Clear a CDN's cache (default: everything)
   destroy [--auto-approve]     Delete every managed resource (imported ones are only forgotten)
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
                                Store the secrets the app declares (NAME reads its value from stdin)
@@ -41,6 +41,7 @@ Options:
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
   --tag <key=value>  Extra tag on created resources, repeatable (apply only)
+  --domain <domain>  Which CDN to invalidate when the app has several
   --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
@@ -63,6 +64,7 @@ async function main() {
       "from-envfile": { type: "string" },
       "allow-unignored": { type: "boolean", default: false },
       "skip-env-check": { type: "boolean", default: false },
+      domain: { type: "string" },
       path: { type: "string" },
       all: { type: "boolean", default: false },
       "auto-approve": { type: "boolean", default: false },
@@ -123,7 +125,7 @@ async function main() {
       const state = loadState(statePath, config.project, config.provider);
       const target =
         command === "destroy"
-          ? { ...config, resource: [], function: [], certificate: [], cdn: undefined, api: undefined }
+          ? { ...config, resource: [], function: [], certificate: [], cdn: [], api: undefined }
           : config;
       const actions = plan(target, state);
       debug("cli", "planned", () => {
@@ -168,11 +170,16 @@ async function main() {
     case "invalidate": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
-      const distribution = Object.values(state.entries).find((entry) => entry.type === "@aws.CloudFront" && entry.name !== config.api?.domain);
-      if (!distribution?.outputs.id) throw new Error("No CDN has been deployed; run `cloudgear apply` first");
+      const sites = Object.values(state.entries).filter((entry) => entry.type === "@aws.CloudFront" && entry.name !== config.api?.domain && entry.outputs.id);
+      if (!sites.length) throw new Error("No CDN has been deployed; run `cloudgear apply` first");
+      const names = sites.map((entry) => entry.name).sort();
+      const wanted = values.domain;
+      if (wanted && !names.includes(wanted)) throw new Error(`No CDN is deployed on "${wanted}" (deployed: ${names.join(", ")})`);
+      if (!wanted && sites.length > 1) throw new Error(`Several CDNs are deployed; choose one with --domain (${names.join(", ")})`);
+      const distribution = wanted ? sites.find((entry) => entry.name === wanted)! : sites[0]!;
       const paths = args.length ? args : ["/*"];
       for (const p of paths) if (!p.startsWith("/")) throw new Error(`Invalidation path "${p}" must start with "/"`);
-      const id = await invalidateDistribution(new CloudFrontClient({ region: "us-east-1" }), distribution.outputs.id, paths);
+      const id = await invalidateDistribution(new CloudFrontClient({ region: "us-east-1" }), distribution.outputs.id!, paths);
       console.log(`cloudgear: invalidation ${id} started for ${paths.join(", ")}`);
       return;
     }

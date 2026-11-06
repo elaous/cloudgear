@@ -40,7 +40,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       uses: [...f.uses.values()].map((u) => ({ resource: u.resource, path: u.path, accesses: [...u.accesses] })),
     })),
     certificates: model.certificates.map((c) => ({ domain: c.domain, usage: c.usage, region: c.region })),
-    cdn: model.cdn?.domain,
+    cdn: model.cdns.map((c) => c.domain),
     api: model.api?.domain,
     warnings: model.warnings.length,
   }));
@@ -219,16 +219,10 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       ...(c.region ? { region: c.region } : {}),
       options: c.options,
     })),
-    cdn: model.cdn && {
-      provider: model.cdn.provider,
-      domain: model.cdn.domain,
-      bucket: model.cdn.bucket,
-      path: model.cdn.path,
-      options: model.cdn.options,
-    },
+    cdn: model.cdns.map((cdn) => ({ provider: cdn.provider, domain: cdn.domain, bucket: cdn.bucket, path: cdn.path, options: cdn.options })),
     api: model.api,
   };
-  if (config.cdn) providerProfile(config.cdn.provider);
+  for (const cdn of config.cdn) providerProfile(cdn.provider);
   if (config.api) providerProfile(config.api.provider);
   validateConfigOptions(config);
 

@@ -109,19 +109,19 @@ describe("analyzeApp", () => {
         { domain: "www.example.com", dns: { provider: "gandi", domain: "www.example.com", zone: "example.com" }, usage: "cdn" },
         { domain: "api.example.com", dns: { provider: "gandi", domain: "api.example.com", zone: "example.com" }, usage: "api" },
       ].map((c) => expect.objectContaining(c)));
-      expect(model.cdn).toMatchObject({ provider: "aws", domain: "www.example.com", bucket: "my-site", path: "web/" });
+      expect(model.cdns).toMatchObject([{ provider: "aws", domain: "www.example.com", bucket: "my-site", path: "web/" }]);
       expect(model.api).toEqual({ provider: "aws", domain: "api.example.com" });
       expect(model.warnings).toEqual([]);
     });
 
     test("a CDN on its own only serves the bucket, and a Cert needs neither", () => {
       const model = analyzeApp(fixture("edge/bucket-only.ts"));
-      expect(model.cdn).toMatchObject({ domain: "www.example.org", bucket: "my-site", path: "" });
+      expect(model.cdns).toMatchObject([{ domain: "www.example.org", bucket: "my-site", path: "" }]);
       expect(model.api).toBeUndefined();
       expect(model.certificates).toMatchObject([{ domain: "www.example.org", dns: { provider: "aws", zone: "example.org" }, usage: "cdn" }]);
       const certOnly = analyzeApp(fixture("edge/cert-only.ts"));
       expect(certOnly.certificates).toMatchObject([{ domain: "example.com", usage: "" }]);
-      expect(certOnly.cdn).toBeUndefined();
+      expect(certOnly.cdns).toEqual([]);
     });
 
     test("a Cert's region and options are read", () => {
@@ -132,7 +132,7 @@ describe("analyzeApp", () => {
     test("apps without any of them have no edge model", () => {
       const model = analyzeApp(path.join(exampleDir, "main.ts"));
       expect(model.certificates).toEqual([]);
-      expect(model.cdn).toBeUndefined();
+      expect(model.cdns).toEqual([]);
       expect(model.api).toBeUndefined();
     });
 
@@ -195,7 +195,7 @@ describe("analyzeApp", () => {
         const model = analyzeApp(fixture("edge/cdn-router.ts"));
         expect(model.api).toMatchObject({ provider: "aws", domain: "api.example.com", via: "cloudfront" });
         expect(model.api!.method_routing).toBeUndefined();
-        expect(model.cdn).toBeUndefined();
+        expect(model.cdns).toEqual([]);
         expect(model.certificates).toMatchObject([{ domain: "api.example.com", usage: "cdn" }]);
       });
 
@@ -205,7 +205,7 @@ describe("analyzeApp", () => {
 
       test("a site CDN and a router CDN live side by side", () => {
         const model = analyzeApp(fixture("edge/cdn-router-and-site.ts"));
-        expect(model.cdn).toMatchObject({ domain: "www.example.com", bucket: "my-site" });
+        expect(model.cdns).toMatchObject([{ domain: "www.example.com", bucket: "my-site" }]);
         expect(model.api).toMatchObject({ domain: "api.example.com", via: "cloudfront" });
       });
 
@@ -509,5 +509,27 @@ describe("generate", () => {
     await expect(
       generate({ entry: fixture("env-collision.ts"), configPath: path.join(dir, "y.prototxt"), buildDir: path.join(dir, "b") }),
     ).rejects.toThrow(/same env var CLOUDGEAR_BLOB_A_B/);
+  });
+});
+
+describe("several CDNs in one app", () => {
+  test("each site and the router get a CDN on their own domain", () => {
+    const model = analyzeApp(fixture("edge/many-cdns.ts"));
+    expect(model.cdns.map((c) => [c.domain, c.bucket])).toEqual([
+      ["files.example.com", "my-files"],
+      ["www.example.com", "my-web"],
+      ["admin.example.com", "my-admin"],
+    ]);
+    expect(model.api).toMatchObject({ domain: "api.example.com", via: "cloudfront" });
+    expect(model.certificates.map((c) => [c.domain, c.usage])).toEqual([
+      ["files.example.com", "cdn"],
+      ["www.example.com", "cdn"],
+      ["admin.example.com", "cdn"],
+      ["api.example.com", "cdn"],
+    ]);
+  });
+
+  test("two CDNs cannot share a Cert", () => {
+    expect(() => analyzeApp(fixture("edge/shared-cert-cdns.ts"))).toThrow(/two CDNs cannot share a Cert/);
   });
 });

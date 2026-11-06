@@ -167,7 +167,7 @@ describe("which deployers an operation needs", () => {
     const { config } = await generated(fixture("gcp-function-aws-store.ts"));
     const state = emptyState();
     state.entries["@aws.S3.archive"] = { kind: "resource", type: "@aws.S3", name: "archive", physical_name: "archive", spec: {}, outputs: {} };
-    const removal = plan({ ...config, resource: [], function: [], certificate: [], cdn: undefined, api: undefined }, state);
+    const removal = plan({ ...config, resource: [], function: [], certificate: [], cdn: [], api: undefined }, state);
     expect(providersNeeded(removal)).toEqual(["aws"]);
   });
 

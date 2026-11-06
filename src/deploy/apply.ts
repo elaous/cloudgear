@@ -161,10 +161,11 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
     if (!url) continue;
     for (const route of fn.route) routes[`${route.method} ${route.path}`] = url;
   }
-  const distribution = config.cdn && state.entries[stateKey({ type: "@aws.CloudFront", name: config.cdn.domain })];
-  const cdn = distribution?.outputs.domain_name
-    ? { domain: config.cdn!.domain, url: distribution.outputs.url ?? `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }
-    : undefined;
+  const deployed = config.cdn.flatMap((spec) => {
+    const distribution = state.entries[stateKey({ type: "@aws.CloudFront", name: spec.domain })];
+    return distribution?.outputs.domain_name ? [{ domain: spec.domain, url: distribution.outputs.url ?? `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }] : [];
+  });
+  const cdn = deployed[0];
   const viaCloudFront = config.api?.via === "cloudfront";
   const gateway = config.api && state.entries[stateKey({ type: viaCloudFront ? "@aws.CloudFront" : "@aws.ApiGateway", name: config.api.domain })];
   const api = viaCloudFront
@@ -174,5 +175,7 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
     : gateway?.outputs.url
       ? { domain: config.api!.domain, url: gateway.outputs.url, id: gateway.outputs.api_id }
       : undefined;
-  return { provider: config.provider, routes, auth: config.authenticated, ...(cdn ? { cdn } : {}), ...(api ? { api } : {}) };
+  // `cdn` is the first site, as before; `cdns` lists every site by domain once there are several.
+  const cdns = deployed.length > 1 ? Object.fromEntries(deployed.map((site) => [site.domain, site])) : undefined;
+  return { provider: config.provider, routes, auth: config.authenticated, ...(cdn ? { cdn } : {}), ...(cdns ? { cdns } : {}), ...(api ? { api } : {}) };
 }

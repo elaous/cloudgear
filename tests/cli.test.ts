@@ -128,6 +128,21 @@ describe("cloudgear CLI with a CDN", () => {
     expect(res.err).toMatch(/No CDN has been deployed; run `cloudgear apply` first/);
   });
 
+  test("with several CDNs, invalidate asks which one", () => {
+    const stateDir = path.join(dir, ".cloudgear");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const entry = (name: string, id: string) => ({ kind: "resource", type: "@aws.CloudFront", name, physical_name: name, spec: {}, outputs: { id } });
+    fs.writeFileSync(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({ version: 1, project: "edge", provider: "aws", entries: { "@aws.CloudFront.a.example.com": entry("a.example.com", "E1"), "@aws.CloudFront.b.example.com": entry("b.example.com", "E2") } }),
+    );
+    const none = run("invalidate", "/index.html");
+    expect(none.code).toBe(1);
+    expect(none.err).toMatch(/Several CDNs are deployed; choose one with --domain \(a\.example\.com, b\.example\.com\)/);
+    const wrong = run("invalidate", "/index.html", "--domain", "c.example.com");
+    expect(wrong.err).toMatch(/No CDN is deployed on "c\.example\.com"/);
+  });
+
   test("invalidate rejects paths without a leading slash", () => {
     const stateDir = path.join(dir, ".cloudgear");
     fs.mkdirSync(stateDir, { recursive: true });

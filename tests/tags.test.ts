@@ -75,7 +75,7 @@ describe("applied tags", () => {
       resource: [{ name: "site", type: "@aws.S3", physical_name: "site", dry: false, source: "a.ts:1" }],
       function: [fn({ permission: [], env: [], schedule: ["0 3 * * *"] })],
       certificate: [{ provider: "aws", domain: "cdn.example.com", dns, usage: "cdn" }],
-      cdn: { provider: "aws", domain: "cdn.example.com", bucket: "site", path: "" },
+      cdn: [{ provider: "aws", domain: "cdn.example.com", bucket: "site", path: "" }],
     });
     const aws = await applyAll(config, emptyState(), fakeAws({}, undefined, undefined, tags));
     expect(asMap(aws.of("PutRuleCommand")[0].Tags)).toMatchObject(tags);

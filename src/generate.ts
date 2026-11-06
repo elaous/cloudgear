@@ -246,7 +246,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       : null;
     report.functions[fn.name] = {
       routes: fn.routes.map((r) => `${r.method} ${r.path}`),
-      variables: Object.fromEntries(Object.entries(fn.envUse.variables).map(([name, use]) => [name, { ...use, provided: provided(name) }])),
+      variables: Object.fromEntries(Object.entries(fn.envUse.variables).map(([name, use]) => [name, { ...use, required: use.required && !model.optionalEnv.includes(name), provided: provided(name) }])),
       dynamic: fn.envUse.dynamic,
     };
     if (fn.envUse.dynamic.length) warnings.push(`${fn.file}: "${fn.name}" reads the environment in ways that cannot be listed (${fn.envUse.dynamic.join(", ")}); those variables are not checked`);

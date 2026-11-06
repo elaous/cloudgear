@@ -48,8 +48,15 @@ const isGuardBranch = (statement: Node): boolean =>
 
 // A read the code survives the variable being unset: a fallback, a comparison or a presence check.
 // A check whose failure throws or exits is the opposite: the code requires the variable.
+const COERCIONS = new Set(["Number", "String", "Boolean", "parseInt", "parseFloat"]);
+
 function isOptionalRead(read: Node): boolean {
-  const at = outer(read);
+  let at = outer(read);
+  // `Number(process.env.X) || 0`: the conversion does not change whether a fallback follows.
+  for (let parent = at.getParent(); parent && Node.isCallExpression(parent) && COERCIONS.has(parent.getExpression().getText()) && parent.getArguments()[0] === at; parent = at.getParent()) {
+    if (parent.getExpression().getText() === "Boolean") return true;
+    at = outer(parent);
+  }
   for (const ancestor of at.getAncestors()) {
     if (Node.isFunctionLikeDeclaration(ancestor) || Node.isSourceFile(ancestor)) break;
     if (Node.isIfStatement(ancestor) && ancestor.getExpression().containsRange(at.getPos(), at.getEnd())) return !isGuardBranch(ancestor.getThenStatement());

@@ -67,6 +67,17 @@ describe("the environment report", () => {
     expect(v.TZ).toBeUndefined();
   });
 
+  test("a conversion before a fallback keeps the read optional", async () => {
+    const v = (await generated("optional")).report.functions.api!.variables;
+    for (const name of ["RATE", "LEVEL", "FLAG"]) expect(v[name]!.required).toBe(false);
+    expect(v.NEEDED!.required).toBe(true);
+  });
+
+  test("optionalEnv on the router marks variables as tolerated", async () => {
+    const v = (await generated("optional")).report.functions.api!.variables;
+    expect(v.SENTRY_DSN!.required).toBe(false);
+  });
+
   test("a presence check that throws means the variable is required", async () => {
     const v = (await generated("forms")).report.functions.api!.variables;
     expect(v.MUST_HAVE!.required).toBe(true);

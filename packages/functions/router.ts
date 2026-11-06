@@ -100,6 +100,9 @@ export interface FunctionRouterOptions {
   cert?: { readonly domain: string };
   // Provider settings for every function; literals only.
   functionOptions?: ProviderOptions;
+  // Environment variables the code tolerates being unset: `cloudgear generate` does not require them.
+  // Names MUST be string literals.
+  optionalEnv?: string[];
   // Secrets every function reads (see RouteOptions.env).
   env?: EnvOption | EnvOption[];
   // Per-process counters: instances of a serverless app do not share them.

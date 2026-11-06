@@ -119,10 +119,11 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
       minify: true,
     });
   } catch (err) {
-    throw new Error(`Bundling "${req.name}" failed:\n${describeBuildFailure(err)}`);
+    throw new Error(`Bundling "${req.name}" failed:\n${describeBuildFailure(err)}`, { cause: err });
   }
   if (!result.success) {
-    throw new Error(`Bundling "${req.name}" failed:\n${result.logs.map(String).join("\n")}`);
+    const errors = result.logs.filter((log) => log.level === "error");
+    throw new Error(`Bundling "${req.name}" failed:\n${describeBuildFailure(new AggregateError(errors.length ? errors : result.logs, "Bundle failed"))}`);
   }
 
   const file = path.join(dir, "index.mjs");
@@ -135,17 +136,22 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
   return { file, sha256: hashBundle(file, filesDir, (req.include ?? []).map((f) => f.rel)) };
 }
 
+const MAX_CAUSES = 20;
+
 // Bun.build throws an AggregateError whose own message is only "Bundle failed"; the causes are in `errors`.
 export function describeBuildFailure(err: unknown): string {
-  const causes = err instanceof AggregateError ? err.errors : [err];
+  const causes = err instanceof AggregateError && err.errors.length ? err.errors : [err];
   const lines = causes.map((cause) => {
-    const detail = cause as { message?: string; position?: { file?: string; line?: number } | null };
+    const detail = (cause ?? {}) as { message?: string; position?: { file?: string; line?: number } | null };
     const where = detail.position?.file ? ` (${detail.position.file}${detail.position.line ? `:${detail.position.line}` : ""})` : "";
     return `${detail.message ?? String(cause)}${where}`;
   });
   const unique = [...new Set(lines)];
-  if (unique.some((line) => /Could not resolve: "[^"]*generated/.test(line))) {
-    unique.push("A file with \"generated\" in its name is usually made by a build step of yours; run that step before `cloudgear generate`.");
+  const shown = unique.slice(0, MAX_CAUSES);
+  if (unique.length > shown.length) shown.push(`... and ${unique.length - shown.length} more`);
+  // A relative import of a file named "generated" is made by the project's own build step, unlike a missing package.
+  if (unique.some((line) => /Could not resolve: "\.{1,2}\/[^"]*\bgenerated\b/.test(line))) {
+    shown.push("A file with \"generated\" in its name is usually made by a build step of yours; run that step before `cloudgear generate`.");
   }
-  return unique.join("\n");
+  return shown.join("\n");
 }

@@ -108,14 +108,19 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
     ].join("\n"),
   );
 
-  const result = await Bun.build({
-    entrypoints: [entry],
-    outdir: dir,
-    naming: "index.mjs",
-    target: "node",
-    format: "esm",
-    minify: true,
-  });
+  let result: Awaited<ReturnType<typeof Bun.build>>;
+  try {
+    result = await Bun.build({
+      entrypoints: [entry],
+      outdir: dir,
+      naming: "index.mjs",
+      target: "node",
+      format: "esm",
+      minify: true,
+    });
+  } catch (err) {
+    throw new Error(`Bundling "${req.name}" failed:\n${describeBuildFailure(err)}`);
+  }
   if (!result.success) {
     throw new Error(`Bundling "${req.name}" failed:\n${result.logs.map(String).join("\n")}`);
   }
@@ -128,4 +133,19 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
     fs.copyFileSync(included.abs, target);
   }
   return { file, sha256: hashBundle(file, filesDir, (req.include ?? []).map((f) => f.rel)) };
+}
+
+// Bun.build throws an AggregateError whose own message is only "Bundle failed"; the causes are in `errors`.
+export function describeBuildFailure(err: unknown): string {
+  const causes = err instanceof AggregateError ? err.errors : [err];
+  const lines = causes.map((cause) => {
+    const detail = cause as { message?: string; position?: { file?: string; line?: number } | null };
+    const where = detail.position?.file ? ` (${detail.position.file}${detail.position.line ? `:${detail.position.line}` : ""})` : "";
+    return `${detail.message ?? String(cause)}${where}`;
+  });
+  const unique = [...new Set(lines)];
+  if (unique.some((line) => /Could not resolve: "[^"]*generated/.test(line))) {
+    unique.push("A file with \"generated\" in its name is usually made by a build step of yours; run that step before `cloudgear generate`.");
+  }
+  return unique.join("\n");
 }

@@ -67,15 +67,29 @@ describe("the environment report", () => {
     expect(v.TZ).toBeUndefined();
   });
 
-  test("a conversion before a fallback keeps the read optional", async () => {
+  test("a numeric conversion before a || fallback keeps the read optional", async () => {
     const v = (await generated("optional")).report.functions.api!.variables;
-    for (const name of ["RATE", "LEVEL", "FLAG"]) expect(v[name]!.required).toBe(false);
-    expect(v.NEEDED!.required).toBe(true);
+    for (const name of ["RATE", "LEVEL", "NESTED", "FLAG"]) expect(v[name]!.required).toBe(false);
+  });
+
+  test("a conversion whose fallback can never run does not", async () => {
+    const v = (await generated("optional")).report.functions.api!.variables;
+    for (const name of ["NEEDED", "STRINGY", "NULLISH", "BARE"]) expect(v[name]!.required).toBe(true);
+  });
+
+  test("a throwing guard around Boolean() still requires the variable", async () => {
+    expect((await generated("optional")).report.functions.api!.variables.GUARDED!.required).toBe(true);
   });
 
   test("optionalEnv on the router marks variables as tolerated", async () => {
     const v = (await generated("optional")).report.functions.api!.variables;
     expect(v.SENTRY_DSN!.required).toBe(false);
+  });
+
+  test("an optionalEnv name that nothing reads is warned about, and one that is not a name is rejected", async () => {
+    expect((await generated("optional")).warnings.some((w) => /optionalEnv "TYPO_NAME" is not read/.test(w))).toBe(true);
+    const bad = fixture("optional-bad");
+    await expect(generate({ entry: bad, configPath: path.join(dir, "bad.prototxt"), buildDir: path.join(dir, "bad-build"), project: "app" })).rejects.toThrow(/not an environment variable name/);
   });
 
   test("a presence check that throws means the variable is required", async () => {

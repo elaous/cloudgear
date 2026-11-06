@@ -234,6 +234,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const configText = encodeConfig(config);
   const report: EnvReport = { version: 1, config: configHash(configText), functions: {} };
+  for (const name of model.optionalEnv) {
+    if (!model.functions.some((fn) => name in fn.envUse.variables)) warnings.push(`optionalEnv "${name}" is not read by any function; check the spelling`);
+  }
   model.functions.forEach((fn, index) => {
     const spec = functions[index]!;
     const optionEnv = environmentOptions(fn.options);

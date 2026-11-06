@@ -1430,9 +1430,14 @@ function readOptionalEnv(options: Node | undefined, at: string): string[] {
   if (!options || !Node.isObjectLiteralExpression(options)) return [];
   const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "optionalEnv");
   if (!prop) return [];
-  const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+  let value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+  while (value && (Node.isAsExpression(value) || Node.isSatisfiesExpression(value) || Node.isParenthesizedExpression(value))) value = value.getExpression();
   if (!value || !Node.isArrayLiteralExpression(value)) throw new Error(`${at}: optionalEnv must be an array of string literals`);
-  return value.getElements().map((item) => stringLiteral(item, `${at}: optionalEnv`));
+  return value.getElements().map((item) => {
+    const name = stringLiteral(item, `${at}: optionalEnv`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`${at}: optionalEnv "${name}" is not an environment variable name`);
+    return name;
+  });
 }
 
 function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {

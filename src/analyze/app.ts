@@ -61,6 +61,12 @@ export interface EventTriggerModel {
   source?: string;
 }
 
+// A cron expression and the query string (`?job=backup`) the scheduled run carries.
+export interface ScheduleModel {
+  cron: string;
+  query?: Record<string, string>;
+}
+
 export interface StoreUse {
   resource: string;
   // Key prefix the store is confined to ("" for the whole bucket).
@@ -84,7 +90,7 @@ export interface AnalyzedFunction {
   anonymous?: boolean;
   options?: Record<string, string>;
   // Five-field UTC cron expressions that also trigger the function.
-  schedules: string[];
+  schedules: ScheduleModel[];
   secrets: SecretBindingModel[];
   // Events that start the function.
   events: EventTriggerModel[];
@@ -159,6 +165,7 @@ export interface AppModel extends EdgeModel {
   warnings: string[];
 }
 
+const QUERY_PART = /^[A-Za-z0-9_.:/-]+$/;
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
 const KNOWN_DIRECTIVES = new Set(["dry"]);
 const PERMISSIONS = { Get: "read", Put: "write", Delete: "delete", List: "list" } as const;
@@ -1019,8 +1026,8 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   }
 
-  function addSchedules(fn: AnalyzedFunction, schedules: string[]) {
-    for (const expression of schedules) if (!fn.schedules.includes(expression)) fn.schedules.push(expression);
+  function addSchedules(fn: AnalyzedFunction, schedules: ScheduleModel[]) {
+    for (const schedule of schedules) if (!fn.schedules.some((s) => JSON.stringify(s) === JSON.stringify(schedule))) fn.schedules.push(schedule);
   }
 
   function isCronTag(node: Node): boolean {
@@ -1044,12 +1051,37 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   }
 
-  function readSchedules(node: Node | undefined, at: string): string[] {
-    const nodes = node && Node.isArrayLiteralExpression(node) ? node.getElements() : [node];
-    return nodes.map((item) => readCron(item, at));
+  // `cron`...`` or `{ cron: cron`...`, query: { job: "backup" } }`.
+  function readSchedule(node: Node | undefined, at: string): ScheduleModel {
+    if (!node || !Node.isObjectLiteralExpression(node)) return { cron: readCron(node, at) };
+    let cronNode: Node | undefined;
+    let query: Record<string, string> | undefined;
+    for (const prop of node.getProperties()) {
+      if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in a schedule cannot be analyzed`);
+      const key = propName(prop);
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+      if (key === "cron") cronNode = value;
+      else if (key === "query") {
+        if (!value || !Node.isObjectLiteralExpression(value)) throw new Error(`${at}: a schedule's query must be an object literal of strings`);
+        query = {};
+        for (const entry of value.getProperties()) {
+          const name = Node.isPropertyAssignment(entry) ? propName(entry) : undefined;
+          if (!name || !Node.isPropertyAssignment(entry)) throw new Error(`${at}: a schedule's query entries must be name: "value"`);
+          const text = stringLiteral(entry.getInitializer(), `${at}: query ${name}`);
+          if (!QUERY_PART.test(name) || !QUERY_PART.test(text)) throw new Error(`${at}: query ${name}=${text} may only use letters, digits and _ . : / -`);
+          query[name] = text;
+        }
+      } else throw new Error(`${at}: a schedule takes cron and query, not "${key}"`);
+    }
+    return { cron: readCron(cronNode, at), ...(query && Object.keys(query).length ? { query } : {}) };
   }
 
-  function readScheduleOption(options: Node | undefined, at: string): string[] {
+  function readSchedules(node: Node | undefined, at: string): ScheduleModel[] {
+    const nodes = node && Node.isArrayLiteralExpression(node) ? node.getElements() : [node];
+    return nodes.map((item) => readSchedule(item, at));
+  }
+
+  function readScheduleOption(options: Node | undefined, at: string): ScheduleModel[] {
     if (!options || !Node.isObjectLiteralExpression(options)) return [];
     const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "schedule");
     if (!prop) return [];
@@ -1064,8 +1096,8 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 
   // Methods carrying `@schedule(cron`...`)`, routed or not.
-  function findScheduledMethods(): { node: Node; label: string; schedules: string[] }[] {
-    const found: { node: Node; label: string; schedules: string[] }[] = [];
+  function findScheduledMethods(): { node: Node; label: string; schedules: ScheduleModel[] }[] {
+    const found: { node: Node; label: string; schedules: ScheduleModel[] }[] = [];
     for (const file of localFiles) {
       for (const method of file.getDescendantsOfKind(SyntaxKind.MethodDeclaration)) {
         const decorators = method.getDecorators().filter(isScheduleDecorator);

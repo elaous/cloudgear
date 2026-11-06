@@ -76,7 +76,7 @@ describe("schedules in source", () => {
   test("a route option schedules a routed function; routes of one function add up without duplicates", () => {
     const model = analyzeApp(fixture("option.ts"));
     expect(Object.fromEntries(model.functions.map((f) => [f.name, f.schedules]))).toEqual({
-      report: ["*/15 * * * *", "0 9 * * 1-5"],
+      report: [{ cron: "*/15 * * * *" }, { cron: "0 9 * * 1-5" }],
       health: [],
     });
   });
@@ -84,15 +84,15 @@ describe("schedules in source", () => {
   test("@schedule makes a static method a function of its own, with no route", () => {
     const model = analyzeApp(fixture("decorator.ts"));
     const jobs = Object.fromEntries(model.functions.map((f) => [f.name, f]));
-    expect(jobs["Jobs-nightly"]).toMatchObject({ routes: [], schedules: ["0 3 * * *"], exportName: "Jobs", member: "nightly" });
+    expect(jobs["Jobs-nightly"]).toMatchObject({ routes: [], schedules: [{ cron: "0 3 * * *" }], exportName: "Jobs", member: "nightly" });
     expect([...jobs["Jobs-nightly"]!.uses.values()]).toEqual([{ resource: "archive", path: "", accesses: new Set(["write"]) }]);
-    expect(jobs["Jobs-twiceMonthly"]!.schedules.sort()).toEqual(["30 2 1 * *", "30 2 15 * *"]);
+    expect(jobs["Jobs-twiceMonthly"]!.schedules.map((x) => x.cron).sort()).toEqual(["30 2 1 * *", "30 2 15 * *"]);
     expect(jobs.ping!.schedules).toEqual([]);
   });
 
   test("@schedule on an instance method uses the class's exported instance, and the bundle keeps `this`", async () => {
     const model = analyzeApp(fixture("instance.ts"));
-    expect(model.functions.map((f) => [f.name, f.exportName, f.member, f.schedules])).toEqual([["jobs-tick", "jobs", "tick", ["*/5 * * * *"]]]);
+    expect(model.functions.map((f) => [f.name, f.exportName, f.member, f.schedules])).toEqual([["jobs-tick", "jobs", "tick", [{ cron: "*/5 * * * *" }]]]);
     const { dir } = await generated(fixture("instance.ts"));
     const script = `
       const { handler } = await import(${JSON.stringify(path.join(dir, "b/jobs-tick/index.mjs"))});
@@ -107,18 +107,18 @@ describe("schedules in source", () => {
 
   test("an instance method that is routed and scheduled is one function", () => {
     const model = analyzeApp(fixture("instance-routed.ts"));
-    expect(model.functions.map((f) => [f.name, f.exportName, f.routes.length, f.schedules])).toEqual([["jobs-tick", "jobs", 1, ["0 3 * * *"]]]);
+    expect(model.functions.map((f) => [f.name, f.exportName, f.routes.length, f.schedules])).toEqual([["jobs-tick", "jobs", 1, [{ cron: "0 3 * * *" }]]]);
   });
 
   test("an app may have only scheduled functions", () => {
     const model = analyzeApp(fixture("only-scheduled.ts"));
-    expect(model.functions.map((f) => [f.name, f.routes, f.schedules])).toEqual([["Jobs-tick", [], ["*/5 * * * *"]]]);
+    expect(model.functions.map((f) => [f.name, f.routes, f.schedules])).toEqual([["Jobs-tick", [], [{ cron: "*/5 * * * *" }]]]);
   });
 
   test("the decorator and the route option combine on one function", () => {
     const model = analyzeApp(fixture("decorator-on-route.ts"));
     expect(model.functions).toHaveLength(1);
-    expect(model.functions[0]!.schedules.sort()).toEqual(["0 3 * * *", "0 4 * * *"]);
+    expect(model.functions[0]!.schedules.map((x) => x.cron).sort()).toEqual(["0 3 * * *", "0 4 * * *"]);
   });
 
   test.each([
@@ -285,5 +285,94 @@ describe("planning and deploying schedules", () => {
 
   test("a hand-edited invalid cron is rejected by plan", () => {
     expect(() => plan(scheduled(["* * * * * *"]), emptyState())).toThrow(/expected 5 fields/);
+  });
+});
+
+describe("schedules that carry a query", () => {
+  const generatedFixture = async (name: string) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schedule-q-"));
+    const { config } = await generate({ entry: fixture(name), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "app" });
+    return { config, text: fs.readFileSync(path.join(dir, "c.prototxt"), "utf8") };
+  };
+
+  test("the query is kept with its cron and plain schedules stay as they were", async () => {
+    const { config, text } = await generatedFixture("query.ts");
+    const [job] = config.function;
+    expect(job!.schedule).toEqual(["0 0 * * *"]);
+    expect(job!.query_schedule).toEqual([
+      { cron: "27 7 1 * *", query: { job: "db-backup" } },
+      { cron: "41 3 * * *", query: { job: "db-backup", task: "reshuffle" } },
+    ]);
+    expect(decodeConfig(text).function[0]!.query_schedule).toEqual(job!.query_schedule);
+  });
+
+  test("a query with characters that do not belong in a URL value is rejected", async () => {
+    await expect(generatedFixture("query-bad.ts")).rejects.toThrow(/may only use letters, digits/);
+  });
+
+  test("each schedule is its own rule and the query is sent to the target", async () => {
+    const { config } = await generatedFixture("query.ts");
+    const state = emptyState();
+    const aws = await applyAll(config, state);
+    expect(aws.of("PutRuleCommand")).toHaveLength(3);
+    const transformed = aws.of("PutTargetsCommand").filter((t) => t.Targets[0].InputTransformer);
+    expect(transformed).toHaveLength(2);
+    const templates = transformed.map((t) => t.Targets[0].InputTransformer.InputTemplate as string);
+    const template = [templates.find((t) => !t.includes("reshuffle"))!, templates.find((t) => t.includes("reshuffle"))!];
+    expect(JSON.parse(template[0]!.replace("<time>", "t").replace("<rule>", "r"))).toEqual({ source: "aws.events", "detail-type": "Scheduled Event", time: "t", resources: ["r"], cloudgear: { query: { job: "db-backup" } } });
+    expect(plan(config, state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+  });
+
+  test("changing a query replaces the rule", async () => {
+    const { config } = await generatedFixture("query.ts");
+    const state = emptyState();
+    await applyAll(config, state);
+    const changed = structuredClone(config);
+    changed.function[0]!.query_schedule![0]!.query = { job: "other" };
+    const ops = plan(changed, state).filter((a) => a.type === "@aws.Schedule").map((a) => a.op);
+    expect(ops.filter((op) => op === "create")).toHaveLength(1);
+    expect(ops.filter((op) => op === "delete")).toHaveLength(1);
+    expect(ops.filter((op) => op === "noop")).toHaveLength(2);
+  });
+
+  describe("in the adapter", () => {
+    const event = { source: "aws.events", "detail-type": "Scheduled Event", time: "2026-01-01T00:00:00Z", resources: ["arn:rule"], cloudgear: { query: { job: "db-backup", task: "x" } } };
+
+    test("the function gets the query in request.query, the bearer secret and the cron user agent", async () => {
+      let seen: any;
+      process.env.CRON_SECRET = "s3cret";
+      try {
+        const handler = createHandler(async (request: unknown) => ((seen = request), {}), [], { request: true });
+        await handler(event as never);
+      } finally {
+        delete process.env.CRON_SECRET;
+      }
+      expect(seen.query).toEqual({ job: "db-backup", task: "x" });
+      expect(seen.headers.authorization).toBe("Bearer s3cret");
+      expect(seen.headers["user-agent"]).toBe("vercel-cron/1.0");
+    });
+
+    test("without CRON_SECRET there is no authorization header", async () => {
+      let seen: any;
+      delete process.env.CRON_SECRET;
+      const handler = createHandler(async (request: unknown) => ((seen = request), {}), [], { request: true });
+      await handler(event as never);
+      expect(seen.headers.authorization).toBeUndefined();
+    });
+
+    test("a function that takes its input gets the query in it", async () => {
+      let seen: any;
+      const handler = createHandler(async (input: unknown) => ((seen = input), {}), []);
+      await handler(event as never);
+      expect(seen).toEqual({ scheduledTime: "2026-01-01T00:00:00Z", rule: "arn:rule", query: { job: "db-backup", task: "x" } });
+    });
+
+    test("an event without a query behaves as before", async () => {
+      let seen: any;
+      const handler = createHandler(async (request: unknown) => ((seen = request), {}), [], { request: true });
+      await handler({ source: "aws.events", time: "t" } as never);
+      expect(seen.query).toEqual({});
+      expect(seen.headers.authorization).toBeUndefined();
+    });
   });
 });

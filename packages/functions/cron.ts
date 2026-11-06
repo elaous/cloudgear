@@ -2,6 +2,9 @@ export interface CronSchedule {
   readonly expression: string;
 }
 
+// A schedule, optionally with a query string the run carries (`?job=backup`), like a Vercel cron path.
+export type ScheduleSpec = CronSchedule | { readonly cron: CronSchedule; readonly query?: Readonly<Record<string, string>> };
+
 interface FieldSpec {
   name: string;
   min: number;
@@ -118,6 +121,6 @@ function renderDays(days: Set<number>): string {
 }
 
 // A no-op at runtime; `cloudgear generate` reads it and deploys a scheduled trigger for the method.
-export function schedule(_when: CronSchedule) {
+export function schedule(_when: ScheduleSpec | readonly ScheduleSpec[]) {
   return (_method: unknown, _context: ClassMethodDecoratorContext): void => {};
 }

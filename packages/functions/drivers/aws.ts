@@ -32,6 +32,8 @@ export interface ScheduledEvent {
   source: "aws.events";
   time?: string;
   resources?: string[];
+  // Added by cloudgear for a schedule that carries a query string.
+  cloudgear?: { query?: Record<string, string> };
 }
 
 // An EventBridge event delivered to a function by a rule.
@@ -77,10 +79,17 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       : undefined;
 
   // A run nobody is waiting on: a failure is thrown so Lambda records and retries it.
-  const runAsync = async (what: string, input: unknown, context: RequestContext, failsAt = 400) => {
+  const runAsync = async (what: string, input: unknown, context: RequestContext, failsAt = 400, query?: Record<string, string>) => {
     await prepare();
+    // Like a Vercel cron call: the query in the URL, and the CRON_SECRET as a bearer token when the function has one.
+    const secret = what === "schedule" ? process.env.CRON_SECRET : undefined;
     const request = options.request
-      ? vercelRequestFrom({ method: "POST", url: `https://${what}.invalid/`, headers: { "content-type": "application/json" }, raw: new TextEncoder().encode(JSON.stringify(input)) })
+      ? vercelRequestFrom({
+          method: "POST",
+          url: `https://${what}.invalid/${query ? `?${new URLSearchParams(query)}` : ""}`,
+          headers: { "content-type": "application/json", ...(what === "schedule" ? { "user-agent": "vercel-cron/1.0" } : {}), ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
+          raw: new TextEncoder().encode(JSON.stringify(input)),
+        })
       : undefined;
     const result = await invoke(fn, input, context, { request, response: options.response });
     if (result.status >= failsAt) throw new Error(`${what === "schedule" ? "Scheduled" : "Event"} run failed with status ${result.status}`);
@@ -91,7 +100,8 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
   return async (event: FunctionUrlEvent | ScheduledEvent | BusEvent): Promise<FunctionUrlResult> => {
     if (isScheduled(event)) {
       debug("lambda", "scheduled event", { time: event.time, rule: event.resources?.[0] });
-      return runAsync("schedule", { scheduledTime: event.time, rule: event.resources?.[0] }, {});
+      const query = event.cloudgear?.query;
+      return runAsync("schedule", { scheduledTime: event.time, rule: event.resources?.[0], ...(query ? { query } : {}) }, {}, 400, query);
     }
     if (isBusEvent(event)) {
       debug("lambda", "bus event", { type: event["detail-type"], source: event.source, id: event.id });

@@ -25,7 +25,7 @@ import {
 } from "./http";
 import type { Authenticator } from "./auth";
 import { VercelResponse } from "./vercel";
-import type { CronSchedule } from "./cron";
+import type { ScheduleSpec } from "./cron";
 import { signFunctionUrlRequest, type AwsCredentialsProvider } from "./sign";
 
 export type ProviderOptions = Record<string, string | number | boolean>;
@@ -53,7 +53,7 @@ export interface RouteOptions {
   // output) or `VercelResponse` (a writer; the function returns nothing). Give the import itself.
   response?: typeof response | typeof VercelResponse;
   // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
-  schedule?: CronSchedule | CronSchedule[];
+  schedule?: ScheduleSpec | ScheduleSpec[];
   // Also run the function on events: `on: bus.event("order.created")` (see @cloudgear/events).
   on?: EventOption | EventOption[];
   // Secrets the function reads, filled into its environment: `env: store.path("/app")(["KEY"])`

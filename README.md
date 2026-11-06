@@ -572,6 +572,17 @@ new FunctionRouter("aws").url("GET", "/report", report, { schedule: cron`*/15 * 
   `cron` is converted to EventBridge's six-field form (`*/15 * * * *` becomes
   `cron(0/15 * * * ? *)`). Seconds are not supported, and day-of-month and
   day-of-week MUST NOT both be restricted.
+- A schedule MAY carry a query string, for one function that does several jobs
+  (as a Vercel cron path like `/api/cron?job=db-backup` does):
+  `schedule: [{ cron: cron`27 7 1 * *`, query: { job: "db-backup" } }, ...]`, or the
+  same object inside `@schedule(...)`. Names and values MUST be literals using only
+  letters, digits and `_ . : / -`. Each one is its own EventBridge rule, so
+  changing a query replaces the rule. The run gets the query in its input
+  (`{ scheduledTime, rule, query }`), and with `request: true` in `request.query`.
+  A scheduled run with `request: true` also looks like a Vercel cron call: its
+  `User-Agent` is `vercel-cron/1.0` and, when the function has a `CRON_SECRET`
+  environment variable (declare it with `env`, see Secrets), it sends
+  `Authorization: Bearer <CRON_SECRET>`, which is what such handlers check.
 - The function is called with `{ scheduledTime, rule }` and no `context.auth`;
   token verification on the API domain does not apply to it. A run that ends
   in a 5xx is thrown, so Lambda records it and, as for any asynchronous

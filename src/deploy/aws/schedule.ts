@@ -15,6 +15,14 @@ export interface ScheduleDeps {
 
 const TARGET_ID = "cloudgear";
 
+// Keeps the scheduled event and adds the query the run carries: the adapter reads it from `cloudgear.query`.
+export function queryTransformer(query: Record<string, string>) {
+  return {
+    InputPathsMap: { time: "$.time", rule: "$.resources[0]" },
+    InputTemplate: `{"source":"aws.events","detail-type":"Scheduled Event","time":"<time>","resources":["<rule>"],"cloudgear":{"query":${JSON.stringify(query)}}}`,
+  };
+}
+
 const statementId = (rule: string) => `cloudgear-schedule-${createHash("sha256").update(rule).digest("hex").slice(0, 12)}`;
 
 export function scheduleDriver(deps: ScheduleDeps): Driver {
@@ -45,7 +53,7 @@ export function scheduleDriver(deps: ScheduleDeps): Driver {
         const e = err as { name?: string; message?: string };
         if (!(e.name === "ResourceConflictException" && /statement id.*already exists/i.test(e.message ?? ""))) throw err;
       }
-      const put = await deps.events.send(new PutTargetsCommand({ Rule: ruleName, Targets: [{ Id: TARGET_ID, Arn: functionArn }] }));
+      const put = await deps.events.send(new PutTargetsCommand({ Rule: ruleName, Targets: [{ Id: TARGET_ID, Arn: functionArn, ...(spec.query ? { InputTransformer: queryTransformer(spec.query) } : {}) }] }));
       if (put.FailedEntryCount) throw new Error(`EventBridge rejected the target of ${ruleName}: ${put.FailedEntries?.[0]?.ErrorMessage}`);
       deps.log(`${spec.function} runs on ${spec.cron} (UTC)`);
       return outputs;

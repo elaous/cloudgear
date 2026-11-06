@@ -37,6 +37,8 @@ export interface CertificateComparable {
 
 export interface ScheduleComparable {
   cron: string;
+  // Carried by every run, as a query string.
+  query?: Record<string, string>;
   expression: string;
   function: string;
   function_key: string;
@@ -176,15 +178,17 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
   }
 
   for (const fn of config.function) {
-    for (const cron of fn.schedule ?? []) {
-      const id = createHash("sha256").update(`${fn.physical_name}\0${cron}`).digest("hex").slice(0, 8);
+    const schedules = [...(fn.schedule ?? []).map((cron) => ({ cron })), ...(fn.query_schedule ?? [])] as { cron: string; query?: Record<string, string> }[];
+    for (const { cron, query } of schedules) {
+      const queryText = query ? JSON.stringify(Object.entries(query).sort(([a], [b]) => a.localeCompare(b))) : "";
+      const id = createHash("sha256").update(queryText ? `${fn.physical_name}\0${cron}\0${queryText}` : `${fn.physical_name}\0${cron}`).digest("hex").slice(0, 8);
       entries.push({
         kind: "resource",
         type: capability(providerOfType(fn.type), "schedule").type,
         name: `${fn.name}@${id}`,
         physical_name: `${fn.physical_name.slice(0, 55)}-${id}`,
         dry: false,
-        spec: { cron, expression: toEventBridgeCron(cron), function: fn.physical_name, function_key: stateKey(fn) } satisfies ScheduleComparable,
+        spec: { cron, ...(query ? { query } : {}), expression: toEventBridgeCron(cron), function: fn.physical_name, function_key: stateKey(fn) } satisfies ScheduleComparable,
         source: fn,
         deps: [stateKey(fn)],
         refresh: true,

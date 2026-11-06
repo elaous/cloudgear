@@ -134,6 +134,14 @@ message Function {
   repeated SecretBinding secret = 19;
   // Events that also start the function.
   repeated EventTrigger event = 20;
+  // Schedules whose runs carry a query string; the others are in `schedule`.
+  reserved 21;
+  repeated QuerySchedule query_schedule = 22;
+}
+
+message QuerySchedule {
+  string cron = 1;
+  map<string, string> query = 2;
 }
 
 message EventTrigger {

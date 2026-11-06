@@ -94,6 +94,7 @@ export interface FunctionSpec {
   response_arg?: "helper" | "writer";
   secret?: SecretBindingSpec[];
   event?: EventTriggerSpec[];
+  query_schedule?: { cron: string; query: Record<string, string> }[];
 }
 
 export interface EventTriggerSpec {
@@ -117,6 +118,8 @@ const REPEATED = new Set([
   "function.schedule",
   "function.secret",
   "function.event",
+  "function.query_schedule",
+  "function.query_schedule.query",
   "function.include",
   "certificate.options",
   "api.options",
@@ -204,6 +207,14 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...(f.pass_request === true ? { pass_request: true } : {}),
       ...(f.response_arg === "helper" || f.response_arg === "writer" ? { response_arg: f.response_arg } : {}),
       ...(f.secret?.length ? { secret: f.secret.map((s: Record<string, any>) => ({ ...secretRefFrom(s), env: String(s.env ?? ""), ...(s.all === true ? { all: true } : {}) })) } : {}),
+      ...(f.query_schedule?.length
+        ? {
+            query_schedule: f.query_schedule.map((q: Record<string, any>) => ({
+              cron: str(q, "cron"),
+              query: Object.fromEntries(((q.query ?? []) as Record<string, any>[]).map((e) => [str(e, "key"), String(e.value ?? "")])),
+            })),
+          }
+        : {}),
       ...(f.event?.length
         ? { event: f.event.map((e: Record<string, any>) => ({ bus: str(e, "bus"), type: str(e, "type"), ...(e.source ? { source: String(e.source) } : {}) })) }
         : {}),
@@ -241,7 +252,7 @@ function optionsToProto(config: CloudgearConfig): unknown {
   return {
     ...config,
     resource: config.resource.map(withOptions),
-    function: config.function.map(withOptions),
+    function: config.function.map((f) => ({ ...withOptions(f), query_schedule: f.query_schedule?.map((q) => ({ cron: q.cron, query: entries(q.query) })) })),
     certificate: config.certificate.map(withOptions),
     cdn: config.cdn && withOptions(config.cdn),
     api: config.api && withOptions(config.api),

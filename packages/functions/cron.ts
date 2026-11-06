@@ -23,7 +23,10 @@ const FIELDS: FieldSpec[] = [
 // Standard five-field cron in UTC: minute hour day-of-month month day-of-week.
 export function cron(strings: TemplateStringsArray, ...values: unknown[]): CronSchedule {
   if (values.length) throw new Error("cron`...` takes a fixed expression, without ${} substitutions");
-  return Object.freeze({ expression: normalizeCron(strings.raw.join("")) });
+  return Object.freeze({ expression: normalizeCron(strings.raw
+    .map((s) => s.trim())
+    .join(""))
+  });
 }
 
 export function normalizeCron(expression: string): string {

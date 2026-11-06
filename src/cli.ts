@@ -15,6 +15,7 @@ import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
+import { checkEnvironment, envWarnings } from "./envcheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -40,6 +41,7 @@ Options:
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
   --tag <key=value>  Extra tag on created resources, repeatable (apply only)
+  --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
   --path <path>      Restrict secrets set to one declared path
@@ -60,6 +62,7 @@ async function main() {
       tag: { type: "string", multiple: true },
       "from-envfile": { type: "string" },
       "allow-unignored": { type: "boolean", default: false },
+      "skip-env-check": { type: "boolean", default: false },
       path: { type: "string" },
       all: { type: "boolean", default: false },
       "auto-approve": { type: "boolean", default: false },
@@ -110,6 +113,8 @@ async function main() {
       const state = loadState(statePath, config.project, config.provider);
       debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
       console.log(formatPlan(plan(config, state)));
+      const warning = envWarnings(config, configPath);
+      if (warning) console.warn(`\nwarning: ${warning}`);
       return;
     }
     case "apply":
@@ -127,6 +132,9 @@ async function main() {
         return counts;
       });
       console.log(formatPlan(actions));
+      if (command === "apply" && config.function.length && !values["skip-env-check"]) {
+        await checkEnvironment(config, configPath, values.region);
+      }
       if (!hasChanges(actions)) {
         console.log("\nNo changes.");
       } else {

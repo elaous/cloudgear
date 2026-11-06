@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { envReportPath, formatMissingEnv, missingEnv, readEnvReport, type EnvReport } from "../src/envreport";
+import { checkEnvironment, envWarnings } from "../src/envcheck";
+import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
+import { resetMemorySecrets } from "@cloudgear/secrets/drivers/memory";
+import { createMemorySecretDriver } from "@cloudgear/secrets/drivers/memory";
 
 setDefaultTimeout(40_000);
 
@@ -51,7 +55,44 @@ describe("the environment report", () => {
     const { report } = await generated("main");
     expect(Object.keys(report.functions.api!.variables)).not.toContain("NOT_IMPORTED");
     expect(Object.keys(report.functions.api!.variables)).not.toContain("WORKER_ONLY");
-    expect(Object.keys(report.functions.worker!.variables).sort()).toEqual(["DB_URL", "FEATURE_FLAG", "OTHER", "REGION", "WORKER_ONLY"]);
+    expect(Object.keys(report.functions.worker!.variables).sort()).toEqual(["DB_URL", "WORKER_ONLY"]);
+    expect(Object.keys(report.functions.api!.variables)).toContain("REGION");
+  });
+
+  test("writes are not reads, and comparisons, checks and chains make a read optional", async () => {
+    const v = (await generated("forms")).report.functions.api!.variables;
+    for (const name of ["ASSIGNED_ONLY", "DELETED", "PROTOTYPE_CALL", "hasOwnProperty"]) expect(Object.hasOwn(v, name)).toBe(false);
+    for (const name of ["DEFAULTED", "NODE_ENV", "DEBUG_FLAG", "TRIMMED", "SAME", "SOFT_CHECK"]) expect(v[name]!.required).toBe(false);
+    expect(v.NODE_ENV!.provided).toBe("platform");
+    expect(v.TZ).toBeUndefined();
+  });
+
+  test("a presence check that throws means the variable is required", async () => {
+    const v = (await generated("forms")).report.functions.api!.variables;
+    expect(v.MUST_HAVE!.required).toBe(true);
+  });
+
+  test("aliases, globalThis, casts and non-null assertions are resolved to names", async () => {
+    const { report } = await generated("forms");
+    const v = report.functions.api!.variables;
+    expect(v.ALIASED!.required).toBe(true);
+    expect(v.VIA_GLOBAL!.required).toBe(true);
+    expect(v.CAST!.required).toBe(true);
+    expect(v.BANG!.required).toBe(true);
+    expect(report.functions.api!.dynamic).toEqual([]);
+  });
+
+  test("a function includes what it calls in its file, and not the functions it does not", async () => {
+    const { report } = await generated("forms");
+    // `export const service = new Service()` runs when the file loads, so its field reads count for every function there.
+    expect(Object.keys(report.functions.caller!.variables).sort()).toEqual(["CLASS_FIELD", "HELPER_VAR", "OTHER_FN_VAR"]);
+    expect(Object.keys(report.functions.other!.variables).sort()).toEqual(["CLASS_FIELD", "OTHER_FN_VAR"]);
+    expect(Object.keys(report.functions.api!.variables)).not.toContain("HELPER_VAR");
+  });
+
+  test("a method also runs its class's field initializers", async () => {
+    const { report } = await generated("forms");
+    expect(report.functions["service-handle"]?.variables.CLASS_FIELD ?? report.functions[Object.keys(report.functions).find((n) => /handle/.test(n))!]!.variables.CLASS_FIELD).toMatchObject({ required: true });
   });
 
   test("a computed read or a spread is reported as dynamic and warned about", async () => {
@@ -73,7 +114,7 @@ describe("the environment report", () => {
   });
 
   test("the message names each function, variable and file", () => {
-    const report: EnvReport = { version: 1, functions: { api: { routes: [], dynamic: [], variables: { A: { required: true, files: ["x.ts"], provided: null } } } } };
+    const report: EnvReport = { version: 1, config: "x", functions: { api: { routes: [], dynamic: [], variables: { A: { required: true, files: ["x.ts"], provided: null } } } } };
     expect(formatMissingEnv(missingEnv(report))).toContain("api: A (x.ts)");
   });
 
@@ -117,5 +158,62 @@ describe("the CLI", () => {
     } finally {
       delete process.env.CLOUDGEAR_SECRETS_DRIVER;
     }
+  });
+});
+
+describe("checkEnvironment", () => {
+  const load = (configPath: string) => decodeConfig(fs.readFileSync(configPath, "utf8"));
+  const prior = process.env.CLOUDGEAR_SECRETS_DRIVER;
+  const warnings: string[] = [];
+  const warn = (message: string) => void warnings.push(message);
+
+  test("passes when everything is provided and the secrets are stored", async () => {
+    const { configPath } = await generated("wildcard");
+    process.env.CLOUDGEAR_SECRETS_DRIVER = "memory";
+    resetMemorySecrets();
+    try {
+      await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).resolves.toBeUndefined();
+    } finally {
+      if (prior === undefined) delete process.env.CLOUDGEAR_SECRETS_DRIVER;
+      else process.env.CLOUDGEAR_SECRETS_DRIVER = prior;
+    }
+  });
+
+  const withStore = async (stored: Record<string, string>, run: (configPath: string) => Promise<void>) => {
+    const { configPath } = await generated("secret-bound");
+    process.env.CLOUDGEAR_SECRETS_DRIVER = "memory";
+    resetMemorySecrets();
+    for (const [name, value] of Object.entries(stored)) await createMemorySecretDriver().put(name, value);
+    try {
+      await run(configPath);
+    } finally {
+      if (prior === undefined) delete process.env.CLOUDGEAR_SECRETS_DRIVER;
+      else process.env.CLOUDGEAR_SECRETS_DRIVER = prior;
+    }
+  };
+
+  test("fails when a declared secret is not stored, naming it", async () => {
+    await withStore({}, async (configPath) => {
+      await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).rejects.toThrow(/not stored: \/app\/STRIPE_KEY/);
+    });
+  });
+
+  test("passes once the secret is stored", async () => {
+    await withStore({ "/app/STRIPE_KEY": "sk" }, async (configPath) => {
+      await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).resolves.toBeUndefined();
+    });
+  });
+
+  test("a report made for another config is refused, in apply and as a plan warning", async () => {
+    const { configPath } = await generated("main");
+    fs.appendFileSync(configPath, "\n# edited\n");
+    await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).rejects.toThrow(/made for another config/);
+    expect(envWarnings(load(configPath), configPath)).toMatch(/made for another config/);
+  });
+
+  test("an unreadable report is a warning in plan, not a crash", async () => {
+    const { configPath } = await generated("main");
+    fs.writeFileSync(envReportPath(configPath), "{ not json");
+    expect(envWarnings(load(configPath), configPath)).toMatch(/not valid JSON/);
   });
 });

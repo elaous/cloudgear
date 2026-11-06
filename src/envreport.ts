@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+
+export const configHash = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 // How a variable reaches the function: set by cloudgear, by the platform, from a secret, or not at all.
 export type EnvSource = "resource" | "option" | "secret" | "secret-wildcard" | "platform" | null;
@@ -12,6 +15,8 @@ export interface EnvReportFunction {
 
 export interface EnvReport {
   version: 1;
+  // sha256 of the config the report was made with.
+  config: string;
   functions: Record<string, EnvReportFunction>;
 }
 
@@ -20,7 +25,12 @@ export const envReportPath = (configPath: string): string => `${configPath.repla
 
 export function readEnvReport(file: string): EnvReport | undefined {
   if (!fs.existsSync(file)) return undefined;
-  const report = JSON.parse(fs.readFileSync(file, "utf8")) as EnvReport;
+  let report: EnvReport;
+  try {
+    report = JSON.parse(fs.readFileSync(file, "utf8")) as EnvReport;
+  } catch {
+    throw new Error(`${file} is not valid JSON; re-run \`cloudgear generate\``);
+  }
   if (report.version !== 1 || typeof report.functions !== "object") throw new Error(`${file} is not an environment report this cloudgear understands; re-run \`cloudgear generate\``);
   return report;
 }

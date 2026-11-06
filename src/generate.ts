@@ -6,12 +6,12 @@ import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { encodeConfig, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
-import { envReportPath, type EnvReport, type EnvSource } from "./envreport";
+import { configHash, envReportPath, type EnvReport, type EnvSource } from "./envreport";
 import { fitName, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
 
-// Set by the Lambda runtime itself.
-const PLATFORM_ENV = new Set(["TZ", "LANG", "PATH", "LD_LIBRARY_PATH", "NODE_PATH"]);
+// Set by the Lambda runtime, or ambient in every Node program.
+const PLATFORM_ENV = new Set(["TZ", "LANG", "PATH", "LD_LIBRARY_PATH", "NODE_PATH", "NODE_ENV", "CI"]);
 
 export interface GenerateOptions {
   entry: string;
@@ -232,7 +232,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   if (config.api) providerProfile(config.api.provider);
   validateConfigOptions(config);
 
-  const report: EnvReport = { version: 1, functions: {} };
+  const configText = encodeConfig(config);
+  const report: EnvReport = { version: 1, config: configHash(configText), functions: {} };
   model.functions.forEach((fn, index) => {
     const spec = functions[index]!;
     const optionEnv = environmentOptions(fn.options);
@@ -252,7 +253,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   });
 
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(options.configPath, encodeConfig(config));
+  fs.writeFileSync(options.configPath, configText);
   fs.writeFileSync(envReportPath(options.configPath), `${JSON.stringify(report, null, 2)}\n`);
   debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
   if (functions.some((f) => f.secret?.length) || config.certificate.some((c) => c.dns.token)) {

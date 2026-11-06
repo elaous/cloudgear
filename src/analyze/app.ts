@@ -659,10 +659,7 @@ export function analyzeApp(entryPath: string): AppModel {
     fn.options = Object.keys(merged).length ? merged : undefined;
   }
 
-  for (const [fn, node] of functionNodes) {
-    const others = [...functionNodes].filter(([other]) => other !== fn).map(([, otherNode]) => otherNode).filter((otherNode) => otherNode.getSourceFile() === node.getSourceFile() && otherNode !== node && !node.getAncestors().includes(otherNode));
-    fn.envUse = scanEnvUse(node.getSourceFile(), isAppFile, relative, others);
-  }
+  for (const [fn, node] of functionNodes) fn.envUse = scanEnvUse(node, isAppFile, relative);
 
   const byName = new Map<string, AnalyzedFunction>();
   for (const fn of functions.values()) {

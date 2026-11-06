@@ -1003,21 +1003,32 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
 }
 ```
 
-- The scan covers the function's file and the project files it imports, not
-  `node_modules`. A function shares its imports with the other functions in the
-  same file, so give a function its own file to keep its list exact.
-- A variable is `required` unless every read has a fallback (`?? x`, `|| x`), is
-  a presence check (`if (process.env.X)`, `!process.env.X`, `typeof`) or has a
-  destructuring default. `provided` says how it reaches the function: `resource`
+- The scan follows the code the function runs: its body, what that calls
+  (including helpers in other project files), and the top-level code of every
+  project file it imports, which runs when the function loads. Other functions
+  that merely share its file are not included. `node_modules`, `require()` and
+  dynamic `import()` are not followed. `process.env`, `Bun.env`,
+  `globalThis.process.env`, `import.meta.env`, casts, and one-step aliases
+  (`const env = process.env`) are understood.
+- A variable is `required` unless every read has a fallback (`?? x`, `|| x`,
+  `??=`), is compared (`=== "production"`, `!== undefined`), is a presence check
+  (`if (process.env.X)`, `Boolean(...)`, `typeof`, `?.`) or has a destructuring
+  default. A check that throws or exits (`if (!process.env.X) throw ...`) makes it
+  required. Assigning or deleting a variable is not a read. `provided` says how it reaches the function: `resource`
   (set by cloudgear), `option` (`functionOptions: { "env.X": "..." }`), `secret`
   (an `env` binding), `secret-wildcard` (a `/*` path may hold it), `platform`
-  (`AWS_*`, `LAMBDA_*`, `TZ` and the like) or `null`.
+  (`AWS_*`, `LAMBDA_*`, `TZ`, `NODE_ENV`, `CI` and the like) or `null`.
 - A computed read (`process.env[name]`) or a spread is listed under `dynamic`
   and warned about; those variables cannot be checked.
 - `cloudgear apply` reads the report and refuses to deploy while a required
   variable has `provided: null`, and while a declared secret is not stored (see
   `cloudgear secrets list`). `cloudgear plan` only warns. Pass
-  `--skip-env-check` to deploy anyway. If the report is missing, `apply` asks
+  `--skip-env-check` to deploy anyway. Checking that secrets are stored needs
+  list access to the store (`ssm:GetParametersByPath` for SSM,
+  `secretsmanager:ListSecrets` for Secrets Manager, and `kms:Decrypt` for a
+  named key); without it `apply` explains and suggests the flag. The report
+  records the hash of the config it was made for, so commit both together; if
+  they differ, `apply` asks for `generate` again. If the report is missing, `apply` asks
   for `generate` first. The report holds names and file paths, never values, so
   it MAY be committed.
 

@@ -15,8 +15,8 @@ import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
-import { envReportPath, formatMissingEnv, missingEnv, readEnvReport } from "./envreport";
-import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretGroups, secretStatus, setSecrets } from "./secrets";
+import { checkEnvironment, envWarnings } from "./envcheck";
+import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
 const USAGE = `Usage: cloudgear <command> [options]
 
@@ -113,8 +113,8 @@ async function main() {
       const state = loadState(statePath, config.project, config.provider);
       debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
       console.log(formatPlan(plan(config, state)));
-      const missing = envReportOf(configPath) ? missingEnv(envReportOf(configPath)!) : [];
-      if (missing.length) console.warn(`\nwarning: ${formatMissingEnv(missing)}\n         \`cloudgear apply\` will refuse to deploy until they are provided.`);
+      const warning = envWarnings(config, configPath);
+      if (warning) console.warn(`\nwarning: ${warning}`);
       return;
     }
     case "apply":
@@ -238,30 +238,6 @@ async function main() {
     }
     default:
       throw new Error(`Unknown command "${command}"\n\n${USAGE}`);
-  }
-}
-
-function envReportOf(configPath: string) {
-  return readEnvReport(envReportPath(configPath));
-}
-
-// The code's environment variables must be provided and the secrets behind them stored, before anything is deployed.
-async function checkEnvironment(config: CloudgearConfig, configPath: string, region: string | undefined): Promise<void> {
-  const reportFile = envReportPath(configPath);
-  const report = readEnvReport(reportFile);
-  if (!report) throw new Error(`${path.relative(process.cwd(), reportFile)} not found; run \`cloudgear generate\` first, or pass --skip-env-check`);
-  const missing = missingEnv(report);
-  if (missing.length) throw new Error(`${formatMissingEnv(missing)}\nPass --skip-env-check to deploy anyway.`);
-  for (const [name, fn] of Object.entries(report.functions)) {
-    if (fn.dynamic.length) console.warn(`warning: ${name} reads the environment in ways that cannot be checked (${fn.dynamic.join(", ")})`);
-  }
-  if (!secretGroups(config).length) return;
-  const resolved = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
-  // A DNS token set in the deployer's own environment is used from there, so it need not be stored.
-  const fromEnvironment = new Set(config.certificate.flatMap((c) => (c.dns.token && process.env[c.dns.token.name] !== undefined ? [`${c.dns.token.path}/${c.dns.token.name}`] : [])));
-  const absent = (await secretStatus(config, resolved)).flatMap((status) => status.missing.map((name) => `${status.group.path}/${name}`)).filter((name) => !fromEnvironment.has(name));
-  if (absent.length) {
-    throw new Error(`Secrets the functions need are not stored: ${absent.join(", ")}\nStore them with \`cloudgear secrets set\`, or pass --skip-env-check to deploy anyway.`);
   }
 }
 

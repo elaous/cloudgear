@@ -1132,11 +1132,38 @@ regions: changing `region` on an existing bucket fails the apply.
 
 ## `cloudgear import`
 
-`cloudgear import myblob my-existing-bucket` records a config resource as
-already existing under the given physical name (default: its configured
-name). Imported resources are never created or deleted (`destroy` only
-forgets them), and functions that use them get that physical name in their
-env and IAM policy.
+`cloudgear import` adopts things that already exist in the cloud into state, so
+`apply` does not try to create them again:
+
+```sh
+cloudgear import web.tranquilo.art                 # a bucket from the config's resources
+cloudgear import api-items                         # a function, by name
+cloudgear import @aws.Certificate www.example.com  # when several things share a name
+cloudgear import --all                             # everything planned that already exists
+```
+
+- A bucket is only recorded (optionally under another physical name:
+  `cloudgear import myblob my-existing-bucket`). Imported buckets are never
+  created, changed or deleted (`destroy` only forgets them), and functions that
+  use them get that physical name in their env and IAM policy. A name that is
+  also a bucket's takes the bucket; use `<type> <name>` for the others.
+- Functions (found by their name), ACM certificates (by domain, in the
+  certificate's region; an issued one wins over a pending one), CloudFront
+  distributions (by alias hostname) and schedule rules (by name) are looked up
+  in AWS and their ARNs, role, URL and ids recorded. They are managed from then
+  on: the next `cloudgear plan` shows them as updates, and `apply` brings them in
+  line with the config without creating them again. `destroy` deletes them,
+  except a function's IAM role when cloudgear did not create it (an imported
+  function may use a shared one); the inline policy cloudgear adds to that
+  role is removed.
+- With `--all`, whatever is not found is left for `apply` to create. A thing
+  that has no import yet (API Gateway domains, event buses and rules) is skipped.
+- Import changes only the state file. It needs read access to the service it
+  looks in (`lambda:GetFunction`, `acm:ListCertificates`,
+  `cloudfront:ListDistributions`, `events:DescribeRule`, `s3:ListBucket`), and
+  your credentials, like `apply`.
+- A function that had its own role keeps it, and `apply` adds the inline policy
+  cloudgear manages to that role; check the role's other policies first.
 
 ## Code map
 

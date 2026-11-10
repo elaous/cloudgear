@@ -13,6 +13,7 @@ import {
   GetDistributionCommand,
   GetDistributionConfigCommand,
   GetOriginAccessControlCommand,
+  ListDistributionsCommand,
   ListOriginAccessControlsCommand,
   PublishFunctionCommand,
   UpdateDistributionCommand,
@@ -303,6 +304,18 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 
   return {
+    async adopt(entry) {
+      const spec = entry.spec as unknown as CdnComparable;
+      let marker: string | undefined;
+      do {
+        const list = await deps.cloudfront.send(new ListDistributionsCommand({ Marker: marker }));
+        const found = (list.DistributionList?.Items ?? []).find((item: { Aliases?: { Items?: string[] } }) => item.Aliases?.Items?.includes(spec.domain));
+        if (found) return { id: found.Id, arn: found.ARN, domain_name: found.DomainName, url: `https://${found.DomainName}`, status: found.Status === "Deployed" ? "Deployed" : "InProgress" };
+        marker = list.DistributionList?.IsTruncated ? list.DistributionList.NextMarker : undefined;
+      } while (marker);
+      return undefined;
+    },
+
     async create(entry, context) {
       const outputs: Record<string, string> = {};
       try {

@@ -1,4 +1,4 @@
-import { DeleteCertificateCommand, DescribeCertificateCommand, RequestCertificateCommand } from "@aws-sdk/client-acm";
+import { DeleteCertificateCommand, DescribeCertificateCommand, ListCertificatesCommand, RequestCertificateCommand } from "@aws-sdk/client-acm";
 import type { DnsDriver } from "@cloudgear/dns";
 import type { SecretRefSpec } from "../../config/schema";
 import { PartialApplyError, type Driver } from "../apply";
@@ -69,6 +69,23 @@ export function certificateDriver(deps: CertificateDeps): Driver {
   }
 
   return {
+    async adopt(entry) {
+      const spec = entry.spec as unknown as CertificateComparable;
+      const acm = deps.acm(spec.region || deps.region);
+      let token: string | undefined;
+      let pending: string | undefined;
+      do {
+        const page = await acm.send(new ListCertificatesCommand({ CertificateStatuses: ["ISSUED", "PENDING_VALIDATION"], NextToken: token }));
+        for (const summary of page.CertificateSummaryList ?? []) {
+          if (summary.DomainName !== spec.domain || !summary.CertificateArn) continue;
+          if (summary.Status === "ISSUED") return { arn: summary.CertificateArn };
+          pending ??= summary.CertificateArn;
+        }
+        token = page.NextToken;
+      } while (token);
+      return pending ? { arn: pending } : undefined;
+    },
+
     async create(entry, context) {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};

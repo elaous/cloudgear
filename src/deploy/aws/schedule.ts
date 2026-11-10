@@ -1,4 +1,4 @@
-import { DeleteRuleCommand, PutRuleCommand, PutTargetsCommand, RemoveTargetsCommand } from "@aws-sdk/client-eventbridge";
+import { DeleteRuleCommand, DescribeRuleCommand, PutRuleCommand, PutTargetsCommand, RemoveTargetsCommand } from "@aws-sdk/client-eventbridge";
 import { AddPermissionCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { createHash } from "node:crypto";
 import { PartialApplyError, type Driver } from "../apply";
@@ -70,6 +70,15 @@ export function scheduleDriver(deps: ScheduleDeps): Driver {
   const functionArn = (spec: ScheduleComparable, context: Parameters<Driver["create"]>[1]) => context.entry(spec.function_key)?.outputs.arn;
 
   return {
+    async adopt(entry) {
+      try {
+        const rule = await deps.events.send(new DescribeRuleCommand({ Name: entry.physical_name }));
+        return rule.Arn ? { rule_name: entry.physical_name, rule_arn: rule.Arn } : undefined;
+      } catch (err) {
+        if ((err as { name?: string }).name === "ResourceNotFoundException") return undefined;
+        throw err;
+      }
+    },
     create: (entry, context) => {
       const spec = entry.spec as unknown as ScheduleComparable;
       return converge(entry.physical_name, spec, functionArn(spec, context), {});

@@ -15,6 +15,9 @@ export interface Driver {
   create(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string>>;
   update(entry: DesiredEntry, current: StateEntry, changes: string[], context: DriverContext): Promise<Record<string, string>>;
   delete(current: StateEntry, context: DriverContext): Promise<void>;
+  // Looks the entry up in the cloud for `cloudgear import`: the outputs `create` would have recorded, or
+  // undefined when it does not exist. A driver without it cannot import.
+  adopt?(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string> | undefined>;
 }
 
 export type Drivers = Record<string, Driver>;

@@ -17,7 +17,9 @@ import {
   CreateFunctionCommand,
   CreateFunctionUrlConfigCommand,
   DeleteFunctionCommand,
+  GetFunctionCommand,
   GetFunctionConfigurationCommand,
+  GetFunctionUrlConfigCommand,
   LambdaClient,
   UpdateFunctionCodeCommand,
   UpdateFunctionConfigurationCommand,
@@ -29,7 +31,7 @@ import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
-import { CreateBucketCommand, DeleteBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, DeleteBucketCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
@@ -257,6 +259,17 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         }
         return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },
+      async adopt(entry) {
+        const region = (entry.spec.region as string | undefined) || options.region;
+        try {
+          await s3For(region).send(new HeadBucketCommand({ Bucket: entry.physical_name }));
+        } catch (err) {
+          const name = (err as { name?: string }).name;
+          if (name === "NotFound" || name === "NoSuchBucket") return undefined;
+          throw err;
+        }
+        return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
+      },
       async update(entry, current) {
         const before = (current.spec.region as string | undefined) || current.outputs.region || options.region;
         const after = (entry.spec.region as string | undefined) || options.region;
@@ -343,6 +356,26 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         }
       },
 
+      async adopt(entry) {
+        try {
+          const found = await lambda.send(new GetFunctionCommand({ FunctionName: entry.physical_name }));
+          const arn: string | undefined = found.Configuration?.FunctionArn;
+          if (!arn) return undefined;
+          const roleArn: string | undefined = found.Configuration?.Role;
+          const url = await lambda.send(new GetFunctionUrlConfigCommand({ FunctionName: entry.physical_name })).then(
+            (res: { FunctionUrl?: string }) => res.FunctionUrl,
+            (err: { name?: string }) => {
+              if (err.name === "ResourceNotFoundException") return undefined;
+              throw err;
+            },
+          );
+          return { arn, ...(roleArn ? { role_arn: roleArn, role_name: roleArn.split("/").at(-1)! } : {}), ...(url ? { url } : {}) };
+        } catch (err) {
+          if ((err as { name?: string }).name === "ResourceNotFoundException") return undefined;
+          throw err;
+        }
+      },
+
       async update(entry, current, changes) {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = current.outputs.role_name ?? roleNameFor(entry.physical_name);
@@ -403,6 +436,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const roleName = current.outputs.role_name ?? roleNameFor(current.physical_name);
         await ignore(lambda.send(new DeleteFunctionCommand({ FunctionName: current.physical_name })), "ResourceNotFoundException");
         await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })), "NoSuchEntity");
+        // A role that was not made for this function (an imported one) may be shared; leave it.
+        if (roleName !== roleNameFor(current.physical_name)) return;
         await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })), "NoSuchEntity");
         await ignore(iam.send(new DeleteRoleCommand({ RoleName: roleName })), "NoSuchEntity");
       },

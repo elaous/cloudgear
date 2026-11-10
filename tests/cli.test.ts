@@ -128,6 +128,17 @@ describe("cloudgear CLI with a CDN", () => {
     expect(res.err).toMatch(/No CDN has been deployed; run `cloudgear apply` first/);
   });
 
+  test("import needs a name or --all, and says when a name is ambiguous or unknown", () => {
+    expect(run("import").err).toMatch(/Usage: cloudgear import/);
+    const unknown = run("import", "nothing-like-this");
+    expect(unknown.code).toBe(1);
+    expect(unknown.err).toMatch(/Nothing named "nothing-like-this"/);
+    const ambiguous = run("import", "www.example.com");
+    expect(ambiguous.code).toBe(1);
+    expect(ambiguous.err).toMatch(/names several things \(@aws\.Certificate, @aws\.CloudFront\); say which: cloudgear import <type> www\.example\.com/);
+    expect(run("import", "@aws.Certificate", "www.example.com", "an-id").err).toMatch(/physical id can only be given for a bucket/);
+  });
+
   test("invalidate rejects paths without a leading slash", () => {
     const stateDir = path.join(dir, ".cloudgear");
     fs.mkdirSync(stateDir, { recursive: true });

@@ -15,6 +15,7 @@ import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
+import { adoptEntries } from "./deploy/adopt";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
@@ -25,7 +26,9 @@ Commands:
   generate <entry.ts>          Analyze the app and write cloudgear.prototxt + function bundles
   plan                         Show what apply would change
   apply [--auto-approve]       Create, update and delete cloud resources to match the config
-  import <name> [physical-id]  Adopt an existing resource into state instead of creating it
+  import <name> [physical-id]  Adopt an existing bucket, function, certificate, distribution or schedule into state
+  import <type> <name>         The same, when several things share a name (for example @aws.Certificate www.example.com)
+  import --all                 Adopt everything planned that already exists; the rest is created by apply
   invalidate [path...] [--domain <cdn>]  Clear a CDN's cache (default: everything)
   destroy [--auto-approve]     Delete every managed resource (imported ones are only forgotten)
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
@@ -211,31 +214,49 @@ async function main() {
       return;
     }
     case "import": {
-      const [name, physicalId] = args;
-      if (!name) throw new Error("Usage: cloudgear import <name> [physical-id]");
       const config = readConfig(configPath);
-      const resource = config.resource.find((r) => r.name === name);
-      if (!resource) {
-        const known = config.resource.map((r) => r.name).join(", ") || "none";
-        throw new Error(`No resource named "${name}" in ${values.config} (resources: ${known}); functions cannot be imported`);
-      }
       const state = loadState(statePath, config.project, config.provider);
-      const existing = state.entries[stateKey(resource)];
-      if (existing && !existing.imported) {
-        throw new Error(`${resource.type} ${name} is already managed by cloudgear; destroy it before importing another`);
+      const [first, second, third] = args;
+      if (!values.all && !first) throw new Error("Usage: cloudgear import <name> [physical-id] | cloudgear import <type> <name> | cloudgear import --all");
+      const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : undefined;
+      if (bucket) {
+        const existing = state.entries[stateKey(bucket)];
+        if (existing && !existing.imported) {
+          throw new Error(`${bucket.type} ${first} is already managed by cloudgear; destroy it before importing another`);
+        }
+        const physical = second ?? bucket.physical_name;
+        state.entries[stateKey(bucket)] = {
+          kind: "resource",
+          type: bucket.type,
+          name: bucket.name,
+          physical_name: physical,
+          imported: true,
+          spec: { physical_name: physical },
+          outputs: {},
+        };
+        saveState(statePath, state);
+        console.log(`cloudgear: imported ${bucket.type} ${bucket.name} as "${physical}"`);
+        return;
       }
-      const physical = physicalId ?? resource.physical_name;
-      state.entries[stateKey(resource)] = {
-        kind: "resource",
-        type: resource.type,
-        name: resource.name,
-        physical_name: physical,
-        imported: true,
-        spec: { physical_name: physical },
-        outputs: {},
-      };
+
+      const typed = first?.startsWith("@") ? first : undefined;
+      const name = typed ? second : first;
+      if (!values.all && (typed ? third : second)) throw new Error("A physical id can only be given for a bucket from the config's resources; other things are found by name");
+      const planned = plan(config, state);
+      const select = (action: PlannedAction) => values.all || (action.name === name && (!typed || action.type === typed));
+      const chosen = planned.filter(select);
+      if (!values.all) {
+        if (!chosen.length) throw new Error(`Nothing named "${name}" is in ${values.config}; run \`cloudgear plan\` to see the names`);
+        if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}`);
+      }
+      const deployers = await drivers(chosen, config, configPath, values.region, deployTags(config, configPath, values));
+      const result = await adoptEntries(planned, state, deployers, select);
       saveState(statePath, state);
-      console.log(`cloudgear: imported ${resource.type} ${resource.name} as "${physical}"`);
+      for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
+      if (values.all) for (const item of result.missing) console.log(`cloudgear: not found in the cloud, apply will create it: ${item}`);
+      if (!values.all && result.missing.length) throw new Error(`${result.missing[0]} was not found in the cloud`);
+      if (!values.all && result.skipped.length) throw new Error(`${result.skipped[0]} is already in state or cannot be imported`);
+      if (result.adopted.length) console.log("cloudgear: run `cloudgear plan`; imported things show as updates until `cloudgear apply` brings them in line with the config");
       return;
     }
     default:

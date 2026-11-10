@@ -1156,6 +1156,27 @@ cloudgear import --all                             # everything planned that alr
   except a function's IAM role when cloudgear did not create it (an imported
   function may use a shared one); the inline policy cloudgear adds to that
   role is removed.
+- **Read the warnings.** `apply` rebuilds an imported distribution's config from
+  yours, so `import` lists what it would drop: a web ACL, access logging,
+  custom error responses, a geo restriction, path behaviors and origins that are
+  not in the config, a non-default price class. An imported function's code is
+  replaced by the bundle, its handler becomes `index.handler`, and its
+  environment variables that are not in the config are removed. `import` only
+  warns; look at `cloudgear plan` and your console before `apply`. A Route 53
+  alias record for the hostname is not seen by the DNS check (only CNAMEs are).
+  Tags are not added to imported things until they are recreated, and a
+  container-image function cannot be imported.
+- The certificate search covers every key type and takes the issued one that
+  expires last; an IMPORTED certificate is used as it is, without waiting for DNS
+  validation. Reserved concurrency and the URL's auth type are read from the
+  function, so the plan changes only what differs.
+- Functions imported with a role of their own keep a policy named
+  `cloudgear-<function>` on it, so several functions on one role do not
+  overwrite each other, and `destroy` removes only that policy and not the role.
+- `import --all` records everything it finds even when one lookup fails, then
+  lists the failures and exits 1. `destroy` before the first `apply` deletes an
+  imported distribution without removing its DNS record or bucket-policy
+  statement, which `apply` records; run `apply` first.
 - With `--all`, whatever is not found is left for `apply` to create. A thing
   that has no import yet (API Gateway domains, event buses and rules) is skipped.
 - Import changes only the state file. It needs read access to the service it

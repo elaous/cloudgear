@@ -137,6 +137,8 @@ describe("cloudgear CLI with a CDN", () => {
     expect(ambiguous.code).toBe(1);
     expect(ambiguous.err).toMatch(/names several things \(@aws\.Certificate, @aws\.CloudFront\); say which: cloudgear import <type> www\.example\.com/);
     expect(run("import", "@aws.Certificate", "www.example.com", "an-id").err).toMatch(/physical id can only be given for a bucket/);
+    expect(run("import", "@aws.Certificate").err).toMatch(/Usage: cloudgear import @aws\.Certificate <name>/);
+    expect(run("import", "--all", "www.example.com").err).toMatch(/import --all takes no name/);
   });
 
   test("invalidate rejects paths without a leading slash", () => {

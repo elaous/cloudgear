@@ -68,6 +68,10 @@ export interface AwsDriverOptions {
 
 const BASIC_EXECUTION_POLICY = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
 const INLINE_POLICY = "cloudgear";
+
+// A role that is not the function's own (an imported function's) may be shared, so each function keeps its own policy on it.
+const policyNameFor = (roleName: string, functionName: string) =>
+  roleName === roleNameFor(functionName) ? INLINE_POLICY : fitName(`${INLINE_POLICY}-${functionName}`, 128);
 const LAMBDA_TRUST_POLICY = JSON.stringify({
   Version: "2012-10-17",
   Statement: [{ Effect: "Allow", Principal: { Service: "lambda.amazonaws.com" }, Action: "sts:AssumeRole" }],
@@ -125,11 +129,11 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
 
   async function putPermissions(roleName: string, spec: FunctionComparable, roleArn?: string) {
     if (!spec.permissions.length && !traced(spec) && !spec.secrets?.length) {
-      await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })), "NoSuchEntity");
+      await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, spec.physical_name) })), "NoSuchEntity");
       return;
     }
     await iam.send(
-      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY, PolicyDocument: policyDocument(spec, spec.secrets?.length || spec.permissions.some((p) => p.type === "@aws.EventBus") ? { account: accountOf(roleArn), region: options.region } : undefined) }),
+      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, spec.physical_name), PolicyDocument: policyDocument(spec, spec.secrets?.length || spec.permissions.some((p) => p.type === "@aws.EventBus") ? { account: accountOf(roleArn), region: options.region } : undefined) }),
     );
   }
 
@@ -264,11 +268,14 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         try {
           await s3For(region).send(new HeadBucketCommand({ Bucket: entry.physical_name }));
         } catch (err) {
-          const name = (err as { name?: string }).name;
-          if (name === "NotFound" || name === "NoSuchBucket") return undefined;
+          const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+          const status = e.$metadata?.httpStatusCode;
+          if (e.name === "NotFound" || e.name === "NoSuchBucket" || status === 404) return undefined;
+          if (status === 403 || e.name === "Forbidden") throw new Error(`bucket "${entry.physical_name}" exists but these credentials cannot read it (it may belong to another account)`);
+          if (status === 301 || e.name === "PermanentRedirect") throw new Error(`bucket "${entry.physical_name}" is not in ${region}; set its region with new BlobStore(..., { region })`);
           throw err;
         }
-        return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
+        return { outputs: { arn: `arn:aws:s3:::${entry.physical_name}`, region } };
       },
       async update(entry, current) {
         const before = (current.spec.region as string | undefined) || current.outputs.region || options.region;
@@ -357,19 +364,34 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       },
 
       async adopt(entry) {
+        const spec = entry.spec as unknown as FunctionComparable;
         try {
           const found = await lambda.send(new GetFunctionCommand({ FunctionName: entry.physical_name }));
-          const arn: string | undefined = found.Configuration?.FunctionArn;
-          if (!arn) return undefined;
-          const roleArn: string | undefined = found.Configuration?.Role;
+          const config = found.Configuration as { FunctionArn?: string; Role?: string; PackageType?: string; Handler?: string; Environment?: { Variables?: Record<string, string> } } | undefined;
+          if (!config?.FunctionArn) return undefined;
+          if (config.PackageType === "Image") throw new Error(`function "${entry.physical_name}" is a container image; cloudgear deploys zip bundles and cannot manage it`);
           const url = await lambda.send(new GetFunctionUrlConfigCommand({ FunctionName: entry.physical_name })).then(
-            (res: { FunctionUrl?: string }) => res.FunctionUrl,
+            (res: { FunctionUrl?: string; AuthType?: string }) => res,
             (err: { name?: string }) => {
               if (err.name === "ResourceNotFoundException") return undefined;
               throw err;
             },
           );
-          return { arn, ...(roleArn ? { role_arn: roleArn, role_name: roleArn.split("/").at(-1)! } : {}), ...(url ? { url } : {}) };
+          const notes: string[] = [];
+          const extra = Object.keys(config.Environment?.Variables ?? {}).filter((key) => !(key in environment(spec).Variables));
+          if (extra.length) notes.push(`its environment variables not in the config will be removed: ${extra.sort().join(", ")}`);
+          if (config.Handler && config.Handler !== "index.handler") notes.push(`its handler "${config.Handler}" will become index.handler, and its code is replaced by the bundle`);
+          const concurrency = (found as { Concurrency?: { ReservedConcurrentExecutions?: number } }).Concurrency?.ReservedConcurrentExecutions;
+          return {
+            outputs: {
+              arn: config.FunctionArn,
+              ...(config.Role ? { role_arn: config.Role, role_name: config.Role.split("/").at(-1)! } : {}),
+              ...(url?.FunctionUrl ? { url: url.FunctionUrl } : {}),
+            },
+            // What the cloud has now, so the plan changes only what differs.
+            spec: { reserved_concurrency: concurrency ?? 0, ...(url?.AuthType ? { auth: url.AuthType === "NONE" ? "none" : "iam" } : {}) },
+            notes,
+          };
         } catch (err) {
           if ((err as { name?: string }).name === "ResourceNotFoundException") return undefined;
           throw err;
@@ -391,6 +413,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
             new UpdateFunctionConfigurationCommand({
               FunctionName: entry.physical_name,
               Runtime: spec.runtime as any,
+              Handler: "index.handler",
               MemorySize: spec.memory_mb,
               Timeout: spec.timeout_s,
               Environment: environment(spec),
@@ -435,7 +458,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       async delete(current: StateEntry) {
         const roleName = current.outputs.role_name ?? roleNameFor(current.physical_name);
         await ignore(lambda.send(new DeleteFunctionCommand({ FunctionName: current.physical_name })), "ResourceNotFoundException");
-        await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })), "NoSuchEntity");
+        await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, current.physical_name) })), "NoSuchEntity");
         // A role that was not made for this function (an imported one) may be shared; leave it.
         if (roleName !== roleNameFor(current.physical_name)) return;
         await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })), "NoSuchEntity");

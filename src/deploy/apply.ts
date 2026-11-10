@@ -15,9 +15,16 @@ export interface Driver {
   create(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string>>;
   update(entry: DesiredEntry, current: StateEntry, changes: string[], context: DriverContext): Promise<Record<string, string>>;
   delete(current: StateEntry, context: DriverContext): Promise<void>;
-  // Looks the entry up in the cloud for `cloudgear import`: the outputs `create` would have recorded, or
-  // undefined when it does not exist. A driver without it cannot import.
-  adopt?(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string> | undefined>;
+  // Looks the entry up in the cloud for `cloudgear import`, or returns undefined when it does not exist. A driver
+  // without it cannot import. `outputs` are what `create` would have recorded; `spec` the settings read from the
+  // cloud that the next plan must compare against; `notes` what `apply` will overwrite, for the user to read.
+  adopt?(entry: DesiredEntry, context: DriverContext): Promise<Adopted | undefined>;
+}
+
+export interface Adopted {
+  outputs: Record<string, string>;
+  spec?: Record<string, unknown>;
+  notes?: string[];
 }
 
 export type Drivers = Record<string, Driver>;

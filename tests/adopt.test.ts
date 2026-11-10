@@ -181,3 +181,146 @@ describe("choosing what to import", () => {
     expect(Object.keys(state.entries)).toEqual(["@aws.Lambda.bar"]);
   });
 });
+
+describe("what an import records and warns about", () => {
+  const dnsSpec = { provider: "gandi", domain: "www.example.com", zone: "example.com" };
+  const certConfig = (options?: Record<string, string>) =>
+    baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn", ...(options ? { options } : {}) }] });
+
+  test("the certificate search covers every key type, so an EC certificate is found", async () => {
+    let asked: any;
+    const aws = fakeAws({
+      ListCertificatesCommand: (input: unknown) => {
+        asked = input;
+        return { CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: "arn:ec", Status: "ISSUED", KeyAlgorithm: "EC_prime256v1", Type: "AMAZON_ISSUED" }] };
+      },
+    });
+    const state = emptyState();
+    await adoptEntries(plan(certConfig({ key_algorithm: "EC_prime256v1" }), state), state, aws.drivers, everything);
+    expect(asked.Includes.keyTypes).toEqual(expect.arrayContaining(["RSA_2048", "EC_prime256v1", "EC_secp384r1"]));
+    expect(state.entries["@aws.Certificate.www.example.com"]).toMatchObject({ outputs: { arn: "arn:ec" }, spec: { options: { key_algorithm: "EC_prime256v1" } } });
+  });
+
+  test("an adopted EC certificate converges without a key algorithm error", async () => {
+    const aws = fakeAws({ ListCertificatesCommand: () => ({ CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/ec", Status: "ISSUED", KeyAlgorithm: "EC_prime256v1", Type: "AMAZON_ISSUED" }] }) }, new MemoryDnsDriver());
+    const state = emptyState();
+    const config = certConfig({ key_algorithm: "EC_prime256v1" });
+    await adoptEntries(plan(config, state), state, aws.drivers, everything);
+    await apply(plan(config, state), state, aws.drivers, { save: () => {} });
+    expect(aws.of("RequestCertificateCommand")).toEqual([]);
+  });
+
+  test("with several certificates for a domain, the issued one expiring last wins and a note says so", async () => {
+    const aws = fakeAws({
+      ListCertificatesCommand: () => ({
+        CertificateSummaryList: [
+          { DomainName: "www.example.com", CertificateArn: "arn:old", Status: "ISSUED", NotAfter: "2026-01-01T00:00:00Z" },
+          { DomainName: "www.example.com", CertificateArn: "arn:new", Status: "ISSUED", NotAfter: "2027-01-01T00:00:00Z" },
+        ],
+      }),
+    });
+    const state = emptyState();
+    const result = await adoptEntries(plan(certConfig(), state), state, aws.drivers, everything);
+    expect(state.entries["@aws.Certificate.www.example.com"]!.outputs.arn).toBe("arn:new");
+    expect(result.notes.join("\n")).toMatch(/2 certificates exist for www\.example\.com/);
+  });
+
+  test("an imported certificate is used as it is, with no DNS validation to wait for", async () => {
+    const aws = fakeAws({ ListCertificatesCommand: () => ({ CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/imp", Status: "ISSUED", Type: "IMPORTED" }] }) }, new MemoryDnsDriver());
+    const state = emptyState();
+    const result = await adoptEntries(plan(certConfig(), state), state, aws.drivers, everything);
+    expect(result.notes.join("\n")).toMatch(/IMPORTED certificate/);
+    await apply(plan(certConfig(), state), state, aws.drivers, { save: () => {} });
+    expect(aws.of("DescribeCertificateCommand")).toEqual([]);
+  });
+
+  test("a function's reserved concurrency and URL auth are read, so the plan changes only what differs", async () => {
+    const aws = fakeAws({
+      ...existingFunction,
+      GetFunctionCommand: () => ({ Configuration: { FunctionArn: "arn:aws:lambda:eu-west-1:1:function:app-foo", Role: "arn:aws:iam::1:role/r" }, Concurrency: { ReservedConcurrentExecutions: 5 } }),
+      GetFunctionUrlConfigCommand: () => ({ FunctionUrl: "https://abc.lambda-url.eu-west-1.on.aws/", AuthType: "NONE" }),
+    });
+    const state = emptyState();
+    await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything);
+    expect(state.entries["@aws.Lambda.foo"]!.spec).toEqual({ reserved_concurrency: 5, auth: "none" });
+    await apply(plan(lambdaConfig(), state), state, aws.drivers, { save: () => {} });
+    expect(aws.of("DeleteFunctionConcurrencyCommand")).toHaveLength(1);
+    expect(aws.of("UpdateFunctionUrlConfigCommand")).toHaveLength(1);
+  });
+
+  test("an update sets the handler, and a different handler or extra variables are warned about", async () => {
+    const aws = fakeAws({
+      GetFunctionCommand: () => ({ Configuration: { FunctionArn: "arn:aws:lambda:eu-west-1:1:function:app-foo", Role: "arn:aws:iam::1:role/r", Handler: "app.handler", Environment: { Variables: { LEGACY: "1", NODE_OPTIONS: "x" } } } }),
+      GetFunctionUrlConfigCommand: () => { throw notFound(); },
+    });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything);
+    expect(result.notes.join("\n")).toMatch(/will be removed: LEGACY/);
+    expect(result.notes.join("\n")).toMatch(/handler "app\.handler" will become index\.handler/);
+    await apply(plan(lambdaConfig(), state), state, aws.drivers, { save: () => {} });
+    expect(aws.of("UpdateFunctionConfigurationCommand")[0].Handler).toBe("index.handler");
+  });
+
+  test("a container image function is refused", async () => {
+    const aws = fakeAws({ GetFunctionCommand: () => ({ Configuration: { FunctionArn: "arn", Role: "arn:aws:iam::1:role/r", PackageType: "Image" } }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything);
+    expect(result.adopted).toEqual([]);
+    expect(result.failed[0]).toMatch(/container image/);
+  });
+
+  test("two imported functions on one role each keep their own policy, and destroying one leaves the other's", async () => {
+    const shared = { GetFunctionCommand: (input: { FunctionName: string }) => ({ Configuration: { FunctionArn: `arn:aws:lambda:eu-west-1:1:function:${input.FunctionName}`, Role: "arn:aws:iam::1:role/shared" } }), GetFunctionUrlConfigCommand: () => { throw notFound(); } };
+    const config = baseConfig({
+      resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1" }],
+      function: [fn(), fn({ name: "bar", physical_name: "app-bar" })],
+    });
+    const aws = fakeAws(shared);
+    const state = emptyState();
+    await adoptEntries(plan(config, state), state, aws.drivers, (a) => a.type === "@aws.Lambda");
+    await apply(plan(config, state), state, aws.drivers, { save: () => {} });
+    const names = aws.of("PutRolePolicyCommand").map((p) => p.PolicyName).sort();
+    expect(new Set(names).size).toBe(2);
+    expect(names.every((n) => n.startsWith("cloudgear-app-"))).toBe(true);
+    const gone = fakeAws();
+    await apply(plan(baseConfig({ resource: config.resource, function: [fn()] }), state), state, gone.drivers, { save: () => {} });
+    expect(gone.of("DeleteRolePolicyCommand")).toEqual([{ RoleName: "shared", PolicyName: names.find((n) => n.endsWith("bar"))! }]);
+    expect(gone.of("DeleteRoleCommand")).toEqual([]);
+  });
+
+  test("an existing distribution's unmanaged settings are listed as warnings", async () => {
+    const config = baseConfig({
+      resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1" }],
+      function: [],
+      certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }],
+      cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "" }],
+    });
+    const aws = fakeAws({
+      ListDistributionsCommand: () => ({ DistributionList: { Items: [{ Id: "E1", ARN: "arn", DomainName: "d1.cloudfront.net", Status: "Deployed", Aliases: { Items: ["www.example.com"] } }] } }),
+      GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: { WebACLId: "arn:waf", Logging: { Enabled: true }, CustomErrorResponses: { Quantity: 2 }, Restrictions: { GeoRestriction: { RestrictionType: "whitelist" } }, CacheBehaviors: { Quantity: 3 }, Origins: { Quantity: 2 }, PriceClass: "PriceClass_100" } }),
+    });
+    const state = emptyState();
+    const result = await adoptEntries(plan(config, state), state, aws.drivers, (a) => a.type === "@aws.CloudFront");
+    const notes = result.notes.join("\n");
+    for (const part of [/web ACL/, /access logging/, /2 custom error/, /geo restriction/, /3 path behavior/, /2 origin/, /price class/]) expect(notes).toMatch(part);
+  });
+
+  test("a bucket the credentials cannot read, or in another region, says so", async () => {
+    const config = baseConfig({ function: [], resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1" }] });
+    for (const [status, message] of [[403, /cannot read it/], [301, /is not in eu-west-1/]] as const) {
+      const aws = fakeAws({ HeadBucketCommand: () => { throw Object.assign(new Error("x"), { name: "Other", $metadata: { httpStatusCode: status } }); } });
+      const state = emptyState();
+      const result = await adoptEntries(plan(config, state), state, aws.drivers, everything);
+      expect(result.failed[0]).toMatch(message);
+    }
+  });
+
+  test("one lookup failing does not stop the others from being recorded", async () => {
+    const config = baseConfig({ function: [fn({ permission: [], env: [] })], resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1" }] });
+    const aws = fakeAws({ ...existingFunction, HeadBucketCommand: () => { throw Object.assign(new Error("x"), { name: "Other", $metadata: { httpStatusCode: 403 } }); } });
+    const state = emptyState();
+    const result = await adoptEntries(plan(config, state), state, aws.drivers, everything);
+    expect(result.adopted).toEqual(["@aws.Lambda foo"]);
+    expect(result.failed).toHaveLength(1);
+  });
+});

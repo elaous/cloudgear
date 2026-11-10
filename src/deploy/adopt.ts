@@ -8,6 +8,10 @@ export interface AdoptResult {
   missing: string[];
   // Already in state, or a driver that cannot look things up.
   skipped: string[];
+  // Lookups that failed, with why; the others are still recorded.
+  failed: string[];
+  // What `apply` will change on what was found.
+  notes: string[];
 }
 
 // Buckets are only ever recorded, never changed (as `cloudgear import <bucket>` always did); everything else
@@ -18,7 +22,7 @@ const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
 // Looks each planned entry that is not in state yet up in the cloud and records it, in dependency order.
 export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean): Promise<AdoptResult> {
-  const result: AdoptResult = { adopted: [], missing: [], skipped: [] };
+  const result: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
   for (const action of actions) {
     if (!select(action)) continue;
     const entry = action.desired;
@@ -31,11 +35,18 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
       result.skipped.push(label(action));
       continue;
     }
-    const outputs = await driver.adopt(entry, { entry: (key) => state.entries[key] });
-    if (!outputs) {
+    let found;
+    try {
+      found = await driver.adopt(entry, { entry: (key) => state.entries[key] });
+    } catch (err) {
+      result.failed.push(`${label(action)}: ${(err as Error).message}`);
+      continue;
+    }
+    if (!found) {
       result.missing.push(label(action));
       continue;
     }
+    for (const note of found.notes ?? []) result.notes.push(`${label(action)}: ${note}`);
     const recordOnly = RECORD_ONLY.has(entry.type);
     state.entries[stateKey(entry)] = {
       kind: entry.kind,
@@ -43,9 +54,9 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
       name: entry.name,
       physical_name: entry.physical_name,
       ...(recordOnly ? { imported: true } : {}),
-      // An empty spec differs from the config, so the next plan shows an update that converges it.
-      spec: recordOnly ? { physical_name: entry.physical_name } : {},
-      outputs,
+      // The settings read from the cloud differ from the config, so the next plan shows an update that converges it.
+      spec: recordOnly ? { physical_name: entry.physical_name } : (found.spec ?? {}),
+      outputs: found.outputs,
       deps: entry.deps,
     };
     result.adopted.push(label(action));

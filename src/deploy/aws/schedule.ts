@@ -73,7 +73,7 @@ export function scheduleDriver(deps: ScheduleDeps): Driver {
     async adopt(entry) {
       try {
         const rule = await deps.events.send(new DescribeRuleCommand({ Name: entry.physical_name }));
-        return rule.Arn ? { rule_name: entry.physical_name, rule_arn: rule.Arn } : undefined;
+        return rule.Arn ? { outputs: { rule_name: entry.physical_name, rule_arn: rule.Arn } } : undefined;
       } catch (err) {
         if ((err as { name?: string }).name === "ResourceNotFoundException") return undefined;
         throw err;

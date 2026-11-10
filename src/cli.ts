@@ -30,7 +30,7 @@ Commands:
   import <type> <name>         The same, when several things share a name (for example @aws.Certificate www.example.com)
   import --all                 Adopt everything planned that already exists; the rest is created by apply
   invalidate [path...] [--domain <cdn>]  Clear a CDN's cache (default: everything)
-  destroy [--auto-approve]     Delete every managed resource (imported ones are only forgotten)
+  destroy [--auto-approve]     Delete every managed resource (imported buckets are only forgotten)
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
                                Store the secrets the app declares (NAME reads its value from stdin)
   secrets list                 Show which declared secrets are stored; values are never printed
@@ -241,6 +241,8 @@ async function main() {
 
       const typed = first?.startsWith("@") ? first : undefined;
       const name = typed ? second : first;
+      if (values.all && first) throw new Error("cloudgear import --all takes no name");
+      if (typed && !name) throw new Error(`Usage: cloudgear import ${typed} <name>`);
       if (!values.all && (typed ? third : second)) throw new Error("A physical id can only be given for a bucket from the config's resources; other things are found by name");
       const planned = plan(config, state);
       const select = (action: PlannedAction) => values.all || (action.name === name && (!typed || action.type === typed));
@@ -253,10 +255,15 @@ async function main() {
       const result = await adoptEntries(planned, state, deployers, select);
       saveState(statePath, state);
       for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
-      if (values.all) for (const item of result.missing) console.log(`cloudgear: not found in the cloud, apply will create it: ${item}`);
+      for (const note of result.notes) console.warn(`warning: ${note}`);
+      if (values.all) {
+        for (const item of result.missing) console.log(`cloudgear: not found in the cloud, apply will create it: ${item}`);
+        if (result.skipped.length) console.log(`cloudgear: skipped (already in state, or cannot be imported): ${result.skipped.join(", ")}`);
+      }
+      if (result.adopted.length) console.log("cloudgear: run `cloudgear plan`; imported things show as updates until `cloudgear apply` brings them in line with the config");
+      if (result.failed.length) throw new Error(`These could not be imported (the rest were saved):\n  ${result.failed.join("\n  ")}`);
       if (!values.all && result.missing.length) throw new Error(`${result.missing[0]} was not found in the cloud`);
       if (!values.all && result.skipped.length) throw new Error(`${result.skipped[0]} is already in state or cannot be imported`);
-      if (result.adopted.length) console.log("cloudgear: run `cloudgear plan`; imported things show as updates until `cloudgear apply` brings them in line with the config");
       return;
     }
     default:

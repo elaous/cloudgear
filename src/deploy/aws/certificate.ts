@@ -1,4 +1,4 @@
-import { DeleteCertificateCommand, DescribeCertificateCommand, RequestCertificateCommand } from "@aws-sdk/client-acm";
+import { DeleteCertificateCommand, DescribeCertificateCommand, ListCertificatesCommand, RequestCertificateCommand } from "@aws-sdk/client-acm";
 import type { DnsDriver } from "@cloudgear/dns";
 import type { SecretRefSpec } from "../../config/schema";
 import { PartialApplyError, type Driver } from "../apply";
@@ -25,6 +25,8 @@ export function sameTarget(a: string | undefined, b: string | undefined): boolea
   const normalize = (value: string | undefined) => (value ?? "").trim().toLowerCase().replace(/\.$/, "");
   return normalize(a) === normalize(b);
 }
+
+const KEY_TYPES = ["RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096", "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"];
 
 export function certificateDriver(deps: CertificateDeps): Driver {
   const regionOfArn = (arn: string) => arn.split(":")[3] || deps.region;
@@ -69,6 +71,34 @@ export function certificateDriver(deps: CertificateDeps): Driver {
   }
 
   return {
+    async adopt(entry) {
+      const spec = entry.spec as unknown as CertificateComparable;
+      const acm = deps.acm(spec.region || deps.region);
+      type Summary = { DomainName?: string; CertificateArn?: string; Status?: string; Type?: string; KeyAlgorithm?: string; NotAfter?: Date | string };
+      const matches: Summary[] = [];
+      let token: string | undefined;
+      do {
+        const page = await acm.send(new ListCertificatesCommand({ CertificateStatuses: ["ISSUED", "PENDING_VALIDATION"], Includes: { keyTypes: KEY_TYPES as never }, NextToken: token }));
+        for (const summary of (page.CertificateSummaryList ?? []) as Summary[]) {
+          if (summary.DomainName === spec.domain && summary.CertificateArn) matches.push(summary);
+        }
+        token = page.NextToken;
+      } while (token);
+      const issued = matches.filter((m) => m.Status === "ISSUED").sort((a, b) => new Date(b.NotAfter ?? 0).getTime() - new Date(a.NotAfter ?? 0).getTime());
+      const chosen = issued[0] ?? matches[0];
+      if (!chosen?.CertificateArn) return undefined;
+      const notes: string[] = [];
+      if (matches.length > 1) notes.push(`${matches.length} certificates exist for ${spec.domain}; using ${chosen.CertificateArn}${issued.length ? ", the issued one that expires last" : ""}`);
+      const external = chosen.Type !== undefined && chosen.Type !== "AMAZON_ISSUED";
+      if (external) notes.push(`it is an ${chosen.Type} certificate, not one ACM validates by DNS; cloudgear will use it as it is`);
+      const algorithm = chosen.KeyAlgorithm;
+      return {
+        outputs: { arn: chosen.CertificateArn, ...(external ? { validated: "externally" } : {}) },
+        ...(algorithm && algorithm !== "RSA_2048" ? { spec: { options: { key_algorithm: algorithm } } } : {}),
+        notes,
+      };
+    },
+
     async create(entry, context) {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};
@@ -103,6 +133,8 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       if (algorithm(current.spec) !== algorithm(entry.spec)) {
         throw new Error(`Certificate ${entry.physical_name} cannot change key_algorithm; destroy it and apply again`);
       }
+      // Imported or externally validated certificates have no DNS validation record to wait for.
+      if (current.outputs.validated === "externally") return { ...current.outputs };
       try {
         return await validate(current.outputs.arn, { ...current.outputs }, entry.spec as unknown as CertificateComparable);
       } catch (err) {

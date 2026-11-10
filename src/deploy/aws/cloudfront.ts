@@ -13,6 +13,7 @@ import {
   GetDistributionCommand,
   GetDistributionConfigCommand,
   GetOriginAccessControlCommand,
+  ListDistributionsCommand,
   ListOriginAccessControlsCommand,
   PublishFunctionCommand,
   UpdateDistributionCommand,
@@ -303,6 +304,23 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 
   return {
+    async adopt(entry) {
+      const spec = entry.spec as unknown as CdnComparable;
+      let marker: string | undefined;
+      do {
+        const list = await deps.cloudfront.send(new ListDistributionsCommand({ Marker: marker }));
+        const found = (list.DistributionList?.Items ?? []).find((item: { Aliases?: { Items?: string[] } }) => item.Aliases?.Items?.includes(spec.domain));
+        if (found) {
+          return {
+            outputs: { id: found.Id, arn: found.ARN, domain_name: found.DomainName, url: `https://${found.DomainName}`, status: found.Status === "Deployed" ? "Deployed" : "InProgress" },
+            notes: await overwritten(found.Id),
+          };
+        }
+        marker = list.DistributionList?.IsTruncated ? list.DistributionList.NextMarker : undefined;
+      } while (marker);
+      return undefined;
+    },
+
     async create(entry, context) {
       const outputs: Record<string, string> = {};
       try {
@@ -354,6 +372,21 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       if (spec.bucket) await removeBucketStatements(spec as CdnComparable);
     },
   };
+
+  // `apply` rebuilds the whole distribution config; these are the settings of an existing one it would not keep.
+  async function overwritten(id: string): Promise<string[]> {
+    const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
+    const config = (got.DistributionConfig ?? {}) as Record<string, any>;
+    const notes: string[] = [];
+    if (config.WebACLId) notes.push(`its web ACL (${config.WebACLId}) will be detached`);
+    if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
+    if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
+    if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");
+    if (config.CacheBehaviors?.Quantity) notes.push(`its ${config.CacheBehaviors.Quantity} path behavior(s) will be replaced by the ones from the config`);
+    if (config.Origins?.Quantity) notes.push(`its ${config.Origins.Quantity} origin(s) will be replaced by the ones from the config`);
+    if (config.PriceClass && config.PriceClass !== "PriceClass_All") notes.push(`its price class (${config.PriceClass}) will be reset unless the config sets price_class`);
+    return notes;
+  }
 
   async function removeDistribution(id: string) {
     let etag: string;

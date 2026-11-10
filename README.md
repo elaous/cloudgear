@@ -1132,11 +1132,59 @@ regions: changing `region` on an existing bucket fails the apply.
 
 ## `cloudgear import`
 
-`cloudgear import myblob my-existing-bucket` records a config resource as
-already existing under the given physical name (default: its configured
-name). Imported resources are never created or deleted (`destroy` only
-forgets them), and functions that use them get that physical name in their
-env and IAM policy.
+`cloudgear import` adopts things that already exist in the cloud into state, so
+`apply` does not try to create them again:
+
+```sh
+cloudgear import web.tranquilo.art                 # a bucket from the config's resources
+cloudgear import api-items                         # a function, by name
+cloudgear import @aws.Certificate www.example.com  # when several things share a name
+cloudgear import --all                             # everything planned that already exists
+```
+
+- A bucket is only recorded (optionally under another physical name:
+  `cloudgear import myblob my-existing-bucket`). Imported buckets are never
+  created, changed or deleted (`destroy` only forgets them), and functions that
+  use them get that physical name in their env and IAM policy. A name that is
+  also a bucket's takes the bucket; use `<type> <name>` for the others.
+- Functions (found by their name), ACM certificates (by domain, in the
+  certificate's region; an issued one wins over a pending one), CloudFront
+  distributions (by alias hostname) and schedule rules (by name) are looked up
+  in AWS and their ARNs, role, URL and ids recorded. They are managed from then
+  on: the next `cloudgear plan` shows them as updates, and `apply` brings them in
+  line with the config without creating them again. `destroy` deletes them,
+  except a function's IAM role when cloudgear did not create it (an imported
+  function may use a shared one); the inline policy cloudgear adds to that
+  role is removed.
+- **Read the warnings.** `apply` rebuilds an imported distribution's config from
+  yours, so `import` lists what it would drop: a web ACL, access logging,
+  custom error responses, a geo restriction, path behaviors and origins that are
+  not in the config, a non-default price class. An imported function's code is
+  replaced by the bundle, its handler becomes `index.handler`, and its
+  environment variables that are not in the config are removed. `import` only
+  warns; look at `cloudgear plan` and your console before `apply`. A Route 53
+  alias record for the hostname is not seen by the DNS check (only CNAMEs are).
+  Tags are not added to imported things until they are recreated, and a
+  container-image function cannot be imported.
+- The certificate search covers every key type and takes the issued one that
+  expires last; an IMPORTED certificate is used as it is, without waiting for DNS
+  validation. Reserved concurrency and the URL's auth type are read from the
+  function, so the plan changes only what differs.
+- Functions imported with a role of their own keep a policy named
+  `cloudgear-<function>` on it, so several functions on one role do not
+  overwrite each other, and `destroy` removes only that policy and not the role.
+- `import --all` records everything it finds even when one lookup fails, then
+  lists the failures and exits 1. `destroy` before the first `apply` deletes an
+  imported distribution without removing its DNS record or bucket-policy
+  statement, which `apply` records; run `apply` first.
+- With `--all`, whatever is not found is left for `apply` to create. A thing
+  that has no import yet (API Gateway domains, event buses and rules) is skipped.
+- Import changes only the state file. It needs read access to the service it
+  looks in (`lambda:GetFunction`, `acm:ListCertificates`,
+  `cloudfront:ListDistributions`, `events:DescribeRule`, `s3:ListBucket`), and
+  your credentials, like `apply`.
+- A function that had its own role keeps it, and `apply` adds the inline policy
+  cloudgear manages to that role; check the role's other policies first.
 
 ## Code map
 

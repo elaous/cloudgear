@@ -80,10 +80,10 @@ describe("cloudgear CLI", () => {
     expect(res.err).toMatch(/already managed by cloudgear/);
   });
 
-  test("import rejects unknown names and functions", () => {
-    const res = run("import", "foo");
+  test("import rejects names that are not in the config", () => {
+    const res = run("import", "nothing-like-this");
     expect(res.code).toBe(1);
-    expect(res.err).toMatch(/No resource named "foo".*functions cannot be imported/);
+    expect(res.err).toMatch(/Nothing named "nothing-like-this" is in .*run `cloudgear plan` to see the names/);
   });
 
   test("unknown commands fail with usage", () => {
@@ -126,6 +126,19 @@ describe("cloudgear CLI with a CDN", () => {
     const res = run("invalidate");
     expect(res.code).toBe(1);
     expect(res.err).toMatch(/No CDN has been deployed; run `cloudgear apply` first/);
+  });
+
+  test("import needs a name or --all, and says when a name is ambiguous or unknown", () => {
+    expect(run("import").err).toMatch(/Usage: cloudgear import/);
+    const unknown = run("import", "nothing-like-this");
+    expect(unknown.code).toBe(1);
+    expect(unknown.err).toMatch(/Nothing named "nothing-like-this"/);
+    const ambiguous = run("import", "www.example.com");
+    expect(ambiguous.code).toBe(1);
+    expect(ambiguous.err).toMatch(/names several things \(@aws\.Certificate, @aws\.CloudFront\); say which: cloudgear import <type> www\.example\.com/);
+    expect(run("import", "@aws.Certificate", "www.example.com", "an-id").err).toMatch(/physical id can only be given for a bucket/);
+    expect(run("import", "@aws.Certificate").err).toMatch(/Usage: cloudgear import @aws\.Certificate <name>/);
+    expect(run("import", "--all", "www.example.com").err).toMatch(/import --all takes no name/);
   });
 
   test("invalidate rejects paths without a leading slash", () => {

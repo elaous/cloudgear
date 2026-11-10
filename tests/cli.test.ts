@@ -80,10 +80,10 @@ describe("cloudgear CLI", () => {
     expect(res.err).toMatch(/already managed by cloudgear/);
   });
 
-  test("import rejects unknown names and functions", () => {
-    const res = run("import", "foo");
+  test("import rejects names that are not in the config", () => {
+    const res = run("import", "nothing-like-this");
     expect(res.code).toBe(1);
-    expect(res.err).toMatch(/No resource named "foo".*functions cannot be imported/);
+    expect(res.err).toMatch(/Nothing named "nothing-like-this" is in .*run `cloudgear plan` to see the names/);
   });
 
   test("unknown commands fail with usage", () => {

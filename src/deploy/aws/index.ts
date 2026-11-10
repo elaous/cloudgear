@@ -363,8 +363,13 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         }
       },
 
-      async adopt(entry) {
+      async adopt(entry, _context, hint) {
         const spec = entry.spec as unknown as FunctionComparable;
+        if (hint?.arn) {
+          const named = /^arn:aws:lambda:[a-z0-9-]+:\d+:function:([^:]+)(?::.+)?$/.exec(hint.arn)?.[1];
+          if (!named) throw new Error(`"${hint.arn}" is not a Lambda function ARN`);
+          if (named !== entry.physical_name) throw new Error(`${hint.arn} is the function "${named}", but the config deploys "${entry.physical_name}"`);
+        }
         try {
           const found = await lambda.send(new GetFunctionCommand({ FunctionName: entry.physical_name }));
           const config = found.Configuration as { FunctionArn?: string; Role?: string; PackageType?: string; Handler?: string; Environment?: { Variables?: Record<string, string> } } | undefined;

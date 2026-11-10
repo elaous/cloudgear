@@ -70,7 +70,12 @@ export function scheduleDriver(deps: ScheduleDeps): Driver {
   const functionArn = (spec: ScheduleComparable, context: Parameters<Driver["create"]>[1]) => context.entry(spec.function_key)?.outputs.arn;
 
   return {
-    async adopt(entry) {
+    async adopt(entry, _context, hint) {
+      if (hint?.arn) {
+        const named = /^arn:aws:events:[a-z0-9-]+:\d+:rule\/(?:[^/]+\/)?(.+)$/.exec(hint.arn)?.[1];
+        if (!named) throw new Error(`"${hint.arn}" is not an EventBridge rule ARN`);
+        if (named !== entry.physical_name) throw new Error(`${hint.arn} is the rule "${named}", but the config deploys "${entry.physical_name}"`);
+      }
       try {
         const rule = await deps.events.send(new DescribeRuleCommand({ Name: entry.physical_name }));
         return rule.Arn ? { outputs: { rule_name: entry.physical_name, rule_arn: rule.Arn } } : undefined;

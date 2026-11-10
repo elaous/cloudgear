@@ -141,6 +141,17 @@ describe("cloudgear CLI with a CDN", () => {
     expect(run("import", "--all", "www.example.com").err).toMatch(/import --all takes no name/);
   });
 
+  test("a bucket can be imported by ARN, and --arn needs one thing", () => {
+    const stateFile = path.join(dir, ".cloudgear", "state.json");
+    fs.rmSync(stateFile, { force: true });
+    expect(run("import", "my-site", "arn:aws:s3:::existing-bucket/some/key").out).toMatch(/imported @aws\.S3 my-site as "existing-bucket"/);
+    expect(JSON.parse(fs.readFileSync(stateFile, "utf8")).entries["@aws.S3.my-site"]).toMatchObject({ physical_name: "existing-bucket", imported: true });
+    expect(run("import", "my-site", "--arn", "arn:aws:s3:::second").out).toMatch(/as "second"/);
+    expect(run("import", "my-site", "arn:aws:acm:us-east-1:1:certificate/x").err).toMatch(/is not an S3 bucket ARN/);
+    expect(run("import", "--all", "--arn", "arn:aws:s3:::x").err).toMatch(/--arn names one thing/);
+    fs.rmSync(stateFile, { force: true });
+  });
+
   test("invalidate rejects paths without a leading slash", () => {
     const stateDir = path.join(dir, ".cloudgear");
     fs.mkdirSync(stateDir, { recursive: true });

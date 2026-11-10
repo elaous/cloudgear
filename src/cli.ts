@@ -46,6 +46,7 @@ Options:
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
   --tag <key=value>  Extra tag on created resources, repeatable (apply only)
   --domain <domain>  Which CDN to invalidate when the app has several
+  --arn <arn>        Import exactly this certificate, distribution, function, rule or bucket (import only)
   --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
@@ -69,6 +70,7 @@ async function main() {
       "allow-unignored": { type: "boolean", default: false },
       "skip-env-check": { type: "boolean", default: false },
       domain: { type: "string" },
+      arn: { type: "string" },
       path: { type: "string" },
       all: { type: "boolean", default: false },
       "auto-approve": { type: "boolean", default: false },
@@ -224,7 +226,8 @@ async function main() {
         if (existing && !existing.imported) {
           throw new Error(`${bucket.type} ${first} is already managed by cloudgear; destroy it before importing another`);
         }
-        const physical = second ?? bucket.physical_name;
+        const given = values.arn ?? second;
+        const physical = given?.startsWith("arn:") ? bucketOfArn(given) : (given ?? bucket.physical_name);
         state.entries[stateKey(bucket)] = {
           kind: "resource",
           type: bucket.type,
@@ -242,6 +245,7 @@ async function main() {
       const typed = first?.startsWith("@") ? first : undefined;
       const name = typed ? second : first;
       if (values.all && first) throw new Error("cloudgear import --all takes no name");
+      if (values.all && values.arn) throw new Error("--arn names one thing; it cannot be used with --all");
       if (typed && !name) throw new Error(`Usage: cloudgear import ${typed} <name>`);
       if (!values.all && (typed ? third : second)) throw new Error("A physical id can only be given for a bucket from the config's resources; other things are found by name");
       const planned = plan(config, state);
@@ -252,7 +256,7 @@ async function main() {
         if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}`);
       }
       const deployers = await drivers(chosen, config, configPath, values.region, deployTags(config, configPath, values));
-      const result = await adoptEntries(planned, state, deployers, select);
+      const result = await adoptEntries(planned, state, deployers, select, values.arn ? { arn: values.arn } : undefined);
       saveState(statePath, state);
       for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
       for (const note of result.notes) console.warn(`warning: ${note}`);
@@ -269,6 +273,13 @@ async function main() {
     default:
       throw new Error(`Unknown command "${command}"\n\n${USAGE}`);
   }
+}
+
+// `arn:aws:s3:::my-bucket` (an object ARN `.../key` is cut back to the bucket).
+function bucketOfArn(arn: string): string {
+  const name = /^arn:aws:s3:::([^/]+)/.exec(arn)?.[1];
+  if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN`);
+  return name;
 }
 
 function writeEndpoints(config: CloudgearConfig, state: State, workDir: string): void {

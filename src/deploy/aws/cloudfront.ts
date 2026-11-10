@@ -304,18 +304,31 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 
   return {
-    async adopt(entry) {
+    async adopt(entry, _context, hint) {
       const spec = entry.spec as unknown as CdnComparable;
+      const found = (item: { Id: string; ARN: string; DomainName: string; Status?: string }) => ({
+        outputs: { id: item.Id, arn: item.ARN, domain_name: item.DomainName, url: `https://${item.DomainName}`, status: item.Status === "Deployed" ? "Deployed" : "InProgress" },
+      });
+      if (hint?.arn) {
+        const id = /^arn:aws:cloudfront::\d+:distribution\/([A-Z0-9]+)$/.exec(hint.arn)?.[1];
+        if (!id) throw new Error(`"${hint.arn}" is not a CloudFront distribution ARN`);
+        let got;
+        try {
+          got = await deps.cloudfront.send(new GetDistributionCommand({ Id: id }));
+        } catch (err) {
+          if ((err as { name?: string }).name === "NoSuchDistribution") return undefined;
+          throw err;
+        }
+        const distribution = got.Distribution as { Id: string; ARN: string; DomainName: string; Status?: string; DistributionConfig?: { Aliases?: { Items?: string[] } } };
+        const aliases = distribution.DistributionConfig?.Aliases?.Items ?? [];
+        if (!aliases.includes(spec.domain)) throw new Error(`${hint.arn} does not answer to ${spec.domain} (its aliases: ${aliases.join(", ") || "none"})`);
+        return { ...found({ ...distribution, ARN: hint.arn }), notes: await overwritten(id) };
+      }
       let marker: string | undefined;
       do {
         const list = await deps.cloudfront.send(new ListDistributionsCommand({ Marker: marker }));
-        const found = (list.DistributionList?.Items ?? []).find((item: { Aliases?: { Items?: string[] } }) => item.Aliases?.Items?.includes(spec.domain));
-        if (found) {
-          return {
-            outputs: { id: found.Id, arn: found.ARN, domain_name: found.DomainName, url: `https://${found.DomainName}`, status: found.Status === "Deployed" ? "Deployed" : "InProgress" },
-            notes: await overwritten(found.Id),
-          };
-        }
+        const item = (list.DistributionList?.Items ?? []).find((candidate: { Aliases?: { Items?: string[] } }) => candidate.Aliases?.Items?.includes(spec.domain));
+        if (item) return { ...found(item), notes: await overwritten(item.Id) };
         marker = list.DistributionList?.IsTruncated ? list.DistributionList.NextMarker : undefined;
       } while (marker);
       return undefined;

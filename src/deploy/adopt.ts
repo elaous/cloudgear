@@ -1,4 +1,4 @@
-import type { Drivers } from "./apply";
+import type { AdoptHint, Drivers } from "./apply";
 import type { PlannedAction } from "./plan";
 import { stateKey, type State } from "./state";
 
@@ -21,7 +21,7 @@ const RECORD_ONLY = new Set(["@aws.S3"]);
 const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
 // Looks each planned entry that is not in state yet up in the cloud and records it, in dependency order.
-export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean): Promise<AdoptResult> {
+export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean, hint?: AdoptHint): Promise<AdoptResult> {
   const result: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
   for (const action of actions) {
     if (!select(action)) continue;
@@ -37,7 +37,7 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
     }
     let found;
     try {
-      found = await driver.adopt(entry, { entry: (key) => state.entries[key] });
+      found = await driver.adopt(entry, { entry: (key) => state.entries[key] }, hint);
     } catch (err) {
       result.failed.push(`${label(action)}: ${(err as Error).message}`);
       continue;

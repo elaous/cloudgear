@@ -18,7 +18,12 @@ export interface Driver {
   // Looks the entry up in the cloud for `cloudgear import`, or returns undefined when it does not exist. A driver
   // without it cannot import. `outputs` are what `create` would have recorded; `spec` the settings read from the
   // cloud that the next plan must compare against; `notes` what `apply` will overwrite, for the user to read.
-  adopt?(entry: DesiredEntry, context: DriverContext): Promise<Adopted | undefined>;
+  adopt?(entry: DesiredEntry, context: DriverContext, hint?: AdoptHint): Promise<Adopted | undefined>;
+}
+
+// What the user said about which one to adopt, when the name alone is not enough.
+export interface AdoptHint {
+  arn?: string;
 }
 
 export interface Adopted {

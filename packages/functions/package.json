@@ -15,6 +15,6 @@
     "@cloudgear/debug": "workspace:*",
     "@smithy/protocol-http": "^5.6.2",
     "@smithy/signature-v4": "^5.7.4",
-    "jose": "^6.2.13"
+    "jose": "^6.2.15"
   }
 }

@@ -36,7 +36,7 @@ import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
-import { CreateBucketCommand, DeleteBucketCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { DriverContext, Drivers } from "../apply";
 import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
@@ -383,7 +383,21 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (status === 301 || e.name === "PermanentRedirect") throw new Error(`bucket "${entry.physical_name}" is not in ${region}; set its region with new BlobStore(..., { region })`);
           throw err;
         }
-        return { outputs: { arn: `arn:aws:s3:::${entry.physical_name}`, region } };
+        const adopted: { outputs: Record<string, string>; files?: { path: string; content: string }[]; notes: string[] } = { outputs: { arn: `arn:aws:s3:::${entry.physical_name}`, region }, notes: [] };
+        if (hint?.exportPolicies) {
+          try {
+            const got = await s3For(region).send(new GetBucketPolicyCommand({ Bucket: entry.physical_name }));
+            const parsed = typeof got.Policy === "string" ? JSON.parse(got.Policy) : got.Policy;
+            const statements = [parsed.Statement ?? []].flat().filter((s: { Sid?: string }) => !s.Sid?.startsWith("cloudgear-cdn-"));
+            const document = { ...parsed, Statement: statements };
+            adopted.files = [{ path: `buckets/${entry.physical_name}/policy.json`, content: `${JSON.stringify(document, null, 2)}\n` }];
+            adopted.notes.push(`its bucket policy was exported without cloudgear's own CDN statements`);
+          } catch (err) {
+            const name = (err as { name?: string }).name;
+            adopted.notes.push(name === "NoSuchBucketPolicy" ? "it has no bucket policy to export" : `its bucket policy could not be exported (${(err as Error).message})`);
+          }
+        }
+        return adopted;
       },
       async update(entry, current) {
         const before = (current.spec.region as string | undefined) || current.outputs.region || options.region;

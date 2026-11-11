@@ -24,7 +24,7 @@ export function planPolicyFiles(dir: string, files: PolicyFile[]): { target: str
 export function writePolicyFiles(dir: string | undefined, files: PolicyFile[], log: (line: string) => void = console.log): void {
   if (!dir) return;
   if (!files.length) {
-    log("cloudgear: no policies were exported (only the role of an imported function has any)");
+    log("cloudgear: no policies were exported (only the roles of imported functions and imported buckets have any)");
     return;
   }
   const planned = planPolicyFiles(dir, files);

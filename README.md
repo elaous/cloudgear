@@ -1337,6 +1337,9 @@ cloudgear import --all                             # everything planned that alr
   alias record for the hostname is not seen by the DNS check (only CNAMEs are).
   Tags are not added to imported things until they are recreated, and a
   container-image function cannot be imported.
+- An imported certificate that is already issued needs nothing: `apply` reads its
+  status and leaves it alone, without touching DNS. One still waiting for
+  validation is validated as before (the CNAME is written and polled).
 - The certificate search covers every key type and takes the issued one that
   expires last; an IMPORTED certificate is used as it is, without waiting for DNS
   validation. Reserved concurrency and the URL's auth type are read from the
@@ -1348,6 +1351,10 @@ cloudgear import --all                             # everything planned that alr
   lists the failures and exits 1. `destroy` before the first `apply` deletes an
   imported distribution without removing its DNS record or bucket-policy
   statement, which `apply` records; run `apply` first.
+- With `--write-policies <dir>` an imported bucket's policy goes to
+  `<dir>/buckets/<bucket>/policy.json` (a bucket without one is noted; a policy the
+  credentials cannot read is a warning, not a failure; it needs `s3:GetBucketPolicy`).
+  cloudgear adds only its own statement for a CDN to that policy; the rest is left as it is.
 - `--write-policies <dir>` also writes the IAM policies of an imported function's
   role as JSON files, so what the function may do is in the repository and in
   review: `<dir>/<role>/inline-<policy>.json` for each inline policy,

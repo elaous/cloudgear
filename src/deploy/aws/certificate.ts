@@ -153,6 +153,11 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       }
       // Imported certificates have no validation record to wait for.
       if (current.outputs.validated === "externally") return { ...current.outputs };
+      // An issued certificate is done: nothing to validate, no DNS to touch.
+      if ((await describe(current.outputs.arn))?.Status === "ISSUED") {
+        deps.log(`certificate ${entry.physical_name} is issued; nothing to do`);
+        return { ...current.outputs };
+      }
       try {
         return await validate(current.outputs.arn, { ...current.outputs }, entry.spec as unknown as CertificateComparable);
       } catch (err) {

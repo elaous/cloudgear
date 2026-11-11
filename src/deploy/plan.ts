@@ -100,12 +100,14 @@ export interface FunctionComparable {
   invokers: string[];
   permissions: { type: string; physical_name: string; path: string; actions: string[] }[];
   secrets?: SecretBindingSpec[];
+  // Inline policies declared with `Policy`, by name.
+  policies?: { name: string; document: string }[];
 }
 
 const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   code: ["code"],
   config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency", "options"],
-  permissions: ["permissions", "secrets"],
+  permissions: ["permissions", "secrets", "policies"],
   auth: ["auth", "scheduled_only"],
   invokers: ["invokers"],
 };
@@ -158,6 +160,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         path: p.path,
         actions: [...p.action].sort(),
       })),
+      ...(fn.policy?.length ? { policies: [...fn.policy].sort((a, b) => a.name.localeCompare(b.name)) } : {}),
       ...(fn.secret?.length ? { secrets: [...fn.secret].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) } : {}),
     };
     entries.push({

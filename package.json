@@ -47,6 +47,7 @@
     "@cloudgear/dns": "workspace:*",
     "@cloudgear/events": "workspace:*",
     "@cloudgear/functions": "workspace:*",
+    "@cloudgear/iam": "workspace:*",
     "@cloudgear/secrets": "workspace:*",
     "ts-morph": "^24.0.0"
   },

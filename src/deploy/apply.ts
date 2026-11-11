@@ -8,6 +8,8 @@ import { stateKey } from "./state";
 
 export interface DriverContext {
   entry(key: string): StateEntry | undefined;
+  // Everything in state now, for a driver that must know what else uses a shared thing.
+  entries?(): StateEntry[];
 }
 
 export interface Driver {
@@ -63,7 +65,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
     if (!driver) throw new Error(`No driver for resource type "${type}"`);
     return driver;
   };
-  const context: DriverContext = { entry: (key) => state.entries[key] };
+  const context: DriverContext = { entry: (key) => state.entries[key], entries: () => Object.values(state.entries) };
   const record = (entry: DesiredEntry, outputs: Record<string, string>, previous?: StateEntry) => {
     state.entries[stateKey(entry)] = {
       kind: entry.kind,

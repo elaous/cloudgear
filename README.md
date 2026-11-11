@@ -1216,6 +1216,54 @@ elsewhere; the CDN then reads it from that region. Both options MUST be string
 literals, since `cloudgear generate` reads them. A bucket cannot move between
 regions: changing `region` on an existing bucket fails the apply.
 
+## Policies: `@cloudgear/iam`
+
+`cloudgear` writes one inline policy on each function's role, from the permissions
+it infers (blob stores, secrets, event buses). Anything else the function may do is
+declared with a `Policy`, from a JSON file or an object literal:
+
+```ts
+import { FunctionRouter } from "@cloudgear/functions";
+import { Policy } from "@cloudgear/iam";
+import readBucket from "./policies/read-bucket.json";   // an exported policy, see `cloudgear import --write-policies`
+
+const reader = new Policy("aws", { name: "read-bucket", document: readBucket });
+const queue = new Policy("aws", {
+  name: "send-queue",
+  document: { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sqs:SendMessage", Resource: "arn:aws:sqs:us-east-1:111122223333:jobs" }] },
+});
+
+new FunctionRouter("aws", { policies: queue }).url("GET", "/items", items, { policies: [reader] });
+```
+
+- `policies` takes one `Policy` or an array, on a route or on the router (for every
+  function). A `Policy` MUST be assigned to a variable. Its `name` and `document`
+  MUST be literals: an object literal, or the default import of a relative `.json`
+  file. `generate` reads the file; nothing is run. Names are 1 to 128 of
+  `A-Za-z0-9_+=,.@-`, unique, and MUST NOT start with `cloudgear`; a document needs
+  `Version`, and `Statement` entries with `Effect`, an action and a resource, in at
+  most 10,240 characters.
+- On AWS each is put on the function's role as an inline policy under its own name,
+  next to the one cloudgear infers, so the function gets the union. A changed
+  document is a `permissions` update in `plan`; a policy taken out of the code is
+  removed from the role; `destroy` removes them, even from a role cloudgear leaves in
+  place (an imported function's). A function's role has to stay within IAM's 10,240
+  characters of inline policy in all.
+- `generate` warns about an `Allow` statement with `"Action": "*"` or
+  `"Resource": "*"`: that is the line to read twice in a review.
+- Rules checked before `apply`: `Version` is `"2012-10-17"` (the old version
+  turns policy variables off), no `Principal`, a unique string `Sid`, a non-empty
+  `Action` and `Resource`, and a `Condition` that is an object. The declared
+  policies and the inferred one together MUST stay under IAM's 10,240 characters
+  for the role; `apply` refuses before it puts any of them when they do not. On
+  an imported role that is shared by several functions, a policy name that more
+  than one of them declares stays on the role until the last of them drops it,
+  and the role may carry other policies that count towards that limit.
+- Only inline policies, for now: a customer-managed policy is not a `Policy`.
+  Naming a policy after one the role already has (for example after
+  `cloudgear import --write-policies`) makes cloudgear take that policy over: the next `apply`
+  overwrites it with the document in your repository.
+
 ## `cloudgear import`
 
 `cloudgear import` adopts things that already exist in the cloud into state, so

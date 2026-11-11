@@ -1207,7 +1207,13 @@ cloudgear import --all                             # everything planned that alr
   `<dir>/<role>/managed-<policy>.json` for each customer-managed policy attached,
   and `<dir>/<role>/index.json` listing both and the AWS-managed policies
   attached by ARN. The policies cloudgear itself writes (`cloudgear`,
-  `cloudgear-<function>`) are skipped. It only reads: cloudgear does not manage
+  `cloudgear-<function>`, on the role cloudgear made) are skipped. A role's
+  permissions boundary and trust policy are not exported, so the files can
+  show more than the function may do. Export can be run again for a function
+  that is already imported; files are checked together before any is written,
+  and each says whether it was written, overwritten or unchanged (the directory
+  is not cleaned of policies since removed from the role). If IAM refuses a read,
+  the function is still imported and a warning says why. It only reads: cloudgear does not manage
   these policies, and the function keeps them. It needs `iam:ListRolePolicies`,
   `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:GetPolicy` and
   `iam:GetPolicyVersion`. Files are written only under `<dir>`, and policies can

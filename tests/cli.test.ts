@@ -141,11 +141,11 @@ describe("cloudgear CLI with a CDN", () => {
     expect(run("import", "--all", "www.example.com").err).toMatch(/import --all takes no name/);
   });
 
-  test("importing a bucket accepts --write-policies and writes nothing", () => {
+  test("--write-policies is for functions: a bucket and an empty value are refused", () => {
     const stateFile = path.join(dir, ".cloudgear", "state.json");
     fs.rmSync(stateFile, { force: true });
-    const res = run("import", "my-site", "--write-policies", path.join(dir, "policies"));
-    expect(res.code).toBe(0);
+    expect(run("import", "my-site", "--write-policies", path.join(dir, "policies")).err).toMatch(/a bucket has none/);
+    expect(run("import", "my-site", "--write-policies", "").err).toMatch(/--write-policies needs a directory/);
     expect(fs.existsSync(path.join(dir, "policies"))).toBe(false);
     fs.rmSync(stateFile, { force: true });
   });

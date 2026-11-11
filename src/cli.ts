@@ -17,6 +17,7 @@ import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
 import { adoptByArn, adoptEntries, typeOfArn } from "./deploy/adopt";
 import { parseArn } from "./deploy/aws/arn";
+import { planPolicyFiles, writePolicyFiles } from "./policyfiles";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
@@ -222,6 +223,18 @@ async function main() {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
       const [first, second, third] = args;
+      const policyDir = values["write-policies"];
+      if (policyDir !== undefined && !policyDir.trim()) throw new Error("--write-policies needs a directory");
+      const policyErrors: string[] = [];
+      // After the import is saved and reported: a file that cannot be written must not hide that the import worked.
+      const writePoliciesAfter = (files: { path: string; content: string }[]) => {
+        try {
+          if (policyDir && files.length) planPolicyFiles(policyDir, files);
+          writePolicyFiles(policyDir, files);
+        } catch (err) {
+          policyErrors.push((err as Error).message);
+        }
+      };
       if (!values.all && !first && !values.arn) throw new Error("Usage: cloudgear import <name> [physical-id] | cloudgear import <type> <name> | cloudgear import --arn <arn> | cloudgear import --all");
       if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
       const arnType = values.arn ? typeOfArn(values.arn) : undefined;
@@ -236,6 +249,7 @@ async function main() {
         if (existing && !existing.imported) {
           throw new Error(`${bucket.type} ${bucket.name} is already managed by cloudgear; destroy it before importing another`);
         }
+        if (policyDir) throw new Error("--write-policies exports the policies of a function's role; a bucket has none");
         if (values.arn && second) throw new Error("Give the bucket's ARN with --arn or as the second argument, not both");
         if (third) throw new Error("Usage: cloudgear import <bucket> [physical-id | arn]");
         if (first && arnType && arnType !== "@aws.S3") throw new Error(`${values.arn} is not a bucket ARN, but "${first}" is a bucket`);
@@ -267,11 +281,12 @@ async function main() {
         const deployers = await drivers(planned.filter((a) => a.type === arnType), config, configPath, values.region, deployTags(config, configPath, values));
         const found = await adoptByArn(planned, state, deployers, arnType!, values.arn, !!values["write-policies"]);
         saveState(statePath, state);
-        writePolicyFiles(values["write-policies"], found.files);
         for (const item of found.adopted) console.log(`cloudgear: imported ${item}`);
         for (const note of found.notes) console.warn(`warning: ${note}`);
-        if (!found.adopted.length) throw new Error(`No ${arnType} in ${values.config} fits ${values.arn}${found.failed.length ? `:\n  ${found.failed.join("\n  ")}` : ""}`);
+        writePoliciesAfter(found.files);
+        if (!found.adopted.length && !found.files.length) throw new Error(`No ${arnType} in ${values.config} fits ${values.arn}${found.failed.length ? `:\n  ${found.failed.join("\n  ")}` : ""}`);
         console.log("cloudgear: run `cloudgear plan`; imported things show as updates until `cloudgear apply` brings them in line with the config");
+        if (policyErrors.length) throw new Error(`The policy files could not be written: ${policyErrors.join("; ")}`);
         return;
       }
       const wantedType = typed ?? arnType;
@@ -285,17 +300,18 @@ async function main() {
       const hint = values.arn || values["write-policies"] ? { ...(values.arn ? { arn: values.arn } : {}), ...(values["write-policies"] ? { exportPolicies: true } : {}) } : undefined;
       const result = await adoptEntries(planned, state, deployers, select, hint);
       saveState(statePath, state);
-      writePolicyFiles(values["write-policies"], result.files);
       for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
       for (const note of result.notes) console.warn(`warning: ${note}`);
+      writePoliciesAfter(result.files);
       if (values.all) {
         for (const item of result.missing) console.log(`cloudgear: not found in the cloud, apply will create it: ${item}`);
         if (result.skipped.length) console.log(`cloudgear: skipped (already in state, or cannot be imported): ${result.skipped.join(", ")}`);
       }
       if (result.adopted.length) console.log("cloudgear: run `cloudgear plan`; imported things show as updates until `cloudgear apply` brings them in line with the config");
+      if (policyErrors.length) throw new Error(`The policy files could not be written: ${policyErrors.join("; ")}`);
       if (result.failed.length) throw new Error(`These could not be imported (the rest were saved):\n  ${result.failed.join("\n  ")}`);
       if (!values.all && result.missing.length) throw new Error(`${result.missing[0]} was not found in the cloud`);
-      if (!values.all && result.skipped.length) throw new Error(`${result.skipped[0]} is already in state or cannot be imported`);
+      if (!values.all && result.skipped.length && !result.files.length) throw new Error(`${result.skipped[0]} is already in state or cannot be imported`);
       return;
     }
     default:
@@ -310,23 +326,6 @@ function bucketOfArn(arn: string, bucketOnly = false): string {
   const name = parsed?.service === "s3" && !parsed.region ? /^([^/]+)/.exec(parsed.resource)?.[1] : undefined;
   if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN${parsed?.resource.startsWith("accesspoint/") ? " (an access point's ARN does not name the bucket)" : ""}`);
   return name;
-}
-
-// Writes exported files under `dir`, never outside it.
-function writePolicyFiles(dir: string | undefined, files: { path: string; content: string }[]): void {
-  if (!dir) return;
-  if (!files.length) {
-    console.log("cloudgear: no policies were exported (only the role of an imported function has any)");
-    return;
-  }
-  const root = path.resolve(dir);
-  for (const file of files) {
-    const target = path.resolve(root, file.path);
-    if (!target.startsWith(`${root}${path.sep}`)) throw new Error(`Refusing to write "${file.path}" outside ${dir}`);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, file.content);
-    console.log(`cloudgear: wrote ${path.relative(process.cwd(), target)}`);
-  }
 }
 
 function writeEndpoints(config: CloudgearConfig, state: State, workDir: string): void {

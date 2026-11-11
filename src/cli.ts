@@ -61,6 +61,10 @@ Options:
   --all              Also store undeclared names from the env file under the path (secrets set)
 `;
 
+function fakeDrivers(): boolean {
+  return ["CLOUDGEAR_DNS_DRIVER", "CLOUDGEAR_CERT_DRIVER", "CLOUDGEAR_CDN_DRIVER"].some((name) => process.env[name]);
+}
+
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -138,10 +142,14 @@ async function main() {
     case "check-dns": {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
+      if (fakeDrivers()) {
+        console.log("cloudgear: a CLOUDGEAR_*_DRIVER is set; the DNS check is skipped");
+        return;
+      }
       const check = await checkDns(plan(config, state), systemLookup(values["dns-server"]));
       if (check.problems.length || check.unchecked.length) console.log(formatDnsCheck(check));
       if (check.problems.length) throw new Error("The DNS check found problems");
-      console.log("cloudgear: DNS looks ready");
+      console.log(check.unchecked.length ? "cloudgear: DNS could not be fully checked" : "cloudgear: DNS looks ready");
       return;
     }
     case "apply":
@@ -162,7 +170,7 @@ async function main() {
       if (command === "apply" && config.function.length && !values["skip-env-check"]) {
         await checkEnvironment(config, configPath, values.region);
       }
-      if (command === "apply" && hasChanges(actions) && !values["skip-dns-check"]) {
+      if (command === "apply" && hasChanges(actions) && !values["skip-dns-check"] && !fakeDrivers()) {
         const check = await checkDns(actions, systemLookup(values["dns-server"]));
         if (check.unchecked.length) console.warn(check.unchecked.map((u) => `warning: ${u}`).join("\n"));
         if (check.problems.length) throw new Error(`The DNS check found problems:\n${check.problems.map((p) => `  - ${p}`).join("\n")}\nPass --skip-dns-check to deploy anyway.`);

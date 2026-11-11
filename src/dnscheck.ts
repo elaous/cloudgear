@@ -12,10 +12,10 @@ export interface DnsCheck {
   unchecked: string[];
 }
 
-const NO_RECORDS = new Set(["ENODATA", "ENOTFOUND", "NXDOMAIN", "ENOTIMP"]);
+const NO_RECORDS = new Set(["ENODATA", "ENOTFOUND"]);
 
 export function systemLookup(server?: string): DnsLookup {
-  const resolver = new Resolver({ timeout: 4000, tries: 2 });
+  const resolver = new Resolver({ timeout: 2000, tries: 1 });
   if (server) resolver.setServers([server]);
   const attempt = async (run: () => Promise<string[]>): Promise<string[]> => {
     try {
@@ -48,10 +48,24 @@ export async function checkDns(actions: PlannedAction[], lookup: DnsLookup): Pro
     if (spec.dns_zone) zones.add(spec.dns_zone);
     if (action.op === "create" && ENDPOINTS.has(action.type) && spec.domain) hosts.set(spec.domain, action.type);
   }
+  if (!zones.size && !hosts.size) return result;
+  try {
+    if (!(await lookup.nameservers(".")).length) throw new Error("the root zone has no answer");
+  } catch (err) {
+    result.unchecked.push(`no DNS resolver answered (${(err as Error).message}); nothing was checked`);
+    return result;
+  }
+  const delegated = async (zone: string): Promise<boolean> => {
+    const labels = zone.split(".");
+    for (let from = 0; labels.length - from >= 2; from++) {
+      if ((await lookup.nameservers(labels.slice(from).join("."))).length) return true;
+    }
+    return false;
+  };
   const zoneResults = await Promise.all(
     [...zones].sort().map(async (zone) => {
       try {
-        return (await lookup.nameservers(zone)).length ? undefined : { problem: `the zone ${zone} has no name servers in public DNS; it is not delegated, so records written to it will not resolve` };
+        return (await delegated(zone)) ? undefined : { problem: `the zone ${zone} has no name servers in public DNS, nor does any parent of it; it is not delegated, so records written to it will not resolve` };
       } catch (err) {
         return { unchecked: `could not look up the name servers of ${zone} (${(err as Error).message})` };
       }
@@ -61,7 +75,12 @@ export async function checkDns(actions: PlannedAction[], lookup: DnsLookup): Pro
     [...hosts].sort().map(async ([host, type]) => {
       try {
         const found = await lookup.records(host);
-        return found.length ? { problem: `${host} already resolves to ${found.join(", ")}; creating its ${type === "@aws.ApiGateway" ? "API" : "CDN"} would fail or take over the name. Import the existing resource, or remove the record` } : undefined;
+        if (!found.length) return undefined;
+        const parent = host.split(".").slice(1).join(".");
+        if (parent && (await lookup.records(`cloudgear-probe-${Math.random().toString(36).slice(2, 10)}.${parent}`)).length) {
+          return { unchecked: `a wildcard record under ${parent} answers for any name, so ${host} was not checked` };
+        }
+        return { problem: `${host} already resolves to ${found.join(", ")}; creating its ${type === "@aws.ApiGateway" ? "API" : "CDN"} would fail or take over the name. Import the existing resource, or remove the record` };
       } catch (err) {
         return { unchecked: `could not look up ${host} (${(err as Error).message})` };
       }

@@ -1145,12 +1145,7 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
 - `cloudgear apply` reads the report and refuses to deploy while a required
   variable has `provided: null`, and while a declared secret is not stored (see
   `cloudgear secrets list`). `cloudgear plan` only warns. Pass
-  `--skip-env-check` to deploy anyway.
-
-**DNS check.** `cloudgear check-dns` (which `apply` runs first) looks up public DNS for what the plan creates or changes. It blocks
-when a CDN or API host that is about to be created already resolves to something, and when the DNS zone of a CDN, API or
-certificate has no name servers (not delegated). A lookup that fails (timeout, no network) is a warning, not a block. Pass
-`--skip-dns-check` to deploy anyway. Checking that secrets are stored needs
+  `--skip-env-check` to deploy anyway. Checking that secrets are stored needs
   list access to the store (`ssm:GetParametersByPath` for SSM,
   `secretsmanager:ListSecrets` for Secrets Manager, and `kms:Decrypt` for a
   named key); without it `apply` explains and suggests the flag. The report
@@ -1158,6 +1153,12 @@ certificate has no name servers (not delegated). A lookup that fails (timeout, n
   they differ, `apply` asks for `generate` again. If the report is missing, `apply` asks
   for `generate` first. The report holds names and file paths, never values, so
   it MAY be committed.
+
+**DNS check.** `cloudgear check-dns` (which `apply` runs first) looks up public DNS for what the plan creates or changes. It blocks
+when a CDN or API host that is about to be created already resolves to something (a wildcard record that answers for
+any name is ignored), and when neither the DNS zone of a CDN, API or certificate nor any parent of it has name servers.
+A lookup that fails (timeout, no resolver) is a warning, not a block. It is skipped when a `CLOUDGEAR_*_DRIVER` fake is set. Pass
+`--skip-dns-check` to deploy anyway.
 
 ## `cloudgear plan` / `apply` / `destroy`
 

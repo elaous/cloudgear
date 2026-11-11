@@ -312,7 +312,7 @@ function writeEndpoints(config: CloudgearConfig, state: State, workDir: string):
   const endpoints = endpointsFrom(config, state);
   if (hasEndpoints(endpoints)) {
     fs.mkdirSync(workDir, { recursive: true });
-    fs.writeFileSync(endpointsPath, JSON.stringify(endpoints, null, 2) + "\n");
+    fs.writeFileSync(endpointsPath, `${JSON.stringify(endpoints, null, 2)}\n`);
     console.log(`cloudgear: endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);
   } else {
     fs.rmSync(endpointsPath, { force: true });

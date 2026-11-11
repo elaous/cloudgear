@@ -39,7 +39,7 @@ export async function checkEnvironment(config: CloudgearConfig, configPath: stri
   const resolved = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   // A DNS token in the deployer's environment needs no storage.
   const fromEnvironment = new Set(config.certificate.flatMap((c) => (c.dns.token && process.env[c.dns.token.name] !== undefined ? [`${c.dns.token.path}/${c.dns.token.name}`] : [])));
-  let statuses;
+  let statuses: Awaited<ReturnType<typeof secretStatus>>;
   try {
     statuses = await secretStatus(config, resolved);
   } catch (err) {

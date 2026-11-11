@@ -8,7 +8,7 @@ export function encodePrototxt(message: ProtoMessage, header: string[] = []): st
   const lines = header.map((line) => `# ${line}`);
   if (lines.length) lines.push("");
   encodeFields(message, 0, lines);
-  return lines.join("\n") + "\n";
+  return `${lines.join("\n")}\n`;
 }
 
 function encodeFields(message: ProtoMessage, depth: number, lines: string[]) {
@@ -36,7 +36,7 @@ function encodeScalar(value: string | number | boolean): string {
 
 type Token = { kind: "ident" | "string" | "number" | "punct"; text: string; value?: string | number; line: number };
 
-const TOKEN = /\s+|#[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|[A-Za-z_][\w.]*|[{}:\[\],;<>]/y;
+const TOKEN = /\s+|#[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|[A-Za-z_][\w.]*|[{}:[\],;<>]/y;
 
 function tokenize(text: string): Token[] {
   const tokens: Token[] = [];

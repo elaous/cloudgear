@@ -188,7 +188,6 @@ export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolea
           }
         }
       } else if (Node.isBinaryExpression(parent) && (parent.getOperatorToken().getKind() === SyntaxKind.InKeyword || (parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getLeft() === top))) {
-        continue;
       } else {
         dynamic.push(at(node));
       }

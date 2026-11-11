@@ -38,7 +38,7 @@ export function normalizeCron(expression: string): string {
       `Invalid cron "${expression.trim()}": expected 5 fields (minute hour day-of-month month day-of-week), got ${fields.length}; seconds are not supported`,
     );
   }
-  fields.forEach((field, index) => parseField(field, FIELDS[index]!));
+  for (const [index, field] of fields.entries()) parseField(field, FIELDS[index]!);
   const [, , dayOfMonth, month] = fields as [string, string, string, string, string];
   if (/^(2|FEB)$/i.test(month) && /^\d+$/.test(dayOfMonth) && Number(dayOfMonth) > 29) {
     throw new Error(`Invalid cron "${expression.trim()}": February never has day ${dayOfMonth}`);
@@ -54,12 +54,12 @@ function parseField(field: string, spec: FieldSpec): void {
       throw new Error(`Invalid cron ${spec.name} step in "${field}": expected 1-${spec.max}`);
     }
     if (match[1] === "*") continue;
-    const [low, high] = match[1]!.split("-").map((value) => valueOf(value, spec, field));
+    const [low, high] = match[1]!.split("-").map((value) => fieldValue(value, spec, field));
     if (high !== undefined && low! > high) throw new Error(`Invalid cron ${spec.name} range "${field}"`);
   }
 }
 
-function valueOf(token: string, spec: FieldSpec, field: string): number {
+function fieldValue(token: string, spec: FieldSpec, field: string): number {
   const named = spec.names?.indexOf(token.toUpperCase() as never) ?? -1;
   const value = named >= 0 ? named + (spec.name === "month" ? 1 : 0) : /^\d+$/.test(token) ? Number(token) : NaN;
   if (!(value >= spec.min && value <= spec.max)) {

@@ -5,12 +5,9 @@ import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import { decodeConfig, type CloudgearConfig } from "../src/config/schema";
-import { apply, endpointsFrom, hasEndpoints } from "../src/deploy/apply";
-import { awsDrivers } from "../src/deploy/aws";
-import { certificateDriver } from "../src/deploy/aws/certificate";
+import { endpointsFrom, hasEndpoints } from "../src/deploy/apply";
 import { buildDistributionConfig, invalidateDistribution } from "../src/deploy/aws/cloudfront";
 import { formatPlan, plan, type CdnComparable } from "../src/deploy/plan";
-import type { State } from "../src/deploy/state";
 import { generate } from "../src/generate";
 import { applyAll, baseConfig, emptyState, fakeAws } from "./helpers";
 
@@ -203,7 +200,7 @@ describe("applying the edge", () => {
   test("destroying disables the distribution, waits, deletes it and cleans up after itself", async () => {
     const state = emptyState();
     const created = await applyAll(cdnConfig(), state);
-    let policy = created.of("PutBucketPolicyCommand")[0].Policy;
+    const policy = created.of("PutBucketPolicyCommand")[0].Policy;
     const aws = fakeAws({ GetBucketPolicyCommand: () => ({ Policy: policy }) }, created.dns);
     await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
 

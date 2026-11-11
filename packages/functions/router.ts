@@ -11,7 +11,7 @@ import {
   invoke,
   matchPath,
   parseBody,
-  response,
+  type response,
   routeKey,
   serializeRequest,
   vercelRequestFrom,

@@ -25,6 +25,9 @@ export class MemoryBlobDriver implements BlobDriver {
 // Same location shares data across BlobStore instances.
 export function createMemoryDriver(location: string): BlobDriver {
   let objects = stores.get(location);
-  if (!objects) stores.set(location, (objects = new Map()));
+  if (!objects) {
+    objects = new Map();
+    stores.set(location, objects);
+  }
   return new MemoryBlobDriver(objects);
 }

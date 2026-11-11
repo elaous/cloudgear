@@ -1,4 +1,4 @@
-import * as types from "server/types";
+import type * as types from "server/types";
 import { BlobStore } from "@cloudgear/blob";
 import { response } from "@cloudgear/functions";
 import { archive } from "server/storage";

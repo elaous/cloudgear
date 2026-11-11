@@ -19,6 +19,9 @@ export class MemoryDnsDriver implements DnsDriver {
 // Same zone name shares records across driver instances.
 export function createMemoryDriver(zone: string): DnsDriver {
   let records = zones.get(zone);
-  if (!records) zones.set(zone, (records = new Map()));
+  if (!records) {
+    records = new Map();
+    zones.set(zone, records);
+  }
   return new MemoryDnsDriver(records);
 }

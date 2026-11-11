@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in cloudgear does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets, access keys or AWS account IDs. For a security vulnerability, use the private report link on the issue chooser instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected and what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: The smallest app and the commands that show the problem (`cloudgear generate`, `plan`, `apply`).
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: cloudgear commit or version
+      placeholder: output of `git rev-parse --short HEAD`
+    validations:
+      required: true
+  - type: input
+    id: bun
+    attributes:
+      label: Bun version
+      placeholder: output of `bun --version`
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: Run with `CG_DEBUG=true` and paste the relevant lines. Remove anything private first.
+      render: shell

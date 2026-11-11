@@ -841,6 +841,14 @@ describe("exporting a bucket's policy", () => {
     expect(result.notes.join("\n")).toMatch(/bucket policy was exported/);
   });
 
+  test("cloudgear's own CDN statements are left out of the export", async () => {
+    const mixed = { ...policy, Statement: [...policy.Statement, { Sid: "cloudgear-cdn-example-read", Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/*" }] };
+    const aws = fakeAws({ HeadBucketCommand: () => ({}), GetBucketPolicyCommand: () => ({ Policy: JSON.stringify(mixed) }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(config(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(JSON.parse(result.files[0]!.content)).toEqual(policy);
+  });
+
   test("a bucket without a policy says so, and a policy that cannot be read is a note, not a failure", async () => {
     const none = fakeAws({ HeadBucketCommand: () => ({}), GetBucketPolicyCommand: () => { throw Object.assign(new Error("none"), { name: "NoSuchBucketPolicy" }); } });
     const state = emptyState();

@@ -387,9 +387,11 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         if (hint?.exportPolicies) {
           try {
             const got = await s3For(region).send(new GetBucketPolicyCommand({ Bucket: entry.physical_name }));
-            const document = typeof got.Policy === "string" ? JSON.parse(got.Policy) : got.Policy;
+            const parsed = typeof got.Policy === "string" ? JSON.parse(got.Policy) : got.Policy;
+            const statements = [parsed.Statement ?? []].flat().filter((s: { Sid?: string }) => !s.Sid?.startsWith("cloudgear-cdn-"));
+            const document = { ...parsed, Statement: statements };
             adopted.files = [{ path: `buckets/${entry.physical_name}/policy.json`, content: `${JSON.stringify(document, null, 2)}\n` }];
-            adopted.notes.push(`its bucket policy was exported; cloudgear adds only its own CDN statement to it, and the rest stays as it is`);
+            adopted.notes.push(`its bucket policy was exported without cloudgear's own CDN statements`);
           } catch (err) {
             const name = (err as { name?: string }).name;
             adopted.notes.push(name === "NoSuchBucketPolicy" ? "it has no bucket policy to export" : `its bucket policy could not be exported (${(err as Error).message})`);

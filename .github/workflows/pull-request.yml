@@ -29,10 +29,11 @@ jobs:
         run: bun run lint
       - name: Select tests
         id: select
+        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git diff --name-only "$BASE_SHA"...HEAD | bun scripts/changed-tests.ts --explain | tee -a "$GITHUB_OUTPUT"
+          git diff --name-only -z "$BASE_SHA"...HEAD | bun scripts/changed-tests.ts --null --explain | tee -a "$GITHUB_OUTPUT"
       - name: Run tests
         env:
           MODE: ${{ steps.select.outputs.mode }}
@@ -41,5 +42,6 @@ jobs:
           case "$MODE" in
             all) bun test ;;
             targeted) read -r -a files <<< "$TESTS"; bun test "${files[@]}" ;;
-            *) echo "No tests affected by this change." ;;
+            none) echo "No tests affected by this change." ;;
+            *) echo "unexpected mode '$MODE'" >&2; exit 1 ;;
           esac

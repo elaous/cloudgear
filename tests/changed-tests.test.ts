@@ -33,4 +33,12 @@ describe("planTests", () => {
   test("an unknown or deleted source file runs everything", () => {
     expect(planTests(["src/does-not-exist.ts"]).mode).toBe("all");
   });
+
+  test("a deleted file runs everything", () => {
+    expect(planTests(["tests/deleted-long-gone.test.ts"]).mode).toBe("all");
+  });
+
+  test("a quoted non-ASCII path runs everything", () => {
+    expect(planTests(['"tests/caf\\303\\251.test.ts"']).mode).toBe("all");
+  });
 });

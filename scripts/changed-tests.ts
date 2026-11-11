@@ -32,7 +32,7 @@ const RUN_NOTHING: RegExp[] = [
 ];
 
 const IMPORT = /(?:import|export)\s[^'"]*?from\s*["']([^"']+)["']|import\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
-const TEST_FILE = /^tests\/[^/]+\.test\.ts$/;
+const TEST_FILE = /^tests\/.+\.test\.ts$/;
 const SOURCE_DIRS = ["src", "packages", "tests"];
 
 function walk(root: string, dir: string, out: string[]): void {
@@ -131,8 +131,9 @@ function main(): void {
   const args = process.argv.slice(2);
   const explain = args.includes("--explain");
   const names = args.filter((arg) => !arg.startsWith("--"));
-  const input = names.length ? names : fs.readFileSync(0, "utf8").split("\n");
-  const changed = input.map((line) => line.trim()).filter(Boolean);
+  const separator = args.includes("--null") ? "\0" : "\n";
+  const input = names.length ? names : fs.readFileSync(0, "utf8").split(separator);
+  const changed = input.filter(Boolean);
   const plan = planTests(changed);
   if (explain) for (const reason of plan.reasons) console.error(reason);
   console.log(`mode=${plan.mode}`);

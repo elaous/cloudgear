@@ -49,7 +49,7 @@
     "@cloudgear/functions": "workspace:*",
     "@cloudgear/iam": "workspace:*",
     "@cloudgear/secrets": "workspace:*",
-    "ts-morph": "^24.0.0"
+    "ts-morph": "^28.0.0"
   },
   "workspaces": [
     "packages/*"

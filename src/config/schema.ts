@@ -97,6 +97,7 @@ export interface FunctionSpec {
   secret?: SecretBindingSpec[];
   event?: EventTriggerSpec[];
   query_schedule?: { cron: string; query: Record<string, string> }[];
+  policy?: { name: string; document: string }[];
 }
 
 export interface EventTriggerSpec {
@@ -120,6 +121,7 @@ const REPEATED = new Set([
   "function.schedule",
   "function.secret",
   "function.event",
+  "function.policy",
   "function.query_schedule",
   "function.query_schedule.query",
   "function.include",
@@ -219,6 +221,7 @@ export function decodeConfig(text: string): CloudgearConfig {
             })),
           }
         : {}),
+      ...(f.policy?.length ? { policy: f.policy.map((p: Record<string, any>) => ({ name: str(p, "name"), document: str(p, "document") })) } : {}),
       ...(f.event?.length
         ? { event: f.event.map((e: Record<string, any>) => ({ bus: str(e, "bus"), type: str(e, "type"), ...(e.source ? { source: String(e.source) } : {}) })) }
         : {}),

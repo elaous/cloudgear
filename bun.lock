@@ -22,6 +22,7 @@
         "@cloudgear/dns": "workspace:*",
         "@cloudgear/events": "workspace:*",
         "@cloudgear/functions": "workspace:*",
+        "@cloudgear/iam": "workspace:*",
         "@cloudgear/secrets": "workspace:*",
         "ts-morph": "^24.0.0",
       },
@@ -107,6 +108,10 @@
         "@smithy/signature-v4": "^5.7.4",
         "jose": "^6.2.13",
       },
+    },
+    "packages/iam": {
+      "name": "@cloudgear/iam",
+      "version": "0.1.0",
     },
     "packages/secrets": {
       "name": "@cloudgear/secrets",
@@ -198,6 +203,8 @@
     "@cloudgear/events": ["@cloudgear/events@workspace:packages/events"],
 
     "@cloudgear/functions": ["@cloudgear/functions@workspace:packages/functions"],
+
+    "@cloudgear/iam": ["@cloudgear/iam@workspace:packages/iam"],
 
     "@cloudgear/secrets": ["@cloudgear/secrets@workspace:packages/secrets"],
 

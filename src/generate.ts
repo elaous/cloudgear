@@ -181,6 +181,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       pass_request: fn.passRequest || undefined,
       response_arg: fn.responseKind,
       secret: fn.secrets.length ? fn.secrets.map(bindingSpec) : undefined,
+      policy: fn.policies.length ? fn.policies : undefined,
       event: fn.events.length ? fn.events.map((e) => ({ bus: busResource(e.bus), type: e.type, ...(e.source !== undefined ? { source: e.source } : {}) })) : undefined,
     });
   }

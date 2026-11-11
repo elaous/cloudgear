@@ -109,6 +109,14 @@ message Function {
   repeated EventTrigger event = 20;
   reserved 21;
   repeated QuerySchedule query_schedule = 22;
+  // Inline IAM policies put on the function's role.
+  repeated InlinePolicy policy = 23;
+}
+
+message InlinePolicy {
+  string name = 1;
+  // The policy document as JSON text.
+  string document = 2;
 }
 
 message QuerySchedule {

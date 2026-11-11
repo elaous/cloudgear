@@ -36,6 +36,7 @@ export type EndpointAuth = Authentication;
 // Shape-typed values from @cloudgear/secrets and @cloudgear/events.
 export type EnvOption = { readonly kind: "env"; readonly prefix: string; readonly names: object } | { readonly prefix: string; readonly all: true };
 export type EventOption = { readonly kind: "event"; readonly type: string };
+export type PolicyOption = { readonly provider: "aws"; readonly name: string };
 
 export interface RouteOptions {
   name?: string;
@@ -51,6 +52,8 @@ export interface RouteOptions {
   on?: EventOption | EventOption[];
   // Secrets for the environment; read inline only.
   env?: EnvOption | EnvOption[];
+  // Inline IAM policies put on the function's role (see @cloudgear/iam): `policies: [readBucket]`.
+  policies?: PolicyOption | PolicyOption[];
 }
 
 export interface EndpointsFile {
@@ -89,6 +92,8 @@ export interface FunctionRouterOptions {
   // Tolerated unset variables; literal names, not required by generate.
   optionalEnv?: string[];
   env?: EnvOption | EnvOption[];
+  // Policies every function gets (see RouteOptions.policies).
+  policies?: PolicyOption | PolicyOption[];
   // Per-process; serverless instances do not share counters.
   rateLimit?: RateLimit;
 }

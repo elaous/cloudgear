@@ -11,6 +11,7 @@ import {
   type Symbol as MorphSymbol,
   type VariableDeclaration,
 } from "ts-morph";
+import { assertPolicyDocument, assertPolicyName, broadStatements, type PolicyDocument } from "@cloudgear/iam";
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
@@ -63,6 +64,12 @@ export interface ScheduleModel {
   query?: Record<string, string>;
 }
 
+// An inline IAM policy, its document as canonical JSON.
+export interface PolicyModel {
+  name: string;
+  document: string;
+}
+
 export interface StoreUse {
   resource: string;
   path: string;
@@ -85,6 +92,8 @@ export interface AnalyzedFunction {
   schedules: ScheduleModel[];
   secrets: SecretBindingModel[];
   envUse: EnvUse;
+  // Inline policies put on the function's role.
+  policies: PolicyModel[];
   events: EventTriggerModel[];
   publishes: string[];
   include: { rel: string; abs: string }[];
@@ -286,6 +295,100 @@ export function analyzeApp(entryPath: string): AppModel {
     if (!usedBuses.has(bus.name)) usedBuses.set(bus.name, bus);
   };
   let publishUses: Set<string> | undefined;
+
+  const policyDecls = new Map<Node, PolicyModel>();
+  const policyNames = new Map<string, string>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/iam", "Policy"))) {
+    const at = where(expr);
+    const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
+    if (!decl || decl.getInitializer() !== expr) throw new Error(`${at}: assign new Policy(...) to a variable so it can be attached`);
+    const [providerArg, optionsArg] = expr.getArguments();
+    if (stringLiteral(providerArg, `${at}: Policy provider`) !== "aws") throw new Error(`${at}: Policy provider must be "aws"`);
+    if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) throw new Error(`${at}: Policy options must be an object literal with a name and a document`);
+    const name = readStringOption(optionsArg, "name", `${at}: Policy options`);
+    if (!name) throw new Error(`${at}: a Policy needs a name`);
+    const documentProp = optionsArg.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "document");
+    if (!documentProp) throw new Error(`${at}: a Policy needs a document`);
+    const documentNode = Node.isPropertyAssignment(documentProp) ? documentProp.getInitializer() : Node.isShorthandPropertyAssignment(documentProp) ? documentProp.getNameNode() : undefined;
+    try {
+      assertPolicyName(name);
+      const document = readPolicyDocument(documentNode, at);
+      assertPolicyDocument(document, name);
+      const earlier = policyNames.get(name);
+      if (earlier) throw new Error(`a policy named "${name}" is also declared at ${earlier}`);
+      policyNames.set(name, at);
+      policyDecls.set(decl, { name, document: JSON.stringify(sortKeys(document)) });
+      for (const finding of broadStatements(document)) warnings.push(`${at}: policy "${name}": ${finding}`);
+    } catch (err) {
+      const message = (err as Error).message;
+      throw new Error(message.startsWith(at) ? message : `${at}: ${message}`);
+    }
+  }
+
+  // The policy's document: an object literal, or the default import of a .json file next to the code.
+  function readPolicyDocument(node: Node | undefined, at: string): PolicyDocument {
+    if (node && Node.isObjectLiteralExpression(node)) return literalToJson(node, at) as PolicyDocument;
+    if (node && Node.isIdentifier(node)) {
+      // The import itself (not what it resolves to): `import document from "./x.json"`.
+      const decl = node.getSymbol()?.getDeclarations()[0];
+      const importDecl = decl?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
+      const specifier = importDecl?.getModuleSpecifierValue();
+      if (importDecl && specifier?.endsWith(".json") && specifier.startsWith(".")) {
+        const file = path.resolve(path.dirname(importDecl.getSourceFile().getFilePath()), specifier);
+        try {
+          return JSON.parse(fs.readFileSync(file, "utf8")) as PolicyDocument;
+        } catch (err) {
+          throw new Error(`${at}: ${relative(file)} could not be read as JSON (${(err as Error).message})`);
+        }
+      }
+    }
+    throw new Error(`${at}: a policy document must be an object literal or a default import of a .json file (import document from "./policies/x.json")`);
+  }
+
+  function literalToJson(node: Node, at: string): unknown {
+    if (Node.isObjectLiteralExpression(node)) {
+      const out: Record<string, unknown> = {};
+      for (const prop of node.getProperties()) {
+        if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: a policy document cannot use spreads, shorthands or methods`);
+        const key = propName(prop);
+        if (!key) throw new Error(`${at}: a policy document's keys must be plain names or strings`);
+        out[key] = literalToJson(prop.getInitializerOrThrow(), at);
+      }
+      return out;
+    }
+    if (Node.isArrayLiteralExpression(node)) return node.getElements().map((item) => literalToJson(item, at));
+    if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) return node.getLiteralValue();
+    if (Node.isNumericLiteral(node)) return Number(node.getText());
+    if (node.getKind() === SyntaxKind.TrueKeyword) return true;
+    if (node.getKind() === SyntaxKind.FalseKeyword) return false;
+    if (node.getKind() === SyntaxKind.NullKeyword) return null;
+    if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node)) return literalToJson(node.getExpression(), at);
+    throw new Error(`${at}: a policy document can only hold literals, got: ${node.getText()}`);
+  }
+
+  function sortKeys(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(sortKeys);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, sortKeys(v)]));
+    return value;
+  }
+
+  // `policies: policy` or `policies: [a, b]` on a route or the router.
+  function readPolicyOption(options: Node | undefined, at: string): PolicyModel[] {
+    if (!options || !Node.isObjectLiteralExpression(options)) return [];
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "policies");
+    if (!prop) return [];
+    const shorthand = Node.isShorthandPropertyAssignment(prop) ? prop.getNameNode() : undefined;
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : shorthand;
+    const nodes = value && Node.isArrayLiteralExpression(value) ? value.getElements() : [value];
+    return nodes.map((item) => {
+      const decl = item && Node.isIdentifier(item) ? resolveSymbol(item.getSymbol())?.getDeclarations()[0] ?? (Node.isShorthandPropertyAssignment(prop) ? resolveSymbol(prop.getValueSymbol())?.getDeclarations()[0] : undefined) : undefined;
+      const model = decl && policyDecls.get(decl);
+      if (!model) throw new Error(`${at}: policies must be Policy variables declared in your project, got: ${item?.getText() ?? "nothing"}`);
+      return model;
+    });
+  }
+
+  const uniquePolicies = (items: PolicyModel[]): PolicyModel[] => [...new Map(items.map((p) => [p.name, p])).values()];
 
   const busOf = (node: Node | undefined): AnalyzedBus | undefined => {
     for (let current = node, depth = 0; current && Node.isIdentifier(current) && depth < 8; depth++) {
@@ -534,6 +637,7 @@ export function analyzeApp(entryPath: string): AppModel {
   }
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerSecrets = readEnvOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
+  const routerPolicies = readPolicyOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
@@ -609,6 +713,7 @@ export function analyzeApp(entryPath: string): AppModel {
     addSchedules(fn, readScheduleOption(call.getArguments()[3], `${where(call)}: route`));
     addEvents(fn, readEventOption(call.getArguments()[3], `${where(call)}: route`));
     fn.secrets = uniqueSecrets([...fn.secrets, ...readEnvOption(call.getArguments()[3], `${where(call)}: route`)]);
+    fn.policies = uniquePolicies([...fn.policies, ...readPolicyOption(call.getArguments()[3], `${where(call)}: route`)]);
     const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
     const earlier = routeOptionsOf.get(fn);
     if (earlier && !sameOptions(earlier.options, routeFunctionOptions)) {
@@ -630,6 +735,7 @@ export function analyzeApp(entryPath: string): AppModel {
 
   for (const fn of functions.values()) {
     fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
+    fn.policies = uniquePolicies([...routerPolicies, ...fn.policies]);
     const merged = { ...routerFunctionOptions, ...fn.options };
     fn.options = Object.keys(merged).length ? merged : undefined;
   }
@@ -1191,6 +1297,7 @@ export function analyzeApp(entryPath: string): AppModel {
       schedules: [],
       secrets: [],
       events: [],
+      policies: [],
       publishes: [],
       envUse: { variables: {}, dynamic: [] },
       include: [],

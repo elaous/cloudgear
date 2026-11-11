@@ -197,14 +197,20 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     return files;
   }
 
-  async function putPermissions(roleName: string, spec: FunctionComparable, roleArn?: string) {
+  // The policy cloudgear infers, and the ones declared with `Policy`; `previous` are names declared before, that may be gone now.
+  async function putPermissions(roleName: string, spec: FunctionComparable, roleArn?: string, previous: string[] = []) {
     if (!spec.permissions.length && !traced(spec) && !spec.secrets?.length) {
       await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, spec.physical_name) })), "NoSuchEntity");
-      return;
+    } else {
+      await iam.send(
+        new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, spec.physical_name), PolicyDocument: policyDocument(spec, spec.secrets?.length || spec.permissions.some((p) => p.type === "@aws.EventBus") ? { account: accountOf(roleArn), region: options.region } : undefined) }),
+      );
     }
-    await iam.send(
-      new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, spec.physical_name), PolicyDocument: policyDocument(spec, spec.secrets?.length || spec.permissions.some((p) => p.type === "@aws.EventBus") ? { account: accountOf(roleArn), region: options.region } : undefined) }),
-    );
+    const declared = spec.policies ?? [];
+    for (const policy of declared) await iam.send(new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policy.name, PolicyDocument: policy.document }));
+    for (const name of previous) {
+      if (!declared.some((policy) => policy.name === name)) await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: name })), "NoSuchEntity");
+    }
   }
 
   const statementId = (kind: string, principal: string) =>
@@ -391,6 +397,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           undo.push(() => iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })));
           await putPermissions(roleName, spec, role.Role.Arn);
           undo.push(() => iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: INLINE_POLICY })));
+          for (const policy of spec.policies ?? []) undo.push(() => iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policy.name })));
 
           const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
           let created: any;
@@ -498,7 +505,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = current.outputs.role_name ?? roleNameFor(entry.physical_name);
         const tracingChanged = traced(spec) !== ((current.spec.options as Record<string, string> | undefined)?.tracing === "Active");
-        if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec, current.outputs.role_arn);
+        if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec, current.outputs.role_arn, ((current.spec.policies as { name: string }[] | undefined) ?? []).map((p) => p.name));
         if (changes.includes("code")) {
           const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
           await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code }));
@@ -555,6 +562,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const roleName = current.outputs.role_name ?? roleNameFor(current.physical_name);
         await ignore(lambda.send(new DeleteFunctionCommand({ FunctionName: current.physical_name })), "ResourceNotFoundException");
         await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, current.physical_name) })), "NoSuchEntity");
+        // The policies declared with `Policy` are cloudgear's to remove, even from a role it leaves in place.
+        for (const policy of (current.spec.policies as { name: string }[] | undefined) ?? []) {
+          await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policy.name })), "NoSuchEntity");
+        }
         // Imported roles may be shared; leave them in place.
         if (roleName !== roleNameFor(current.physical_name)) return;
         await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })), "NoSuchEntity");

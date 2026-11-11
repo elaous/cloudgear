@@ -1142,6 +1142,14 @@ cloudgear import @aws.Certificate www.example.com  # when several things share a
 cloudgear import --all                             # everything planned that already exists
 ```
 
+- The ARN says what kind of thing it is, so the type is not needed:
+  `cloudgear import --arn arn:aws:acm:...` finds the certificate it describes and
+  adopts the config entry for its domain (a distribution, by the domains it
+  answers to; a function or rule, by name; a bucket, by name). With a name, the
+  ARN picks the right one of several that share it: `cloudgear import
+  www.example.com --arn arn:aws:acm:...` is the certificate, not the
+  distribution. A type that disagrees with the ARN is an error. If no entry fits,
+  each reason is listed and nothing is recorded.
 - `--arn <arn>` says exactly which one to adopt when the name is not enough, for
   example two certificates for a domain: `cloudgear import @aws.Certificate
   www.example.com --arn arn:aws:acm:us-east-1:...:certificate/...`. Accepted

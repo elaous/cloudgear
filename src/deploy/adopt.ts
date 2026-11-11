@@ -1,4 +1,5 @@
 import type { AdoptHint, Drivers } from "./apply";
+import { parseArn } from "./aws/arn";
 import type { PlannedAction } from "./plan";
 import { stateKey, type State } from "./state";
 
@@ -20,6 +21,17 @@ const RECORD_ONLY = new Set(["@aws.S3"]);
 
 // The drivers that can be told which one by its ARN.
 const ARN_TYPES = new Set(["@aws.Certificate", "@aws.CloudFront", "@aws.Lambda", "@aws.Schedule", "@aws.S3"]);
+
+// The entry type an ARN's service stands for.
+const TYPE_OF_SERVICE: Record<string, string> = { acm: "@aws.Certificate", cloudfront: "@aws.CloudFront", lambda: "@aws.Lambda", events: "@aws.Schedule", s3: "@aws.S3" };
+
+export function typeOfArn(arn: string): string {
+  const parsed = parseArn(arn);
+  if (!parsed) throw new Error(`"${arn}" is not an ARN`);
+  const type = TYPE_OF_SERVICE[parsed.service];
+  if (!type) throw new Error(`Importing a ${parsed.service} ARN is not supported (certificates, distributions, functions, schedule rules and buckets are)`);
+  return type;
+}
 
 const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
@@ -69,4 +81,17 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
     result.adopted.push(label(action));
   }
   return result;
+}
+
+// With only an ARN: tries each planned entry of its type that is not in state, and keeps the one the ARN fits
+// (a certificate whose domain is the entry's, a distribution that answers to its domain, a function of its name).
+export async function adoptByArn(actions: PlannedAction[], state: State, drivers: Drivers, type: string, arn: string): Promise<AdoptResult> {
+  const total: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
+  const candidates = actions.filter((action) => action.type === type && action.op !== "dry" && !state.entries[action.key] && action.desired);
+  for (const candidate of candidates) {
+    const result = await adoptEntries(actions, state, drivers, (action) => action.key === candidate.key, { arn });
+    if (result.adopted.length) return result;
+    for (const key of ["missing", "skipped", "failed", "notes"] as const) total[key].push(...result[key]);
+  }
+  return total;
 }

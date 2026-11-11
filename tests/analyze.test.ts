@@ -6,7 +6,7 @@ import { analyzeApp } from "../src/analyze/app";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
 
-// Analyzing an app and bundling functions take seconds when the machine is busy.
+// Timeout covers analysis and bundling.
 setDefaultTimeout(30_000);
 
 const exampleDir = path.join(import.meta.dir, "..", "examples", "router-app");
@@ -30,7 +30,6 @@ describe("analyzeApp", () => {
         name: "foo",
         routes: [{ method: "POST", path: "/foo/{param}", name: "createFoo" }],
         inputType: "types.FooInput",
-        // archive is only reached through the archiveEvent helper
         uses: { myblob: ["write"], "cloudgear-example-archive": ["write"] },
       },
       { name: "getFoo", routes: [{ method: "GET", path: "/foo/{param}", name: "getFoo" }], inputType: "types.GetFooInput", uses: { myblob: ["read"] } },
@@ -79,7 +78,7 @@ describe("analyzeApp", () => {
     const model = analyzeApp(fixture("object-property-store.ts"));
     const byName = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
     expect(byName["svc-viaThis"]).toEqual({ props: ["read"] });
-    // svc's initializer hands the store around as a value, so every access is granted
+    // Store passed as a value; every access is granted.
     expect(byName["svc-viaName"]).toEqual({ props: ["delete", "list", "read", "write"] });
     expect(model.warnings).toEqual([expect.stringMatching(/"props" is passed around as a value/)]);
   });
@@ -328,7 +327,7 @@ describe("analyzeApp", () => {
     expect(uses).toEqual({
       viaClass: { indirect: ["write"] },
       viaObject: { logs: ["delete"] },
-      // an alias hands the store around as a value, so every access is granted
+      // Store passed as a value; every access is granted.
       viaAlias: { indirect: ["delete", "list", "read", "write"] },
       // Object.prototype members are not store operations
       inherited: { indirect: [] },
@@ -411,7 +410,6 @@ describe("generate", () => {
     });
     expect(foo.bundle.sha256).toMatch(/^[0-9a-f]{64}$/);
 
-    // The bundle must run on plain Node, the Lambda runtime, with no node_modules beside it.
     const script = `
       const { handler } = await import(${JSON.stringify(path.join(dir, ".cloudgear/build/getFoo/index.mjs"))});
       const res = await handler({ rawPath: "/foo/7", requestContext: { http: { method: "GET" } }, headers: {} });

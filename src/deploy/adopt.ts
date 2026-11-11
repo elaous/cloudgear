@@ -5,24 +5,17 @@ import { stateKey, type State } from "./state";
 
 export interface AdoptResult {
   adopted: string[];
-  // Planned, but nothing by that name exists in the cloud.
   missing: string[];
-  // Already in state, or a driver that cannot look things up.
   skipped: string[];
-  // Lookups that failed, with why; the others are still recorded.
   failed: string[];
-  // What `apply` will change on what was found.
   notes: string[];
 }
 
-// Buckets are only ever recorded, never changed (as `cloudgear import <bucket>` always did); everything else
-// is managed from here on, so the next `apply` brings it in line with the config.
+// Buckets are recorded, never changed; other resources get managed.
 const RECORD_ONLY = new Set(["@aws.S3"]);
 
-// The drivers that can be told which one by its ARN.
 const ARN_TYPES = new Set(["@aws.Certificate", "@aws.CloudFront", "@aws.Lambda", "@aws.Schedule", "@aws.S3"]);
 
-// The entry type an ARN's service stands for.
 const TYPE_OF_SERVICE: Record<string, string> = { acm: "@aws.Certificate", cloudfront: "@aws.CloudFront", lambda: "@aws.Lambda", events: "@aws.Schedule", s3: "@aws.S3" };
 
 export function typeOfArn(arn: string): string {
@@ -35,7 +28,6 @@ export function typeOfArn(arn: string): string {
 
 const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
-// Looks each planned entry that is not in state yet up in the cloud and records it, in dependency order.
 export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean, hint?: AdoptHint): Promise<AdoptResult> {
   const result: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
   for (const action of actions) {
@@ -73,7 +65,6 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
       name: entry.name,
       physical_name: entry.physical_name,
       ...(recordOnly ? { imported: true } : {}),
-      // The settings read from the cloud differ from the config, so the next plan shows an update that converges it.
       spec: recordOnly ? { physical_name: entry.physical_name } : (found.spec ?? {}),
       outputs: found.outputs,
       deps: entry.deps,
@@ -83,7 +74,7 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
   return result;
 }
 
-// The name an ARN gives, for the types whose entries are told apart by name alone; no AWS call is needed to rule the others out.
+// Name from the ARN; only for types told apart by name.
 function nameInArn(type: string, arn: string): string | undefined {
   const resource = parseArn(arn)?.resource;
   if (!resource) return undefined;
@@ -95,9 +86,7 @@ function nameInArn(type: string, arn: string): string | undefined {
 
 const MAX_REASONS = 5;
 
-// With only an ARN: tries each planned entry of its type that is not in state and records the one the ARN fits (a
-// certificate whose domain is the entry's, a distribution that answers to its domain, a function or rule of its
-// name). Nothing is recorded when none fits or when several do.
+// ARN-only lookup: records the one fitting entry, if exactly one.
 export async function adoptByArn(actions: PlannedAction[], state: State, drivers: Drivers, type: string, arn: string): Promise<AdoptResult> {
   const total: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
   const typed = actions.filter((action) => action.type === type);
@@ -111,7 +100,6 @@ export async function adoptByArn(actions: PlannedAction[], state: State, drivers
   const reasons = new Map<string, string[]>();
   for (const candidate of candidates) {
     if (named !== undefined && candidate.desired!.physical_name !== named) continue;
-    // Tried on a copy, so that nothing is recorded until exactly one entry fits.
     const scratch: State = { ...state, entries: { ...state.entries } };
     const result = await adoptEntries(actions, scratch, drivers, (action) => action.key === candidate.key, { arn });
     if (result.adopted.length) fits.push({ action: candidate, scratch, result });

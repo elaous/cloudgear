@@ -3,12 +3,10 @@ export type CertState = "none" | "pending" | "issued" | "failed";
 
 export interface CertInfo {
   state: CertState;
-  // Provider identifier of the certificate (the ARN on AWS) when one exists.
   id?: string;
 }
 
 export interface CertDriver {
-  // The newest certificate issued for exactly this domain.
   describe(domain: string): Promise<CertInfo>;
 }
 

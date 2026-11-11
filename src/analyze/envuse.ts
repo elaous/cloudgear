@@ -1,22 +1,18 @@
 import { Node, SyntaxKind, type SourceFile } from "ts-morph";
 
 export interface EnvVarUse {
-  // Read without a fallback or a presence check, so the code expects it to be set.
   required: boolean;
-  // Files that read it, from the project root.
   files: string[];
 }
 
 export interface EnvUse {
   variables: Record<string, EnvVarUse>;
-  // Places that read the environment in a way that cannot be listed (a computed name, a spread).
   dynamic: string[];
 }
 
 const ASSIGNMENTS = new Set([SyntaxKind.EqualsToken, SyntaxKind.QuestionQuestionEqualsToken, SyntaxKind.BarBarEqualsToken, SyntaxKind.AmpersandAmpersandEqualsToken]);
 const OPTIONAL_OPERATORS = new Set([SyntaxKind.QuestionQuestionToken, SyntaxKind.BarBarToken, SyntaxKind.AmpersandAmpersandToken, SyntaxKind.EqualsEqualsToken, SyntaxKind.EqualsEqualsEqualsToken, SyntaxKind.ExclamationEqualsToken, SyntaxKind.ExclamationEqualsEqualsToken]);
 
-// Strips parentheses and casts: `(process.env as any).X`, `process.env.X!`.
 const outer = (node: Node): Node => {
   let current = node;
   for (;;) {
@@ -32,7 +28,7 @@ const inner = (node: Node): Node => {
   return current;
 };
 
-// `process.env`, `Bun.env`, `globalThis.process.env` and `import.meta.env`.
+// Also matches Bun.env and import.meta.env.
 function isEnvAccess(node: Node): boolean {
   if (!Node.isPropertyAccessExpression(node) || node.getName() !== "env") return false;
   const owner = inner(node.getExpression());
@@ -46,9 +42,7 @@ const isGuardBranch = (statement: Node): boolean =>
   statement.getDescendantsOfKind(SyntaxKind.ThrowStatement).length > 0 ||
   statement.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => /^(process|Bun|Deno)\.exit$/.test(call.getExpression().getText()));
 
-// A read the code survives the variable being unset: a fallback, a comparison or a presence check.
-// A check whose failure throws or exits is the opposite: the code requires the variable.
-// NaN is falsy but not nullish; String(undefined) is a truthy string, so only these keep a `||` fallback working.
+// Tolerant reads: fallbacks, comparisons, checks; throwing checks require it.
 const NUMERIC = new Set(["Number", "parseInt", "parseFloat"]);
 
 function isOptionalRead(read: Node): boolean {
@@ -58,7 +52,7 @@ function isOptionalRead(read: Node): boolean {
     if (Node.isIfStatement(ancestor) && ancestor.getExpression().containsRange(here.getPos(), here.getEnd())) return !isGuardBranch(ancestor.getThenStatement());
   }
   let at = outer(read);
-  // `Number(process.env.X) || 0`: NaN is falsy, so the fallback still runs; `Number(x) ?? 0` never falls back.
+  // `Number(x) || 0` falls back on NaN; `??` never does.
   let numeric = false;
   let wrapped = false;
   for (let call = at.getParent(); call && Node.isCallExpression(call) && (NUMERIC.has(call.getExpression().getText()) || call.getExpression().getText() === "String") && call.getArguments()[0] === at; call = at.getParent()) {
@@ -66,7 +60,7 @@ function isOptionalRead(read: Node): boolean {
     wrapped = true;
     at = outer(call);
   }
-  // The outermost conversion decides: a String is truthy even for undefined, so no fallback runs.
+  // Outermost conversion decides; String(undefined) is truthy.
   if (wrapped && !numeric) return false;
   const parent = at.getParent();
   if (!parent) return false;
@@ -85,7 +79,7 @@ function isOptionalRead(read: Node): boolean {
   return false;
 }
 
-// Not a read at all: the code sets the variable, or removes it.
+// Assignments and deletes are not reads.
 function isWrite(read: Node): boolean {
   const at = outer(read);
   const parent = at.getParent();
@@ -95,9 +89,7 @@ function isWrite(read: Node): boolean {
 
 const OBJECT_METHODS = new Set(["hasOwnProperty", "toString", "valueOf", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]);
 
-// What the project's own code reads from the environment. It follows the code the function runs: its
-// body, what that calls, and the top-level code of every project file it imports (which runs on load),
-// not the other functions that merely share a file. `node_modules` and dynamic imports are not followed.
+// Follows project imports only; not node_modules or dynamic imports.
 export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolean, relative: (file: string) => string): EnvUse {
   const variables = new Map<string, { required: boolean; files: Set<string> }>();
   const dynamic: string[] = [];
@@ -145,7 +137,7 @@ export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolea
       if (init && isEnvAccess(inner(init)) && Node.isIdentifier(declaration.getNameNode())) aliases.add(declaration);
     }
     for (const statement of file.getStatements()) {
-      // The router declaration only names the functions; it does not run their code.
+      // The router declaration names functions without running them.
       if (isDeclarationOnly(statement) || statement.getDescendantsOfKind(SyntaxKind.NewExpression).some((e) => e.getExpression().getText() === "FunctionRouter")) continue;
       addRegion(statement);
     }
@@ -205,7 +197,7 @@ export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolea
 
   addFile(fnNode.getSourceFile());
   addRegion(fnNode);
-  // An instance method also runs its class's constructor and field initializers.
+  // Instance methods also run constructor and field initializers.
   const owner = fnNode.getParent();
   if (owner && Node.isClassDeclaration(owner)) {
     for (const member of owner.getMembers()) if (Node.isConstructorDeclaration(member) || Node.isPropertyDeclaration(member)) addRegion(member);

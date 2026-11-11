@@ -17,7 +17,6 @@ import {
   type RouteSpec,
 } from "../http";
 
-// Lambda function URL payload, format version 2.0.
 export interface FunctionUrlEvent {
   rawPath: string;
   rawQueryString?: string;
@@ -32,11 +31,9 @@ export interface ScheduledEvent {
   source: "aws.events";
   time?: string;
   resources?: string[];
-  // Added by cloudgear for a schedule that carries a query string.
   cloudgear?: { query?: Record<string, string> };
 }
 
-// An EventBridge event delivered to a function by a rule.
 export interface BusEvent {
   id?: string;
   source: string;
@@ -54,16 +51,14 @@ export interface FunctionUrlResult {
 }
 
 export interface HandlerOptions {
-  // Honour the router's `context` (the caller's identity). Safe only when callers are IAM-authenticated.
+  // Trusts router context; safe only with IAM-authenticated callers.
   trustContext?: boolean;
-  // Verifies every request itself (token in the request headers) and sets `context.auth`:
-  // 401 for a bad token, 503 when the verifier fails. Skipped when `anonymous`.
+  // Verifies the token: 401 when bad, 503 when verifier fails.
   authenticate?: Authenticator;
   anonymous?: boolean;
-  // The function takes a Vercel-style request instead of the input, and a response after it.
   request?: boolean;
   response?: ResponseKind;
-  // Awaited once before the first request or scheduled run (for example to load secrets); a failure is retried.
+  // Awaited once before the first run; a failure is retried.
   prepare?: () => Promise<void>;
 }
 
@@ -78,10 +73,10 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
         }))
       : undefined;
 
-  // A run nobody is waiting on: a failure is thrown so Lambda records and retries it.
+  // Scheduled and event runs throw on failure so Lambda retries.
   const runAsync = async (what: string, input: unknown, context: RequestContext, failsAt = 400, query?: Record<string, string>) => {
     await prepare();
-    // A schedule with a query looks like a Vercel cron call: the query in the URL, and the CRON_SECRET as a bearer token when the function has one.
+    // Scheduled query runs send CRON_SECRET as bearer token when set.
     const secret = query ? process.env.CRON_SECRET : undefined;
     const request = options.request
       ? vercelRequestFrom({
@@ -125,7 +120,7 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       : "";
     const contentType = headers["content-type"] ?? null;
 
-    // Unauthenticated callers learn nothing about routes: verify before parsing or routing.
+    // Verify the token before parsing or routing.
     let context: RequestContext | undefined;
     if (options.authenticate && !options.anonymous) {
       const req = new Request("https://function.invalid/", { headers });
@@ -164,7 +159,7 @@ export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec
       : undefined;
     const result = await timed("lambda", "handler", () => invoke(fn, resolved.input, context ?? resolved.context, { request, response: options.response }), () => ({ inputKeys: Object.keys(resolved.input as object) }));
     debug("lambda", `responded ${result.status}`);
-    // A HEAD request served by a GET route gets the headers without the body.
+    // HEAD on a GET route returns headers without the body.
     return toLambda(resolved.headOnly ? { ...result, body: "" } : result);
   };
 }
@@ -185,7 +180,7 @@ interface Resolved {
   params?: Record<string, string>;
 }
 
-// The URL host is the one the function URL received; a CDN does not forward the viewer's.
+// Host is the function URL's, not the viewer's, behind a CDN.
 function requestFromEvent(event: FunctionUrlEvent, headers: Record<string, string>, params?: Record<string, string>) {
   if (event.cookies?.length) headers = { ...headers, cookie: event.cookies.join("; ") };
   const method = event.requestContext.http.method.toUpperCase();

@@ -5,9 +5,8 @@ export interface EdgeRoute {
 }
 
 export interface RouteGroup {
-  // The path with every {param} written as {}.
   shape: string;
-  // CloudFront path pattern: each {param} becomes *.
+  // CloudFront pattern: each {param} becomes `*`.
   pattern: string;
   methods: string[];
   functions: string[];
@@ -61,8 +60,7 @@ const covers = (general: string, specific: string) => {
   return g.length === s.length && general !== specific && g.every((segment, i) => segment === "{}" || segment === s[i]);
 };
 
-// Paths CloudFront would send to a function that cannot serve the request: several functions
-// on one path, or a literal path hiding methods of the param path that covers it.
+// Conflicts CloudFront cannot route: shared paths, hidden methods.
 export function conflictingGroups(routes: EdgeRoute[]): RouteGroup[] {
   const groups = groupRoutes(routes);
   const conflicts = groups.filter((group) => group.functions.length > 1);

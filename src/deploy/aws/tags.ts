@@ -7,7 +7,7 @@ const MAX_TAGS = 50;
 
 export const tagValue = (value: string): string => Array.from(value.replace(VALUE_CHARS, "_")).slice(0, 256).join("");
 
-// Tags every created resource carries; extra tags never override the `cloudgear:` ones.
+// Extra tags never override the `cloudgear:` ones.
 export function baseTags(input: { project: string; version: string; env?: string; author?: string; extra?: Tags }): Tags {
   const tags: Tags = {};
   for (const [key, value] of Object.entries(input.extra ?? {})) {

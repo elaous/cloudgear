@@ -16,17 +16,16 @@ export { createDnsDriver, registerDnsDriver, normalizeCertDomain, normalizeHostn
 export type { DnsDriver, DnsDriverFactory, DnsDriverOptions, DnsProvider, DnsRecord, DnsRecordType } from "./driver";
 
 export interface DnsOptions {
-  // The DNS zone holding the records; defaults to the last two labels of the domain (three for
-  // common second-level suffixes like co.uk). Set it for anything else.
+  // Defaults to the last two labels; three for co.uk-style suffixes.
   zone?: string;
-  // The provider's API token: a secret from a SecretStore, never a literal. Gandi reads GANDI_TOKEN without it.
+  // A secret from a SecretStore, never a literal.
   token?: TokenSource;
   driver?: DnsDriver;
 }
 
 export type TokenSource = string | { get(): Promise<string> };
 
-// Registrations under these second-level labels (example.co.uk) span three labels.
+// Second-level suffixes whose registrations span three labels.
 const SECOND_LEVEL = new Set(["co", "com", "org", "net", "gov", "edu", "ac", "ne", "or", "go"]);
 
 function defaultZone(domain: string): string {
@@ -36,10 +35,8 @@ function defaultZone(domain: string): string {
   return labels.slice(threeLabels ? -3 : -2).join(".");
 }
 
-// The domain a site is served from, and the provider whose zone holds its records.
-// Constructing it does nothing; `cloudgear apply` creates the records.
+// Constructing does nothing; `cloudgear apply` creates the records.
 export class DNS {
-  // "*.example.com" for a wildcard: the certificate then covers any one label under example.com.
   readonly domain: string;
   readonly zone: string;
   private driverPromise?: Promise<DnsDriver>;

@@ -8,13 +8,9 @@ export interface OptionSchema {
   prefixes?: Record<string, OptionRule>;
 }
 
-// Per provider: the flagship service each cloudgear client is inferred as,
-// and the permissions each client operation needs.
 export interface ProviderProfile {
   options: Record<string, OptionSchema>;
-  // Environment variable names the platform owns.
   reservedEnv: RegExp;
-  // How a function is identified when it calls other services.
   function: { type: string; runtime: string; memoryMb: number; timeoutS: number; identity: "role" | "service-account" };
   blobStore: { type: string; actions: Record<BlobAccess, string[]> };
   cdn?: { type: string; certificate: string };
@@ -60,7 +56,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     blobStore: {
       type: "@aws.S3",
       actions: {
-        // ListBucket makes S3 answer 404 instead of 403 for a missing key.
+        // ListBucket makes S3 answer 404, not 403, for missing keys.
         read: ["s3:GetObject", "s3:ListBucket"],
         write: ["s3:PutObject"],
         delete: ["s3:DeleteObject"],
@@ -87,7 +83,6 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
   },
 };
 
-// The provider a resource type belongs to: "@aws.S3" is "aws".
 export function providerOfType(type: string): string {
   const match = /^@([a-z0-9]+)\./.exec(type);
   if (!match) throw new Error(`Resource type "${type}" does not name a provider (expected "@<provider>.<Service>")`);
@@ -104,7 +99,6 @@ export function capability<K extends "cdn" | "api" | "schedule" | "events">(prov
   return found as NonNullable<ProviderProfile[K]>;
 }
 
-// Registered under "<function provider>-><store provider>".
 export interface CrossProviderAccess {
   describe: string;
 }

@@ -55,13 +55,11 @@ export interface SendClient {
 export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
-  // Files packaged next to index.mjs, by path.
   readIncluded?: (fn: FunctionSpec) => { name: string; data: Uint8Array }[];
   clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient };
-  // Opens the DNS zone an entry's records live in (provider and zone come from its own spec, so removing
-  // the declaration from the config still cleans up through the right zone). Needed only for certificates, CDNs and the API domain.
+  // Entry's own zone, so removals still clean up.
   dns?: (provider: string, zone: string, token?: SecretRefSpec) => DnsDriver | Promise<DnsDriver>;
-  // Applied to every resource created, with `cloudgear:resource` set to its logical name.
+  // Also tags each resource with its logical name.
   tags?: Tags;
   log?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -70,7 +68,7 @@ export interface AwsDriverOptions {
 const BASIC_EXECUTION_POLICY = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
 const INLINE_POLICY = "cloudgear";
 
-// A role that is not the function's own (an imported function's) may be shared, so each function keeps its own policy on it.
+// Shared imported roles get a per-function policy.
 const policyNameFor = (roleName: string, functionName: string) =>
   roleName === roleNameFor(functionName) ? INLINE_POLICY : fitName(`${INLINE_POLICY}-${functionName}`, 128);
 const LAMBDA_TRUST_POLICY = JSON.stringify({
@@ -78,13 +76,12 @@ const LAMBDA_TRUST_POLICY = JSON.stringify({
   Statement: [{ Effect: "Allow", Principal: { Service: "lambda.amazonaws.com" }, Action: "sts:AssumeRole" }],
 });
 
-// Logs each SDK call and its duration when CG_DEBUG is set.
 function withDebug(service: string, client: SendClient): SendClient {
   return { send: (command) => timed(`aws.${service}`, command.constructor.name, () => client.send(command), () => ({ request: command.input })) };
 }
 
 export function awsDrivers(options: AwsDriverOptions): Drivers {
-  // Buckets may live in other regions than the functions; one client per region.
+  // Buckets may sit in other regions; one client per region.
   const s3Clients = new Map<string, SendClient>();
   const s3For = (region?: string): SendClient => {
     const wanted = region || options.region;
@@ -141,8 +138,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const statementId = (kind: string, principal: string) =>
     `cloudgear-${kind}-${createHash("sha256").update(principal).digest("hex").slice(0, 12)}`;
 
-  // A retry after a partial failure meets statements that already exist; that is fine.
-  // The same error also means "update in progress", which must not be skipped.
+  // "Update in progress" errors must not be skipped.
   const addPermission = async (input: ConstructorParameters<typeof AddPermissionCommand>[0]) => {
     try {
       await lambda.send(new AddPermissionCommand(input));
@@ -314,7 +310,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       async create(entry: DesiredEntry) {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = roleNameFor(entry.physical_name);
-        // Undo steps for what this call created, so a failure never leaves orphans behind.
+        // Undo steps for what this call created, on failure.
         const undo: (() => Promise<unknown>)[] = [];
         try {
           const role = await iam.send(new CreateRoleCommand({ RoleName: roleName, AssumeRolePolicyDocument: LAMBDA_TRUST_POLICY, ...(options.tags ? { Tags: tagList(tagsFor(entry.name)) } : {}) }));
@@ -326,7 +322,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
 
           const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
           let created: any;
-          // A new IAM role takes a few seconds before Lambda can assume it.
+          // A new IAM role takes seconds before Lambda can assume it.
           for (let attempt = 0; ; attempt++) {
             try {
               created = await lambda.send(
@@ -402,7 +398,6 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               ...(config.Role ? { role_arn: config.Role, role_name: config.Role.split("/").at(-1)! } : {}),
               ...(url?.FunctionUrl ? { url: url.FunctionUrl } : {}),
             },
-            // What the cloud has now, so the plan changes only what differs.
             spec: { reserved_concurrency: concurrency ?? 0, ...(url?.AuthType ? { auth: url.AuthType === "NONE" ? "none" : "iam" } : {}) },
             notes,
           };
@@ -473,7 +468,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const roleName = current.outputs.role_name ?? roleNameFor(current.physical_name);
         await ignore(lambda.send(new DeleteFunctionCommand({ FunctionName: current.physical_name })), "ResourceNotFoundException");
         await ignore(iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyNameFor(roleName, current.physical_name) })), "NoSuchEntity");
-        // A role that was not made for this function (an imported one) may be shared; leave it.
+        // Imported roles may be shared; leave them in place.
         if (roleName !== roleNameFor(current.physical_name)) return;
         await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })), "NoSuchEntity");
         await ignore(iam.send(new DeleteRoleCommand({ RoleName: roleName })), "NoSuchEntity");

@@ -30,7 +30,6 @@ const twoRoutes = (names: [string, string] = ["foo", "bar"]) =>
     ],
   });
 
-// A small stateful API Gateway so repeated applies see what earlier ones made.
 function gateway() {
   const integrations: { IntegrationId: string; IntegrationUri: string; Description: string }[] = [];
   const routes: { RouteId: string; RouteKey: string; Target: string }[] = [];

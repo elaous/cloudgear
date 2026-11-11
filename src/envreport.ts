@@ -3,24 +3,21 @@ import fs from "node:fs";
 
 export const configHash = (text: string): string => createHash("sha256").update(text).digest("hex");
 
-// How a variable reaches the function: set by cloudgear, by the platform, from a secret, or not at all.
 export type EnvSource = "resource" | "option" | "secret" | "secret-wildcard" | "platform" | null;
 
 export interface EnvReportFunction {
   routes: string[];
   variables: Record<string, { required: boolean; files: string[]; provided: EnvSource }>;
-  // Reads of the environment that cannot be listed, as file:line.
   dynamic: string[];
 }
 
 export interface EnvReport {
   version: 1;
-  // sha256 of the config the report was made with.
   config: string;
   functions: Record<string, EnvReportFunction>;
 }
 
-// `cloudgear.prototxt` has its report in `cloudgear.env.json`, beside it.
+// Report is written to `cloudgear.env.json` beside the config.
 export const envReportPath = (configPath: string): string => `${configPath.replace(/\.prototxt$/, "")}.env.json`;
 
 export function readEnvReport(file: string): EnvReport | undefined {
@@ -41,7 +38,6 @@ export interface MissingEnv {
   files: string[];
 }
 
-// Variables the code needs that nothing provides.
 export function missingEnv(report: EnvReport): MissingEnv[] {
   return Object.entries(report.functions).flatMap(([name, fn]) =>
     Object.entries(fn.variables)

@@ -61,7 +61,6 @@ async function ignoreMissing(promise: Promise<unknown>): Promise<void> {
   }
 }
 
-// Functions in the current spec or the last fully applied one.
 function servedFunctions(spec: Record<string, unknown>): string[] {
   const names = (s: unknown) => ((s as Partial<ApiComparable> | undefined)?.routes ?? []).map((route) => route.function);
   return [...new Set([...names(spec), ...names(spec.previous)])];

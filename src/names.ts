@@ -4,7 +4,7 @@ export function sanitizeName(name: string): string {
   return name.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "fn";
 }
 
-// Truncates with a hash of the full name so distinct long names stay distinct.
+// Long names truncate with a hash of the full name.
 export function fitName(name: string, max: number): string {
   if (name.length <= max) return name;
   const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);

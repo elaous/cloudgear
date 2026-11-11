@@ -21,7 +21,7 @@ const RANK: Record<CertState, number> = { none: 0, failed: 1, pending: 2, issued
 export class AcmCertDriver implements CertDriver {
   constructor(private readonly client: ACMClient) {}
 
-  // An issued certificate wins over one still validating, which wins over a failed one; then the newest.
+  // Prefers issued, then validating, then failed; newest first.
   async describe(domain: string): Promise<CertInfo> {
     let best: { arn: string; createdAt: number; state: CertState } | undefined;
     let token: string | undefined;

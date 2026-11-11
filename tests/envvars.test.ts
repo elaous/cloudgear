@@ -109,7 +109,7 @@ describe("the environment report", () => {
 
   test("a function includes what it calls in its file, and not the functions it does not", async () => {
     const { report } = await generated("forms");
-    // `export const service = new Service()` runs when the file loads, so its field reads count for every function there.
+    // Module-level `new Service()` runs at load; its field reads count.
     expect(Object.keys(report.functions.caller!.variables).sort()).toEqual(["CLASS_FIELD", "HELPER_VAR", "OTHER_FN_VAR"]);
     expect(Object.keys(report.functions.other!.variables).sort()).toEqual(["CLASS_FIELD", "OTHER_FN_VAR"]);
     expect(Object.keys(report.functions.api!.variables)).not.toContain("HELPER_VAR");

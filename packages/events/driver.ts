@@ -8,7 +8,6 @@ export interface PublishedEvent {
 }
 
 export interface EventDriver {
-  // Returns the id the bus gave the event.
   publish(event: PublishedEvent): Promise<string>;
 }
 

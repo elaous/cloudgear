@@ -17,12 +17,11 @@ const TARGET_ID = "cloudgear";
 
 const statementId = (rule: string, bus: string) => `cloudgear-event-${createHash("sha256").update(`${bus}\0${rule}`).digest("hex").slice(0, 12)}`;
 
-// The pattern a rule matches: the event type, and the source when one is given.
 export function eventPattern(spec: Pick<EventRuleComparable, "event_type" | "source">): string {
   return JSON.stringify({ "detail-type": [spec.event_type], ...(spec.source ? { source: [spec.source] } : {}) });
 }
 
-// Custom buses cloudgear creates; the account's default bus is dry and never reaches this driver.
+// Creates custom buses only; the default bus is never touched.
 export function eventBusDriver(deps: EventBusDeps): Driver {
   return {
     async create(entry) {

@@ -46,7 +46,6 @@ describe("planning the edge", () => {
     expect(removal.every((a) => a.op === "delete")).toBe(true);
     const order = removal.map((a) => a.key);
     expect(order).toHaveLength(4);
-    // dependents go before what they depend on
     expect(order.indexOf(CDN_KEY)).toBeLessThan(order.indexOf(CERT_KEY));
     expect(order.indexOf("@aws.Lambda.foo")).toBeLessThan(order.indexOf("@aws.S3.data"));
     expect(order.indexOf(CDN_KEY)).toBeLessThan(order.indexOf("@aws.S3.data"));
@@ -153,7 +152,6 @@ describe("applying the edge", () => {
     const aws = await applyAll(cdnConfig(), emptyState());
     const policy = JSON.parse(aws.of("PutBucketPolicyCommand")[0].Policy);
     const condition = { StringEquals: { "AWS:SourceArn": "arn:aws:cloudfront::1:distribution/E1" } };
-    // reading objects is all the CDN needs, and only under the site's path
     expect(policy.Statement).toEqual([
       expect.objectContaining({ Effect: "Allow", Principal: { Service: "cloudfront.amazonaws.com" }, Action: "s3:GetObject", Resource: "arn:aws:s3:::data/web/*", Condition: condition }),
     ]);
@@ -223,7 +221,6 @@ describe("applying the edge", () => {
     expect(aws.of("DeleteOriginAccessControlCommand").map((i) => i.Id)).toEqual(["oac-s3"]);
     expect(names).toContain("DeleteBucketPolicyCommand");
     expect(await created.dns!.get(DOMAIN, "CNAME")).toBeNull();
-    // the certificate's validation record stays: ACM shares it between certificates for a domain
     expect(await created.dns!.get("_v1.cdn.example.com", "CNAME")).not.toBeNull();
     expect(aws.of("DeleteCertificateCommand")).toEqual([{ CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c1" }]);
     expect(names.indexOf("DeleteDistributionCommand")).toBeLessThan(names.indexOf("DeleteCertificateCommand"));
@@ -464,7 +461,6 @@ describe("records and cleanup the CDN does not own", () => {
     const created = await applyAll(cdnConfig(), state);
     const opened: [string, string][] = [];
     const aws = fakeAws({}, created.dns, (provider, zone) => void opened.push([provider, zone]));
-    // the declarations are gone from the config, but the state still knows where the records live
     await applyAll({ ...baseConfig(), resource: [], function: [] }, state, aws);
     expect(opened.length).toBeGreaterThan(0);
     expect(new Set(opened.map((o) => o.join("/")))).toEqual(new Set(["gandi/example.com"]));
@@ -696,7 +692,6 @@ describe("several CDNs in one app", () => {
         certificate: ["www.example.com", "admin.example.com"].map(certFor),
         cdn: [{ ...site("www.example.com", "web"), path: "public/" }, { ...site("admin.example.com", "web"), path: "admin/" }],
       });
-    // A bucket that remembers its policy between calls.
     const bucket = () => {
       let policy: string | undefined;
       return fakeAws({

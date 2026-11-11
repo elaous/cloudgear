@@ -2,12 +2,12 @@ import { debug, errorSummary } from "@cloudgear/debug";
 import { DEFAULT_TTL, quoteTxt, relativeName, withTrailingDot, type DnsDriver, type DnsRecord, type DnsRecordType } from "../driver";
 
 const API = "https://api.gandi.net/v5/livedns";
-// Bounds Gandi documents for rrset_ttl.
+// Gandi rrset_ttl bounds.
 const MIN_TTL = 300;
 const MAX_TTL = 2_592_000;
 
 export interface GandiOptions {
-  // A Gandi personal access token; defaults to $GANDI_TOKEN. $GANDI_API_KEY (legacy key) also works.
+  // Env fallbacks: GANDI_TOKEN, then legacy GANDI_API_KEY.
   token?: string;
   apiKey?: string;
   fetch?: typeof fetch;

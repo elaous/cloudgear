@@ -10,7 +10,7 @@ import { configHash, envReportPath, type EnvReport, type EnvSource } from "./env
 import { fitName, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
 
-// Set by the Lambda runtime, or ambient in every Node program.
+// Set by the Lambda runtime or every Node program.
 const PLATFORM_ENV = new Set(["TZ", "LANG", "PATH", "LD_LIBRARY_PATH", "NODE_PATH", "NODE_ENV", "CI"]);
 
 export interface GenerateOptions {
@@ -134,7 +134,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       member: fn.member,
       routes: fn.routes,
       provider: model.provider,
-      // Callers of the API domain reach functions with their own requests, so no identity can be vouched for.
+      // API domain callers are unauthenticated; no identity is vouched.
       trustContext: model.provider === "aws" && model.authenticated === "iam" && !model.api,
       jwt: model.jwt && { settings: { ...model.jwt }, anonymous: !!fn.anonymous },
       include: fn.include,
@@ -274,7 +274,7 @@ const bindingSpec = (s: SecretBindingModel): SecretBindingSpec => ({ ...refSpec(
 
 const SECRETISH = /SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|API_?KEY/i;
 
-// The environment a function gets must be unambiguous, and secrets do not belong in plain options.
+// Environment must be unambiguous; secrets stay out of options.
 function checkSecrets(fn: AnalyzedFunction, provider: string, reserved: RegExp, warnings: string[]): void {
   const targets = new Map<string, string>();
   for (const binding of fn.secrets.filter((s) => s.env)) {
@@ -300,7 +300,7 @@ function checkSecrets(fn: AnalyzedFunction, provider: string, reserved: RegExp, 
   }
 }
 
-// Env files committed to git are the one way a secret set by `cloudgear secrets set` reaches the repository.
+// Committed env files are the one way secrets reach git.
 function trackedEnvFiles(dir: string): string[] {
   const result = Bun.spawnSync(["git", "ls-files", "--", ".env*", "*.env"], { cwd: dir, stderr: "ignore" });
   return result.exitCode === 0 ? result.stdout.toString().split("\n").filter(Boolean) : [];

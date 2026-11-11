@@ -3,13 +3,11 @@ export type CdnState = "none" | "deploying" | "deployed";
 
 export interface CdnInfo {
   state: CdnState;
-  // Provider identifier of the distribution, and the URL it answers on, once it exists.
   id?: string;
   url?: string;
 }
 
 export interface CdnDriver {
-  // The distribution serving exactly this domain.
   describe(domain: string): Promise<CdnInfo>;
 }
 

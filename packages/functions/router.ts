@@ -33,31 +33,23 @@ export type ProviderOptions = Record<string, string | number | boolean>;
 export type Authentication = "iam" | "none";
 export type EndpointAuth = Authentication;
 
-// What @cloudgear/secrets (`store.path(...)([...])`, or a path ending in /*) and @cloudgear/events
-// (`bus.event(...)`) hand over, described by shape so this package needs neither.
+// Shape-typed values from @cloudgear/secrets and @cloudgear/events.
 export type EnvOption = { readonly kind: "env"; readonly prefix: string; readonly names: object } | { readonly prefix: string; readonly all: true };
 export type EventOption = { readonly kind: "event"; readonly type: string };
 
 export interface RouteOptions {
-  // Nickname for this route in listen()/urls() results; defaults to the function's name.
   name?: string;
-  // Skip the router's `authenticate` hook for this route (for example a health check).
   public?: boolean;
-  // Provider settings of the route's function; literals only.
+  // Literals only; read by generate.
   options?: ProviderOptions;
-  // Files or directories, from the project root, packaged with the function; literals only.
+  // Project-root paths, packaged with the function; literals only.
   include?: string | string[];
-  // The function takes a Vercel-style request (query, cookies, body) instead of the input.
   request?: boolean;
-  // Hands the function a response after its first argument: the `response` helper (it returns its
-  // output) or `VercelResponse` (a writer; the function returns nothing). Give the import itself.
+  // Second argument: `response` helper or `VercelResponse` writer.
   response?: typeof response | typeof VercelResponse;
-  // Also run the function on a schedule (UTC): `schedule: cron`*/15 * * * *``.
   schedule?: ScheduleSpec | ScheduleSpec[];
-  // Also run the function on events: `on: bus.event("order.created")` (see @cloudgear/events).
   on?: EventOption | EventOption[];
-  // Secrets the function reads, filled into its environment: `env: store.path("/app")(["KEY"])`
-  // (see @cloudgear/secrets). `generate` reads it, so it MUST be written inline.
+  // Secrets for the environment; read inline only.
   env?: EnvOption | EnvOption[];
 }
 
@@ -65,9 +57,7 @@ export interface EndpointsFile {
   provider: string;
   routes: Record<string, string>;
   auth?: EndpointAuth;
-  // The deployed CDN, written by `cloudgear apply`; read by `CDN.url()`.
   cdn?: { domain: string; url: string; id?: string };
-  // Every deployed site by domain, written when an app has several CDNs.
   cdns?: Record<string, { domain: string; url: string; id?: string }>;
   api?: { domain: string; url: string; id?: string };
 }
@@ -75,39 +65,31 @@ export interface EndpointsFile {
 export interface RateLimit {
   limit: number;
   windowMs: number;
-  // Client identity. Required unless `trustProxy` is set.
+  // Required unless `trustProxy` is set.
   key?: (req: Request) => string;
-  // Take the client from the first X-Forwarded-For address. Only enable behind a proxy that
-  // sets or overwrites that header; otherwise clients can pick their own identity.
+  // Enable only behind a proxy that overwrites X-Forwarded-For.
   trustProxy?: boolean;
 }
 
 export interface FunctionRouterOptions {
-  // "local" runs handlers in-process; "remote" calls the deployed function URLs.
   mode?: "local" | "remote";
   endpoints?: Record<string, string>;
   endpointsFile?: string;
-  // "iam": deployed functions require signed calls (the router signs them). "none": public URLs.
-  // Read by `cloudgear generate` (so MUST be a string literal); defaults to "iam".
+  // Literal only: generate reads it; defaults to "iam".
   authenticated?: Authentication;
   credentials?: AwsCredentialsProvider;
-  // AWS region of the deployed functions (and the signing region for URLs that do not name one).
-  // `cloudgear generate` reads it, so it MUST be a string literal; defaults to --region or AWS_REGION.
+  // Literal only: generate reads it; defaults to --region or AWS_REGION.
   region?: string;
-  // Establishes who is calling. Return null for 401; every route requires it unless `public`.
-  // The result reaches functions as `context.auth`, and only when `authenticated` is "iam".
+  // Return null for 401; `public` routes skip it.
   authenticate?: Authenticator;
-  // A Cert (from @cloudgear/cdn): routes are also served on its domain through API Gateway.
-  // Requests there reach functions directly and skip `authenticate`; `generate` reads it.
+  // Also serves Cert's domain routes via API Gateway; skips `authenticate`.
   cert?: { readonly domain: string };
-  // Provider settings for every function; literals only.
+  // Literals only; read by generate.
   functionOptions?: ProviderOptions;
-  // Environment variables the code tolerates being unset: `cloudgear generate` does not require them.
-  // Names MUST be string literals.
+  // Tolerated unset variables; literal names, not required by generate.
   optionalEnv?: string[];
-  // Secrets every function reads (see RouteOptions.env).
   env?: EnvOption | EnvOption[];
-  // Per-process counters: instances of a serverless app do not share them.
+  // Per-process; serverless instances do not share counters.
   rateLimit?: RateLimit;
 }
 
@@ -121,7 +103,6 @@ interface CompiledRoute {
   fn?: (...args: any[]) => unknown;
   request: boolean;
   response?: ResponseKind;
-  // Absolute path of the module whose default export handles the route.
   script?: string;
 }
 
@@ -132,7 +113,7 @@ interface Endpoints {
 }
 
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
-// Oldest counters are dropped past this, so memory stays bounded under key-flooding.
+// Oldest counters dropped past this to bound memory.
 const MAX_TRACKED_CLIENTS = 10_000;
 
 export class FunctionRouter {
@@ -151,9 +132,7 @@ export class FunctionRouter {
     }
   }
 
-  // `script` is a path, relative to the file calling `url`, of a module whose default export handles the route.
   url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
-  // With `request` the function takes a Vercel-style request instead of the input.
   url<P extends string>(
     method: Method | Lowercase<Method>,
     path: P,
@@ -237,9 +216,8 @@ export class FunctionRouter {
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
 
-  // Starts serving and returns each route's URL by name; see urls().
   listen(port: number = Number(process.env.PORT ?? 3000)): Record<string, string> {
-    // A routed function may share a module with the router; inside Lambda that import must not serve.
+    // Importing the router in Lambda does not serve.
     if (process.env.AWS_LAMBDA_FUNCTION_NAME) return {};
     if (this.mode === "remote" && !this.loadEndpoints()) {
       throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
@@ -254,9 +232,7 @@ export class FunctionRouter {
     this.server = undefined;
   }
 
-  // Route name to URL: the deployed function URL in remote mode (with "iam" only signed calls
-  // can use it), else this server's.
-  // Path params stay as {placeholders}.
+  // Path params stay as {placeholders}; remote mode uses deployed URL.
   urls(): Record<string, string> {
     const remote = this.mode === "remote";
     const endpoints = remote ? this.loadEndpoints() : null;
@@ -328,7 +304,7 @@ export class FunctionRouter {
     let upstream: Response;
     try {
       const header = (this.options.authenticate as { header?: string } | undefined)?.header;
-      // `authorization` is taken by the SigV4 signature; only a dedicated header can carry the token.
+      // `authorization` is taken by SigV4; use a dedicated header.
       const token = header && header !== "authorization" && !route.public ? req.headers.get(header) : null;
       upstream = await request(url, input, {
         route: route.key,
@@ -344,7 +320,7 @@ export class FunctionRouter {
     }
     debug("router", `remote ${route.key} -> ${upstream.status}`);
     const headers = new Headers(upstream.headers);
-    // fetch() already decoded the body, so these no longer describe it.
+    // Decoded body: headers describing the raw bytes are stale.
     for (const name of ["content-encoding", "content-length", "transfer-encoding"]) headers.delete(name);
     return new Response(upstream.body, { status: upstream.status, headers });
   }
@@ -381,7 +357,7 @@ export async function request(
   };
   const finalHeaders = init.sign ? await signFunctionUrlRequest(url, body, headers, init.sign) : headers;
   const target = new URL(url);
-  // Redirects belong to the client; following one here would resend a stale signature.
+  // Redirects are not followed; a stale signature would be resent.
   return timed("router", `POST ${target.host}${target.pathname}`, () => fetch(url, { method: "POST", headers: finalHeaders, body, redirect: "manual" }), {
     route: init.route,
     signed: !!init.sign,
@@ -400,13 +376,12 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   if (parsed.provider !== provider) {
     throw new Error(`${resolved} was deployed for provider "${parsed.provider}", router uses "${provider}"`);
   }
-  // Nothing deployed (for example after destroy): stay in local mode.
   if (Object.keys(parsed.routes).length === 0) return null;
   const apiDomain = typeof parsed.api?.domain === "string" ? parsed.api.domain : undefined;
   return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain } } : {}) };
 }
 
-// Stops at the nearest package.json so a parent project's endpoints are never picked up.
+// Stops at nearest package.json; parent endpoints are not used.
 function findUp(dir: string, relativeFile: string): string | undefined {
   for (let current = path.resolve(dir); ; current = path.dirname(current)) {
     const candidate = path.join(current, relativeFile);
@@ -418,7 +393,7 @@ function findUp(dir: string, relativeFile: string): string | undefined {
 const THIS_FILE = fileURLToPath(import.meta.url);
 const STACK_FILE = /(?:\(|\bat\s+)((?:file:\/\/)?\/.+?):\d+:\d+\)?\s*$/;
 
-// "./x" and "../x" resolve against the file that called `url`; "/x" and "x" against its project root.
+// "./x" is file-relative; "/x" and "x" are project-root-relative.
 function scriptPath(script: string): string {
   const frames = (new Error().stack ?? "").split("\n").slice(1);
   for (const frame of frames) {

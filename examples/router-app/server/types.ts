@@ -1,9 +1,6 @@
 export type FooInput = {
-  // body
   readonly name: string;
-  // path param
   readonly param: string;
-  // query param
   readonly q?: string;
 };
 

@@ -21,7 +21,6 @@ const issued = (status: string) => () => ({
   },
 });
 
-// An app that declares only DNS and a Cert, from source to deployed certificate and back.
 describe("deploying an app with a Cert and no CDN", () => {
   test("generate, plan, apply, re-plan and destroy", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cert-deploy-"));

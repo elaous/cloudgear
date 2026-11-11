@@ -12,7 +12,7 @@ export const authenticated =
   (_input, context) =>
     context.auth !== undefined;
 
-// A claim equal to `expected`, accepted by the predicate `expected`, or present when omitted.
+// Equality, predicate, or presence when omitted.
 export const claim =
   (name: string, expected?: string | number | boolean | null | ((value: unknown) => boolean)): Check =>
   (_input, context) => {
@@ -44,9 +44,7 @@ export const not =
 
 type Routed = (this: any, ...args: any[]) => unknown;
 
-// Runs the method only when every check passes: 401 without a caller, 403 with one the checks refuse.
-// The context is the last argument and the input the first, whatever sits between (a response helper).
-// The wrapper is async and keeps the method's name.
+// Context is the last argument; input is the first.
 export function guard(...checks: Check[]) {
   const allowed = allOf(...checks);
   return <T extends Routed>(method: T, _context: ClassMethodDecoratorContext): T => {

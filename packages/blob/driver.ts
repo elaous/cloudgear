@@ -10,7 +10,6 @@ export interface BlobDriver {
 }
 
 export interface BlobDriverOptions {
-  // Where the store lives, when it is not the provider's default region.
   region?: string;
 }
 

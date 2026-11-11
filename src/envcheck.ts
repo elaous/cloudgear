@@ -15,7 +15,6 @@ function currentReport(config: CloudgearConfig, configPath: string): EnvReport |
   return report;
 }
 
-// What `plan` says about the environment, without deciding anything.
 export function envWarnings(config: CloudgearConfig, configPath: string): string | undefined {
   try {
     const report = currentReport(config, configPath);
@@ -26,7 +25,7 @@ export function envWarnings(config: CloudgearConfig, configPath: string): string
   }
 }
 
-// The code's environment variables must be provided, and the secrets behind them stored, before anything is deployed.
+// Required env vars and their secrets are checked before deploy.
 export async function checkEnvironment(config: CloudgearConfig, configPath: string, region: string | undefined, warn: (message: string) => void = console.warn): Promise<void> {
   const reportFile = envReportPath(configPath);
   const report = currentReport(config, configPath);
@@ -38,7 +37,7 @@ export async function checkEnvironment(config: CloudgearConfig, configPath: stri
   }
   if (!secretGroups(config).length) return;
   const resolved = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
-  // A DNS token set in the deployer's own environment is used from there, so it need not be stored.
+  // A DNS token in the deployer's environment needs no storage.
   const fromEnvironment = new Set(config.certificate.flatMap((c) => (c.dns.token && process.env[c.dns.token.name] !== undefined ? [`${c.dns.token.path}/${c.dns.token.name}`] : [])));
   let statuses;
   try {

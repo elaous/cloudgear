@@ -15,16 +15,15 @@ export { assertSecretName, createSecretDriver, registerSecretDriver, parseSecret
 export type { SecretDriver, SecretDriverFactory, SecretDriverOptions, SecretProvider, SecretService } from "./driver";
 
 export interface SecretStoreOptions {
-  // "ssm" (Parameter Store, the default) or "secretsmanager". Literal only.
+  // Literal only; "ssm" (default) or "secretsmanager".
   service?: SecretService;
-  // Region of the store; defaults to the function's. Literal only.
+  // Literal only; defaults to the function's region.
   region?: string;
-  // Key id or ARN encrypting what `secrets set` writes. Literal only.
+  // Literal only; KMS key encrypting written secrets.
   kmsKey?: string;
   driver?: SecretDriver;
 }
 
-// What a function reads: environment variable name -> secret name under the path.
 export interface EnvBinding {
   readonly kind: "env";
   readonly store: SecretStore;
@@ -37,11 +36,10 @@ export interface SecretPath<All extends boolean = boolean> {
   (name: string): SecretRef;
   readonly store: SecretStore;
   readonly prefix: string;
-  // The path ended in "/*": every secret under it.
   readonly all: All;
 }
 
-// Constructing it does nothing; `cloudgear apply` grants functions what they declare.
+// Constructing does nothing; `cloudgear apply` grants access.
 export class SecretStore {
   private driverPromise?: Promise<SecretDriver>;
 
@@ -82,10 +80,9 @@ export class SecretStore {
   }
 }
 
-// Environment variables that hydration filled, with the secret each came from.
 const hydrated = new Map<string, string>();
 
-// One secret. A plain object: awaiting it does nothing, call get().
+// Plain object: awaiting does nothing; call `get()`.
 export class SecretRef {
   readonly name: string;
 
@@ -101,8 +98,7 @@ export class SecretRef {
     return `${this.prefix}/${this.name}`;
   }
 
-  // The environment variable of that name first (a deployed function has its secrets there, a local run its .env),
-  // then the store.
+  // Env variable first, then the store; deployed secrets live there.
   async get(): Promise<string> {
     const local = process.env[this.name];
     if (local !== undefined && (hydrated.get(this.name) ?? this.fullName) === this.fullName) return local;
@@ -117,13 +113,12 @@ export interface SecretBindingSpec {
   service: SecretService;
   region?: string;
   path: string;
-  // Empty for a wildcard binding, which reads everything under `path`.
   name: string;
   env: string;
   all?: boolean;
 }
 
-// Puts the declared secrets in `process.env` without overwriting what is already there, once per process.
+// Fills `process.env` without overwriting; runs once per process.
 export function secretsLoader(bindings: readonly SecretBindingSpec[], factories: Partial<Record<SecretService, SecretDriverFactory>> = {}): () => Promise<void> {
   let loading: Promise<void> | undefined;
   return () => (loading ??= hydrate(bindings, factories).catch((err) => {

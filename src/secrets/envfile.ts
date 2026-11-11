@@ -1,4 +1,3 @@
-// Reads a dotenv file: KEY=value lines, `export` prefixes, comments, single and double quotes.
 // Errors name the file and line, never a value.
 export function parseEnvFile(text: string, file = ".env"): Record<string, string> {
   const values: Record<string, string> = {};

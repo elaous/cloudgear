@@ -5,22 +5,21 @@ export type Authenticator = (req: Request) => Principal | null | undefined | Pro
 
 export interface JwtAuthOptions {
   issuer: string;
-  // Strongly recommended: without it any token from this issuer is accepted.
+  // Strongly recommended: without it, any issuer token is accepted.
   audience?: string | string[];
-  // Defaults to `<issuer>/.well-known/jwks.json` (Cognito, Clerk, Auth0 style issuers).
   jwksUri?: string;
   clockToleranceSeconds?: number;
-  // Header carrying the token. Defaults to `authorization` (`Bearer <jwt>`); any other header holds
-  // the bare token (a `Bearer ` prefix is tolerated). `cloudgear generate` reads it, so it MUST be a literal.
+  // Default `authorization` takes `Bearer <jwt>`; other headers: bare token.
+  // Literal only: generate reads it.
   header?: string;
 }
 
 export type JwtAuthenticator = Authenticator & { readonly header: string };
 
-// Asymmetric algorithms only, so a token can never be validated against a shared secret.
+// Asymmetric algorithms only; no shared-secret validation.
 const ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"];
 
-// Only these mean "this token is bad"; anything else (JWKS outage, bad JWKS body) is an infrastructure failure.
+// Only these mean a bad token; other failures are infrastructure errors.
 const INVALID_TOKEN = [
   errors.JWTExpired,
   errors.JWTClaimValidationFailed,
@@ -33,8 +32,7 @@ const INVALID_TOKEN = [
   errors.JWKSMultipleMatchingKeys,
 ];
 
-// Verifies `Authorization: Bearer <jwt>` against the issuer's JWKS. Invalid tokens yield null (401);
-// a JWKS endpoint that is unreachable or returns garbage throws (the router answers 503).
+// Invalid tokens yield null (401); unreachable JWKS throws (503).
 export function jwtAuth(options: JwtAuthOptions): JwtAuthenticator {
   const header = (options.header ?? "authorization").toLowerCase();
   const jwksUri = options.jwksUri ?? `${options.issuer.replace(/\/$/, "")}/.well-known/jwks.json`;

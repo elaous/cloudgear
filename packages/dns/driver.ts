@@ -2,7 +2,7 @@ export type DnsProvider = "gandi" | "aws";
 export type DnsRecordType = "CNAME" | "TXT" | "A" | "AAAA";
 
 export interface DnsRecord {
-  // Fully qualified, without a trailing dot, e.g. "cdn.example.com".
+  // Fully qualified, no trailing dot.
   name: string;
   type: DnsRecordType;
   values: string[];
@@ -11,13 +11,12 @@ export interface DnsRecord {
 
 export interface DnsDriver {
   upsert(record: DnsRecord): Promise<void>;
-  // Removing a record that does not exist is not an error.
+  // Removing a missing record is not an error.
   remove(name: string, type: DnsRecordType): Promise<void>;
   get(name: string, type: DnsRecordType): Promise<DnsRecord | null>;
 }
 
 export interface DnsDriverOptions {
-  // The provider's API token, when it needs one (Gandi); otherwise read from the environment.
   token?: string;
 }
 
@@ -56,7 +55,7 @@ export function normalizeHostname(name: string): string {
   return normalized;
 }
 
-// A certificate's domain MAY be a wildcard: "*.example.com" covers one label under example.com.
+// Wildcard "*.example.com" covers one label under example.com.
 export function normalizeCertDomain(name: string): string {
   const trimmed = name.trim();
   if (!trimmed.startsWith("*.")) return normalizeHostname(trimmed);
@@ -65,14 +64,14 @@ export function normalizeCertDomain(name: string): string {
 
 export const isWildcardDomain = (domain: string): boolean => domain.startsWith("*.");
 
-// The hostname `host` when a wildcard certificate for `pattern` covers it: exactly one label under the base.
+// Hostname a wildcard covers: exactly one label under the base.
 export function wildcardCovers(pattern: string, host: string): boolean {
   if (!isWildcardDomain(pattern)) return pattern === host;
   const base = pattern.slice(2);
   return host.endsWith(`.${base}`) && !host.slice(0, -(base.length + 1)).includes(".") && host.length > base.length + 1;
 }
 
-// Record names may start labels with "_" (ACM validation records do); site domains may not.
+// Record names can start labels with "_"; site domains cannot.
 const RECORD_NAME = /^(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 
 export function normalizeRecordName(name: string): string {
@@ -85,7 +84,6 @@ export function isWithinZone(name: string, zone: string): boolean {
   return name === zone || name.endsWith(`.${zone}`);
 }
 
-// Name of a record relative to its zone ("@" for the zone itself).
 export function relativeName(name: string, zone: string): string {
   if (name === zone) return "@";
   if (!isWithinZone(name, zone)) throw new Error(`"${name}" is not inside zone "${zone}"`);

@@ -14,16 +14,13 @@ export { createCdnDriver, registerCdnDriver } from "./cdn-driver";
 export type { CdnDriver, CdnDriverFactory, CdnInfo, CdnProvider, CdnState } from "./cdn-driver";
 
 export interface CertOptions {
-  // us-east-1 for a CDN, the function region for a router. Literal only.
+  // Literal only; default differs for CDN and router.
   region?: string;
-  // Provider settings with no dedicated option; literals only.
+  // Literals only; read by generate.
   options?: ProviderOptions;
   driver?: CertDriver;
 }
 
-// A TLS certificate for `dns.domain`, validated through `dns`. Constructing it does nothing;
-// `cloudgear apply` requests the certificate and writes the validation record. Hand it to a CDN
-// or to `new FunctionRouter(provider, { cert })`; on AWS it lives in AWS Certificate Manager.
 export class Cert {
   private driverPromise?: Promise<CertDriver>;
   readonly region: string | undefined;
@@ -42,7 +39,6 @@ export class Cert {
     return this.dns.domain;
   }
 
-  // State of the deployed certificate: "none" until `cloudgear apply` has requested it.
   async status(): Promise<CertInfo> {
     return timed("cert", `status ${this.domain}`, async () => (await this.driver()).describe(this.domain), { region: this.region });
   }
@@ -57,22 +53,18 @@ export class Cert {
 }
 
 export interface CdnOptions {
-  // The static site: served at "/" from this store's bucket (and path prefix, if it has one).
   // Exactly one of `bucket` and `router`.
   bucket?: BlobStore;
-  // Serves the router's routes on the certificate's domain.
   router?: { readonly provider: string };
-  // The hostname served, for a CDN on a wildcard Cert: one label under the wildcard
-  // ("files.example.com" under "*.example.com"). Literal only.
+  // Hostname on a wildcard Cert; literal only.
   domain?: string;
-  // Runs a CloudFront Function per request to route same-path methods; literal only.
+  // Runs a CloudFront Function per request; literal only.
   methodRouting?: "function";
   options?: ProviderOptions;
   driver?: CdnDriver;
 }
 
-// A CDN serving a bucket's static files on the certificate's domain. Like DNS and Cert it does
-// nothing at runtime except report what `cloudgear apply` deployed.
+// Does nothing at runtime; reports what `cloudgear apply` deployed.
 export class CDN {
   private driverPromise?: Promise<CdnDriver>;
 
@@ -111,8 +103,7 @@ export class CDN {
     return this.options.domain ? normalizeHostname(this.options.domain) : this.cert.domain;
   }
 
-  // The distribution's own URL: from the endpoints file `cloudgear apply` wrote, else from the
-  // provider. Throws until the CDN has been deployed.
+  // Throws until the CDN is deployed.
   async url(): Promise<string> {
     const deployed = readDeployedCdn(this.domain);
     debug("cdn", `url ${this.domain} ${deployed ? "from the endpoints file" : "not in the endpoints file"}`, { url: deployed });
@@ -122,7 +113,6 @@ export class CDN {
     return info.url;
   }
 
-  // Live state of the distribution from the provider: "none" until deployed.
   async status(): Promise<CdnInfo> {
     return timed("cdn", `status ${this.domain}`, async () => (await this.driver()).describe(this.domain));
   }

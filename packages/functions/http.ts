@@ -5,7 +5,6 @@ export type Method = (typeof METHODS)[number];
 
 export type Provider = "aws" | "gcp" | "azure";
 
-// Body of a router -> function call: the already-assembled input object.
 export const INVOKE_CONTENT_TYPE = "application/vnd.cloudgear.invoke+json";
 export const ROUTE_HEADER = "x-cloudgear-route";
 
@@ -22,16 +21,13 @@ export interface CloudgearResponse<T = unknown> {
   readonly body: T;
 }
 
-// O may include CloudgearResponse values to set status or headers.
 export type Handler<I = any, O = unknown> = (input: I, context: RequestContext) => O | Promise<O>;
 
-// Who is calling, as established by the router's `authenticate` hook.
 export interface Principal {
   subject: string;
   claims: Record<string, unknown>;
 }
 
-// The event that started a function: set for runs triggered by an EventBus rule.
 export interface EventInfo {
   id: string;
   type: string;
@@ -54,7 +50,6 @@ export interface HttpResult {
   status: number;
   headers: Record<string, string>;
   body: string;
-  // The body is base64 of binary content.
   base64?: boolean;
   // Set-Cookie values, which cannot be joined into one header.
   cookies?: string[];
@@ -141,7 +136,6 @@ export function parseBody(text: string, contentType: string | null): unknown {
   return text;
 }
 
-// The request as the router forwards it to a function that asked for it; `body` is base64.
 export interface OriginalRequest {
   method: string;
   url: string;
@@ -160,7 +154,6 @@ export async function serializeRequest(req: Request): Promise<OriginalRequest> {
   return { method: req.method, url: req.url, headers, ...(bytes.length ? { body: Buffer.from(bytes).toString("base64") } : {}) };
 }
 
-// Query (with path params), cookies and parsed body, as a Vercel function sees a request.
 export function vercelRequestFrom(
   original: { method: string; url: string; headers: Record<string, string>; raw?: Uint8Array },
   params: Record<string, string> = {},
@@ -189,8 +182,7 @@ export function vercelRequestFromOriginal(original: OriginalRequest, params?: Re
 
 export type ResponseKind = "helper" | "writer";
 
-// With `request` the function takes it instead of the input; a `response` kind adds the helper or a
-// writer after it, and a writer replaces the return value as the output.
+// A writer replaces the return value as the output.
 export async function invoke(
   fn: (...args: any[]) => unknown,
   input: unknown,

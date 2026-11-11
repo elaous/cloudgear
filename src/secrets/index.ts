@@ -4,23 +4,18 @@ import type { CloudgearConfig, SecretRefSpec } from "../config/schema";
 import { parseEnvFile } from "./envfile";
 
 export interface SecretGroup {
-  // Where the group lives; also how it is told apart from the others.
   key: string;
   service: string;
   region?: string;
   kmsKey?: string;
   path: string;
-  // Names some function or DNS declaration reads from this path.
   names: Set<string>;
-  // Secret name -> environment variable a function reads it as, when different.
   aliases: Map<string, string>;
-  // A function reads everything under the path.
   all: boolean;
 }
 
 const LIMITS: Record<string, number> = { ssm: 4096, secretsmanager: 65536 };
 
-// The paths the app declares and the names under each, from the config alone.
 export function secretGroups(config: CloudgearConfig): SecretGroup[] {
   const groups = new Map<string, SecretGroup>();
   const group = (ref: SecretRefSpec): SecretGroup => {
@@ -48,7 +43,6 @@ export function secretGroups(config: CloudgearConfig): SecretGroup[] {
 export const secretDriverFor = (group: Pick<SecretGroup, "service" | "region" | "kmsKey">, region?: string): Promise<SecretDriver> =>
   createSecretDriver("aws", { service: group.service as never, region: group.region ?? region, kmsKey: group.kmsKey });
 
-// The value of a secret an infrastructure declaration needs: the environment variable of that name first.
 export async function readSecretRef(ref: SecretRefSpec, region?: string): Promise<string> {
   const local = process.env[ref.name];
   if (local !== undefined) return local;
@@ -60,14 +54,11 @@ export async function readSecretRef(ref: SecretRefSpec, region?: string): Promis
 
 export interface SetResult {
   written: { path: string; names: string[] }[];
-  // Declared, and absent from what was given.
   missing: string[];
-  // Given, and declared nowhere.
   undeclared: string[];
   empty: string[];
 }
 
-// Writes the declared names found in `values`; with `all`, the rest go under `path` as well.
 export async function setSecrets(
   config: CloudgearConfig,
   values: Record<string, string>,
@@ -122,7 +113,6 @@ export interface GroupStatus {
   group: SecretGroup;
   present: string[];
   missing: string[];
-  // Stored under the path, declared by no one.
   unused: string[];
 }
 
@@ -143,7 +133,7 @@ export async function secretStatus(config: CloudgearConfig, region?: string): Pr
   return statuses;
 }
 
-// An env file must stay out of git: tracked files and files git does not ignore are refused.
+// Refuses env files that git tracks or does not ignore.
 export function checkEnvFileIgnored(file: string, allowUnignored: boolean): void {
   const cwd = path.dirname(path.resolve(file));
   const name = path.basename(file);

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Analyzing an app and bundling functions take seconds when the machine is busy.
+// Timeout covers analysis and bundling.
 setDefaultTimeout(30_000);
 
 const root = path.join(import.meta.dir, "..");

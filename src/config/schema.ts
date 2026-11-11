@@ -1,7 +1,7 @@
 import { assertSecretName, parseSecretPath } from "@cloudgear/secrets";
 import { encodePrototxt, parsePrototxt, type ProtoMessage } from "./prototxt";
 
-// Mirrors cloudgear.proto.
+// Keep in sync with cloudgear.proto.
 export interface CloudgearConfig {
   project: string;
   provider: string;
@@ -50,7 +50,6 @@ export interface CertificateSpec {
 export interface ApiSpec {
   provider: string;
   domain: string;
-  // Wildcard Cert serving the domain, when it is not the domain's own.
   certificate?: string;
   via?: "cloudfront";
   method_routing?: boolean;
@@ -60,7 +59,6 @@ export interface ApiSpec {
 export interface CdnSpec {
   provider: string;
   domain: string;
-  // Wildcard Cert serving the domain, when it is not the domain's own.
   certificate?: string;
   bucket: string;
   path: string;
@@ -88,7 +86,7 @@ export interface FunctionSpec {
   route: { method: string; path: string; name: string }[];
   bundle: { path: string; sha256: string };
   permission: { resource: string; path: string; action: string[] }[];
-  // value_from names a resource whose physical name becomes the value.
+  // The named resource's physical name becomes the value.
   env: { key: string; value?: string; value_from?: string }[];
   reserved_concurrency: number;
   options?: Options;
@@ -102,7 +100,6 @@ export interface FunctionSpec {
 }
 
 export interface EventTriggerSpec {
-  // Logical name of the bus resource.
   bus: string;
   type: string;
   source?: string;
@@ -233,7 +230,6 @@ export function decodeConfig(text: string): CloudgearConfig {
 
 const REGION = /^[a-z]{2}(-[a-z]+)+-\d$/;
 
-// Policies are built from these, so a hand-edited config is checked as the analyzer would.
 function secretRefFrom(raw: Record<string, any>): SecretRefSpec {
   const service = String(raw.service ?? "ssm");
   if (service !== "ssm" && service !== "secretsmanager") throw new Error(`cloudgear config: unknown secret service "${service}"`);
@@ -252,7 +248,7 @@ function secretRefFrom(raw: Record<string, any>): SecretRefSpec {
   };
 }
 
-// A proto map is written as repeated { key, value } entries.
+// Proto maps are written as repeated key/value entries.
 function optionsToProto(config: CloudgearConfig): unknown {
   const entries = (options?: Options) => (options && Object.keys(options).length ? Object.entries(options).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => ({ key, value })) : undefined);
   const withOptions = <T extends { options?: Options }>(item: T) => ({ ...item, options: entries(item.options) });

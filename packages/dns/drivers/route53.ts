@@ -30,7 +30,7 @@ export class Route53DnsDriver implements DnsDriver {
 
   async remove(name: string, type: DnsRecordType) {
     const existing = await this.find(name, type);
-    // DELETE must repeat the record exactly as stored.
+    // DELETE repeats the record exactly as stored.
     if (existing) await this.change("DELETE", existing);
   }
 

@@ -16,7 +16,7 @@ export interface ScheduleDeps {
 
 const TARGET_ID = "cloudgear";
 
-// Keeps the scheduled event and adds the query the run carries: the adapter reads it from `cloudgear.query`.
+// Adds the query under `cloudgear.query`; the adapter reads it.
 export function queryTransformer(query: Record<string, string>) {
   for (const [name, value] of Object.entries(query)) {
     if (!/^[A-Za-z0-9_.:/-]+$/.test(name) || !/^[A-Za-z0-9_.:/-]*$/.test(value)) throw new Error(`Invalid schedule query ${name}=${value}: use letters, digits and _ . : / -`);

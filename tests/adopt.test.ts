@@ -457,3 +457,112 @@ describe("ARN checks that guard against the wrong thing", () => {
     expect(await failure(aws, cdn, "arn:aws:s3:::another-bucket", (a) => a.type === "@aws.S3")).toMatch(/is the bucket "another-bucket", but the config uses "my-web"/);
   });
 });
+
+describe("importing with only an ARN", () => {
+  const dns = (domain: string) => ({ provider: "gandi", domain, zone: "example.com" });
+  const twoCerts = () =>
+    baseConfig({
+      resource: [],
+      function: [],
+      certificate: ["www.example.com", "api.example.com"].map((domain) => ({ provider: "aws", domain, dns: dns(domain), usage: "cdn" as const })),
+    });
+  const arn = "arn:aws:acm:us-east-1:111122223333:certificate/api";
+
+  test("the ARN's service tells the type, and the certificate it describes tells which entry", async () => {
+    const { adoptByArn, typeOfArn } = await import("../src/deploy/adopt");
+    expect(typeOfArn(arn)).toBe("@aws.Certificate");
+    expect(typeOfArn("arn:aws:cloudfront::111122223333:distribution/E1")).toBe("@aws.CloudFront");
+    expect(typeOfArn("arn:aws:lambda:eu-west-1:1:function:f")).toBe("@aws.Lambda");
+    expect(typeOfArn("arn:aws:events:eu-west-1:1:rule/r")).toBe("@aws.Schedule");
+    expect(typeOfArn("arn:aws:s3:::b")).toBe("@aws.S3");
+    expect(() => typeOfArn("arn:aws:sqs:us-east-1:1:q")).toThrow(/sqs ARN is not supported/);
+    expect(() => typeOfArn("nope")).toThrow(/is not an ARN/);
+    const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "api.example.com", Status: "ISSUED" } }) });
+    const state = emptyState();
+    const result = await adoptByArn(plan(twoCerts(), state), state, aws.drivers, "@aws.Certificate", arn);
+    expect(result.adopted).toEqual(["@aws.Certificate api.example.com"]);
+    expect(Object.keys(state.entries)).toEqual(["@aws.Certificate.api.example.com"]);
+    expect(state.entries["@aws.Certificate.api.example.com"]!.outputs.arn).toBe(arn);
+  });
+
+  test("when no entry fits, each reason is listed and nothing is recorded", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "elsewhere.example.com", Status: "ISSUED" } }) });
+    const state = emptyState();
+    const result = await adoptByArn(plan(twoCerts(), state), state, aws.drivers, "@aws.Certificate", arn);
+    expect(result.adopted).toEqual([]);
+    expect(result.failed).toHaveLength(2);
+    expect(result.failed.join("\n")).toMatch(/is a certificate for elsewhere\.example\.com, not (www|api)\.example\.com/);
+    expect(state.entries).toEqual({});
+  });
+
+  test("a function ARN finds the function of that name among several", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const config = baseConfig({ resource: [], function: [fn({ permission: [], env: [] }), fn({ name: "bar", physical_name: "app-bar", permission: [], env: [] })] });
+    const aws = fakeAws({ GetFunctionCommand: (input: { FunctionName: string }) => ({ Configuration: { FunctionArn: `arn:aws:lambda:eu-west-1:1:function:${input.FunctionName}`, Role: "arn:aws:iam::1:role/r" } }), GetFunctionUrlConfigCommand: () => { throw notFound(); } });
+    const state = emptyState();
+    const result = await adoptByArn(plan(config, state), state, aws.drivers, "@aws.Lambda", "arn:aws:lambda:eu-west-1:1:function:app-bar");
+    expect(result.adopted).toEqual(["@aws.Lambda bar"]);
+  });
+
+  test("nothing is recorded when the ARN fits several entries, which are named", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const config = baseConfig({
+      resource: ["a", "b"].map((name) => ({ name, type: "@aws.S3", physical_name: `my-${name}`, dry: false, source: "a.ts:1" })),
+      function: [],
+      certificate: ["a.example.com", "b.example.com"].map((domain) => ({ provider: "aws", domain, dns: dns(domain), usage: "cdn" as const })),
+      cdn: [
+        { provider: "aws", domain: "a.example.com", bucket: "a", path: "" },
+        { provider: "aws", domain: "b.example.com", bucket: "b", path: "" },
+      ],
+    });
+    const distribution = { Distribution: { Id: "E1", ARN: "arn:aws:cloudfront::111122223333:distribution/E1", DomainName: "d1.cloudfront.net", Status: "Deployed", DistributionConfig: { Aliases: { Items: ["a.example.com", "b.example.com"] } } } };
+    const aws = fakeAws({ GetDistributionCommand: () => distribution });
+    const state = emptyState();
+    const result = await adoptByArn(plan(config, state), state, aws.drivers, "@aws.CloudFront", "arn:aws:cloudfront::111122223333:distribution/E1");
+    expect(result.adopted).toEqual([]);
+    expect(result.failed[0]).toMatch(/fits several entries \(a\.example\.com, b\.example\.com\); say which/);
+    expect(state.entries).toEqual({});
+  });
+
+  test("a failing candidate leaves state alone while the one that fits is recorded", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "api.example.com", Status: "ISSUED" } }) });
+    const state = emptyState();
+    const config = twoCerts();
+    await adoptByArn(plan(config, state), state, aws.drivers, "@aws.Certificate", arn);
+    expect(Object.keys(state.entries)).toEqual(["@aws.Certificate.api.example.com"]);
+  });
+
+  test("a function ARN is matched by name before any AWS call, and a name the config lacks says so", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    let calls = 0;
+    const config = baseConfig({ resource: [], function: [fn({ permission: [], env: [] })] });
+    const aws = fakeAws({ GetFunctionCommand: () => { calls++; return {}; } });
+    const state = emptyState();
+    const result = await adoptByArn(plan(config, state), state, aws.drivers, "@aws.Lambda", "arn:aws:lambda:eu-west-1:1:function:not-in-config");
+    expect(calls).toBe(0);
+    expect(result.failed).toEqual(['no @aws.Lambda entry is named "not-in-config" in the config']);
+  });
+
+  test("when every entry of the type is already imported, it says so instead of listing nothing", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "api.example.com", Status: "ISSUED" } }) });
+    const state = emptyState();
+    await adoptByArn(plan(twoCerts(), state), state, aws.drivers, "@aws.Certificate", arn);
+    const config = baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "api.example.com", dns: dns("api.example.com"), usage: "cdn" }] });
+    const again = await adoptByArn(plan(config, state), state, aws.drivers, "@aws.Certificate", arn);
+    expect(again.failed).toEqual(["all 1 @aws.Certificate entries in the config are already imported or are not managed here"]);
+    expect((await adoptByArn(plan(baseConfig({ resource: [], function: [] }), emptyState()), emptyState(), aws.drivers, "@aws.CloudFront", "arn:aws:cloudfront::1:distribution/E1")).failed).toEqual(["the config has no @aws.CloudFront entry"]);
+  });
+
+  test("identical reasons are listed once with every entry they apply to", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const aws = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "x", Status: "ISSUED" } }) });
+    const config = baseConfig({ resource: [], function: [], certificate: ["a", "b", "c", "d", "e", "f", "g"].map((n) => ({ provider: "aws", domain: `${n}.example.com`, dns: dns(`${n}.example.com`), usage: "cdn" as const })) });
+    const state = emptyState();
+    const result = await adoptByArn(plan(config, state), state, aws.drivers, "@aws.Certificate", arn);
+    expect(result.failed.length).toBe(6);
+    expect(result.failed.at(-1)).toBe("... and 2 more");
+  });
+});

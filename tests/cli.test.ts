@@ -153,7 +153,12 @@ describe("cloudgear CLI with a CDN", () => {
     expect(run("import", "my-site", "--arn", "just-a-name").err).toMatch(/is not an ARN/);
     expect(run("import", "my-site", "arn:aws-cn:s3:::cn-bucket").out).toMatch(/as "cn-bucket"/);
     expect(run("import", "my-site", "arn:aws:s3:us-east-1:111122223333:accesspoint/ap").err).toMatch(/access point's ARN does not name the bucket/);
-    expect(run("import", "www.example.com", "--arn", "arn:aws:acm:us-east-1:1:certificate/x").err).toMatch(/say which: cloudgear import <type> www\.example\.com --arn <arn>/);
+    expect(run("import", "www.example.com", "--arn", "arn:aws:s3:::x").err).toMatch(/Nothing named "www\.example\.com" of type @aws\.S3/);
+    expect(run("import", "@aws.Certificate", "www.example.com", "--arn", "arn:aws:s3:::x").err).toMatch(/is a @aws\.S3 ARN, not a @aws\.Certificate one/);
+    expect(run("import", "--arn", "arn:aws:sqs:us-east-1:111122223333:queue").err).toMatch(/Importing a sqs ARN is not supported/);
+    expect(run("import", "--arn", "arn:aws:s3:::no-such-bucket").err).toMatch(/No bucket named "no-such-bucket"/);
+    expect(run("import", "--arn", "arn:aws:s3:::my-site/some/key").err).toMatch(/names an object, not a bucket/);
+    expect(run("import", "--arn", "arn:aws:s3:::my-site").out).toMatch(/imported @aws\.S3 my-site as "my-site"/);
     fs.rmSync(stateFile, { force: true });
   });
 

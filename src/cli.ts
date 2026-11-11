@@ -15,7 +15,7 @@ import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
-import { adoptEntries } from "./deploy/adopt";
+import { adoptByArn, adoptEntries, typeOfArn } from "./deploy/adopt";
 import { parseArn } from "./deploy/aws/arn";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
@@ -220,16 +220,24 @@ async function main() {
       const config = readConfig(configPath);
       const state = loadState(statePath, config.project, config.provider);
       const [first, second, third] = args;
-      if (!values.all && !first) throw new Error("Usage: cloudgear import <name> [physical-id] | cloudgear import <type> <name> | cloudgear import --all");
-      const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : undefined;
+      if (!values.all && !first && !values.arn) throw new Error("Usage: cloudgear import <name> [physical-id] | cloudgear import <type> <name> | cloudgear import --arn <arn> | cloudgear import --all");
+      if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
+      // The ARN says what kind of thing it is.
+      const arnType = values.arn ? typeOfArn(values.arn) : undefined;
+      const arnBucket = !values.all && !first && arnType === "@aws.S3" ? bucketOfArn(values.arn!, true) : undefined;
+      // An ARN names the physical bucket; only without a match is it taken for the config's name.
+      const byArn = arnBucket ? (config.resource.filter((r) => r.physical_name === arnBucket).length ? config.resource.filter((r) => r.physical_name === arnBucket) : config.resource.filter((r) => r.name === arnBucket)) : [];
+      if (byArn.length > 1) throw new Error(`${values.arn} fits several resources (${byArn.map((r) => r.name).join(", ")}); say which: cloudgear import <name> --arn <arn>`);
+      const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : byArn[0];
+      if (arnBucket && !bucket) throw new Error(`No bucket named "${arnBucket}" is in ${values.config}; run \`cloudgear plan\` to see the names`);
       if (bucket) {
         const existing = state.entries[stateKey(bucket)];
         if (existing && !existing.imported) {
-          throw new Error(`${bucket.type} ${first} is already managed by cloudgear; destroy it before importing another`);
+          throw new Error(`${bucket.type} ${bucket.name} is already managed by cloudgear; destroy it before importing another`);
         }
         if (values.arn && second) throw new Error("Give the bucket's ARN with --arn or as the second argument, not both");
         if (third) throw new Error("Usage: cloudgear import <bucket> [physical-id | arn]");
-        if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
+        if (first && arnType && arnType !== "@aws.S3") throw new Error(`${values.arn} is not a bucket ARN, but "${first}" is a bucket`);
         const given = values.arn ?? second;
         const physical = given?.startsWith("arn:") ? bucketOfArn(given) : (given ?? bucket.physical_name);
         state.entries[stateKey(bucket)] = {
@@ -248,17 +256,28 @@ async function main() {
 
       const typed = first?.startsWith("@") ? first : undefined;
       const name = typed ? second : first;
+      if (typed && arnType && typed !== arnType) throw new Error(`${values.arn} is a ${arnType} ARN, not a ${typed} one`);
       if (values.all && first) throw new Error("cloudgear import --all takes no name");
       if (values.all && values.arn) throw new Error("--arn names one thing; it cannot be used with --all");
       if (typed && !name) throw new Error(`Usage: cloudgear import ${typed} <name>`);
       if (!values.all && (typed ? third : second)) throw new Error("A physical id can only be given for a bucket from the config's resources; other things are found by name");
       const planned = plan(config, state);
-      const select = (action: PlannedAction) => values.all || (action.name === name && (!typed || action.type === typed));
+      if (values.arn && !first) {
+        const deployers = await drivers(planned.filter((a) => a.type === arnType), config, configPath, values.region, deployTags(config, configPath, values));
+        const found = await adoptByArn(planned, state, deployers, arnType!, values.arn);
+        saveState(statePath, state);
+        for (const item of found.adopted) console.log(`cloudgear: imported ${item}`);
+        for (const note of found.notes) console.warn(`warning: ${note}`);
+        if (!found.adopted.length) throw new Error(`No ${arnType} in ${values.config} fits ${values.arn}${found.failed.length ? `:\n  ${found.failed.join("\n  ")}` : ""}`);
+        console.log("cloudgear: run `cloudgear plan`; imported things show as updates until `cloudgear apply` brings them in line with the config");
+        return;
+      }
+      const wantedType = typed ?? arnType;
+      const select = (action: PlannedAction) => values.all || (action.name === name && (!wantedType || action.type === wantedType));
       const chosen = planned.filter(select);
       if (!values.all) {
-        if (!chosen.length) throw new Error(`Nothing named "${name}" is in ${values.config}; run \`cloudgear plan\` to see the names`);
-        if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}${values.arn ? " --arn <arn>" : ""}`);
-        if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
+        if (!chosen.length) throw new Error(`Nothing named "${name}"${wantedType ? ` of type ${wantedType}` : ""} is in ${values.config}; run \`cloudgear plan\` to see the names`);
+        if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}`);
       }
       const deployers = await drivers(chosen, config, configPath, values.region, deployTags(config, configPath, values));
       const result = await adoptEntries(planned, state, deployers, select, values.arn ? { arn: values.arn } : undefined);
@@ -281,8 +300,9 @@ async function main() {
 }
 
 // `arn:aws:s3:::my-bucket` (an object ARN `.../key` is cut back to the bucket).
-function bucketOfArn(arn: string): string {
+function bucketOfArn(arn: string, bucketOnly = false): string {
   const parsed = parseArn(arn);
+  if (bucketOnly && parsed?.service === "s3" && parsed.resource.includes("/") && !parsed.region) throw new Error(`"${arn}" names an object, not a bucket`);
   const name = parsed?.service === "s3" && !parsed.region ? /^([^/]+)/.exec(parsed.resource)?.[1] : undefined;
   if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN${parsed?.resource.startsWith("accesspoint/") ? " (an access point's ARN does not name the bucket)" : ""}`);
   return name;

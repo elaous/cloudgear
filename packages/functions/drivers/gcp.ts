@@ -23,7 +23,7 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
   return async (req: GcpRequest, res: GcpResponse): Promise<void> => {
     const [rawPath = "/", ...query] = (req.originalUrl ?? req.url ?? "/").split("?");
     const headers = Object.fromEntries(Object.entries(req.headers).map(([name, value]) => [name, Array.isArray(value) ? value.join(", ") : value]));
-    let result;
+    let result: Awaited<ReturnType<typeof core>>;
     try {
       result = await core({
         rawPath: rawPath || "/",

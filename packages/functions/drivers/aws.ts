@@ -65,13 +65,14 @@ export interface HandlerOptions {
 export function createHandler(fn: (...args: any[]) => unknown, routes: RouteSpec[], options: HandlerOptions = {}) {
   const compiled = routes.map((route) => ({ ...route, matcher: compilePath(route.path) }));
   let prepared: Promise<void> | undefined;
-  const prepare = () =>
-    options.prepare
-      ? (prepared ??= options.prepare().catch((err) => {
-          prepared = undefined;
-          throw err;
-        }))
-      : undefined;
+  const prepare = () => {
+    if (!options.prepare) return undefined;
+    prepared ??= options.prepare().catch((err) => {
+      prepared = undefined;
+      throw err;
+    });
+    return prepared;
+  };
 
   // Scheduled and event runs throw on failure so Lambda retries.
   const runAsync = async (what: string, input: unknown, context: RequestContext, failsAt = 400, query?: Record<string, string>) => {

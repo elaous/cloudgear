@@ -60,7 +60,7 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
       result.failed.push(`${label(action)}: importing by ARN is not supported for ${action.type}`);
       continue;
     }
-    let found;
+    let found: Awaited<ReturnType<typeof driver.adopt>>;
     try {
       found = await driver.adopt(entry, { entry: (key) => state.entries[key] }, hint);
     } catch (err) {

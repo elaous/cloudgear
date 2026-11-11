@@ -27,7 +27,7 @@ import type { ApiComparable } from "../plan";
 import { stateKey } from "../state";
 import { sameTarget } from "./certificate";
 import type { SendClient } from "./index";
-import { type Tagger } from "./tags";
+import type { Tagger } from "./tags";
 
 export interface ApiGatewayDeps {
   tags?: Tagger;

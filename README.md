@@ -1,22 +1,77 @@
 # cloudgear
 
+Write your HTTP API in TypeScript and cloudgear plans the cloud infrastructure from it, reviewable before you apply.
+
 Write an HTTP API as plain TypeScript functions, and cloudgear infers the
 cloud infrastructure for it: one serverless function per routed function,
 the storage those functions use, and the least-privilege permissions
 between them. Think Terraform, but the config is derived from your code.
 
+## Requirements
+
+- [Bun](https://bun.sh) 1.x runs the CLI, the router and the tests (the
+  repository is developed against Bun 1.4).
+- An AWS account and credentials from the standard AWS provider chain, only for
+  `apply`, `import`, `destroy`, `invalidate` and `secrets`; `generate`, `plan`
+  (which compares the config with the state file and calls no cloud API) and
+  local runs need none.
+- Deployed functions run on Node.js 22 (`nodejs22.x` on Lambda).
+
+## Install
+
+cloudgear is not published to a package registry yet. Clone the repository and
+link the CLI:
+
 ```sh
+git clone https://github.com/elaous/cloudgear.git
+cd cloudgear
 bun install
+bun link          # puts `cloudgear` on your PATH (~/.bun/bin)
+```
+
+Without linking, run `bun src/cli.ts <command>` from the repository root.
+
+## Usage
+
+```sh
 cloudgear generate main.ts   # analyze the app -> cloudgear.prototxt + function bundles
 cloudgear plan               # diff the config against .cloudgear/state.json
 cloudgear apply              # create/update/delete cloud resources
 cloudgear import <name> [id] # adopt an existing resource instead of creating it
 cloudgear invalidate [path]  # clear the CDN's cache
 cloudgear destroy            # tear down everything cloudgear created
+cloudgear secrets set|list   # store and check the secrets the app declares
 ```
 
-(`bun src/cli.ts <command>` inside this repo.) See `examples/router-app` for a
-complete app.
+`cloudgear --help` prints the commands and options. `generate` writes the
+config (`cloudgear.prototxt`) and `cloudgear.env.json`, and the function
+bundles under `.cloudgear/build/`; `apply` keeps `.cloudgear/state.json` and
+`.cloudgear/endpoints.json` next to the config. Try it on the example app:
+
+```sh
+cd examples/router-app
+cloudgear generate main.ts   # 3 functions, 2 resources
+cloudgear plan               # nothing is created; needs no AWS credentials
+```
+
+Options (the command an option applies to is in parentheses):
+
+| Option | Meaning |
+| --- | --- |
+| `--config <file>` | Config file (default `cloudgear.prototxt`); `.cloudgear/` sits next to it |
+| `--project <name>` | Project name that prefixes function names (`generate`; default: the `name` in the entry's `package.json`, else its directory name) |
+| `--invoker <arn>` | IAM principal allowed to call the functions (`generate`, repeatable; see Authentication) |
+| `--reserved-concurrency <n>` | Cap each function's concurrent executions (`generate`) |
+| `--region <region>` | Cloud region (default `$AWS_REGION` or `$AWS_DEFAULT_REGION`) |
+| `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
+| `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
+| `--skip-env-check` | Deploy even if a variable or secret is missing (`apply`) |
+| `--domain <cdn domain>` | Which CDN to invalidate when the app has several (`invalidate`) |
+| `--arn <arn>`, `--all` | What `import` adopts (see `cloudgear import`) |
+| `--from-envfile <file>`, `--allow-unignored`, `--path <path>`, `--all` | Options of `secrets set` (see Secrets) |
+
+See `examples/router-app` for a complete app and `examples/cdn-app` for one with
+domains and a CDN.
 
 ## The app
 
@@ -158,17 +213,21 @@ export default async function (request, response) {
 ### Runtime: `FunctionRouter`
 
 `new FunctionRouter(provider, options)` takes `authenticated: "iam" | "none"`
-(default `"iam"`; see Authentication), plus `credentials`, `region`,
-`rateLimit` and `mode`. `cloudgear generate` reads `authenticated`, so it MUST
-be a string literal inside an object literal.
+(default `"iam"` for `aws`; see Authentication), plus `credentials`, `region`,
+`authenticate`, `cert`, `rateLimit`, `mode`, `functionOptions`, `optionalEnv`,
+`env`, `endpoints` and `endpointsFile`. `cloudgear generate` reads
+`authenticated`, `authenticate`, `region`, `cert`, `functionOptions`,
+`optionalEnv` and `env` without running your code, so the options MUST be an
+object literal without spread, and `authenticated`, `region`,
+`functionOptions` and `optionalEnv` MUST be literals.
 
 `.url(method, path, fn, options?)` takes an optional `{ name }`, the route's
 nickname. Without one the name is the function's name (`fn.name`), or
 `"METHOD /path"` for anonymous functions. Names MUST be unique per router, so
 a function mounted on two routes needs `{ name }` on at least one of them.
 
-`router.listen(port)` serves the routes with `Bun.serve` (`router.fetch` is
-exposed to mount elsewhere) and returns each route's URL by name. `urls()`
+`router.listen(port)` serves the routes with `Bun.serve` (`port` defaults to
+`$PORT`, else 3000; `router.fetch` is exposed to mount elsewhere) and returns each route's URL by name. `urls()`
 returns the same map later, and `stop()` shuts the server down. In remote mode
 the URLs are the deployed function URLs plus the route path (with `"iam"`
 only signed calls can use them, so they are not links to hand to browsers); in
@@ -181,8 +240,8 @@ request the router either:
   response. Function URLs come from `.cloudgear/endpoints.json` (found by
   searching up from the working directory to the nearest `package.json`),
   written by `cloudgear apply`, or from `$CLOUDGEAR_ENDPOINTS` (JSON) or
-  `$CLOUDGEAR_ENDPOINTS_FILE`. A file with no routes, as left by `destroy`,
-  means local mode.
+  `$CLOUDGEAR_ENDPOINTS_FILE`. A file with no routes means local mode, and `destroy`
+  deletes the file.
 - **local**: runs the function in-process. This is the default when no
   endpoints file exists, so `bun main.ts` works before anything is deployed.
   Force a mode with `new FunctionRouter("aws", { mode: "local" | "remote" })`.
@@ -216,8 +275,8 @@ cloudgear generate main.ts --invoker arn:aws:iam::123456789012:role/my-app
 # or attach lambda:InvokeFunctionUrl on the function ARNs to the caller's own policy
 ```
 
-`--invoker` takes an IAM role or user ARN, or a 12-digit account id, and is
-repeatable. It adds a resource policy on each function; without it nobody but
+`--invoker` takes an IAM role or user ARN, an account root ARN, or a 12-digit
+account id, and is repeatable. It adds a resource policy on each function; without it nobody but
 principals with their own identity policy can call them.
 
 Where the router runs:
@@ -415,10 +474,11 @@ Rules the analyzer enforces:
 
 - An app MAY declare any number of `DNS` and `Cert`s, one `DNS` per `Cert`,
   each assigned to a variable with literal arguments; two `Cert`s MUST NOT
-  cover the same domain. At most one `CDN` with a `bucket`, at most one `CDN`
+  cover the same domain. Any number of `CDN`s with a `bucket`, at most one `CDN`
   with a `router`, and at most one router `cert`.
-- Two CDNs, or a CDN and the router, MUST NOT share a `Cert`: each serves its
-  own domain.
+- Two CDNs, including a CDN that serves the router, MUST NOT share a `Cert`
+  unless it is a wildcard; each serves its own domain. The router's own `cert`
+  (API Gateway) MUST NOT be shared with any CDN and MUST NOT be a wildcard.
 - A `Cert` needs neither: declare only `DNS` and `Cert` to get a validated
   certificate (it may then cover the zone apex). `new Cert(provider, dns, {
   region })` sets the region of a certificate that nothing uses; for a CDN it
@@ -436,7 +496,7 @@ Rules the analyzer enforces:
   hostname that already has a foreign record is found when its distribution is
   made, which is after the certificate is issued.
 - An app MAY have several CDNs: one per static site, each with its own `Cert`
-  (a `Cert` serves one CDN) and bucket, for example one for files and images,
+  (CDNs share a `Cert` only when it is a wildcard) and bucket, for example one for files and images,
   one for the frontend and one for an admin app, plus one more for the router
   (`{ router }`). Several CDNs MAY serve the same bucket, each under its own
   path. Each distribution has its own bucket-policy statement and is removed
@@ -674,7 +734,7 @@ new FunctionRouter("aws")
 Settings that have no dedicated option go in `options`, a map of string,
 number or boolean literals (written as strings) that `generate` reads and stores
 in the config as a proto `map<string, string>` on `Resource`, `Function`,
-`Certificate` and `Cdn`. They are part of each entry's compared `spec`, so
+`Certificate`, `Cdn` and `Api`. They are part of each entry's compared `spec`, so
 changing one updates the entry. Unknown keys and invalid values fail
 `generate` and `plan`, listing the supported keys.
 
@@ -695,7 +755,8 @@ new CDN("aws", cert, { bucket, options: { price_class: "PriceClass_100" } });
 
 A function's options are the router's `functionOptions` overridden by its
 routes' `options`; the routes of one function MUST give it identical options (or none). `tracing: "Active"` also lets the role write X-Ray segments. `env.<NAME>`
-MUST NOT start with `AWS_` or `CLOUDGEAR_` and cannot be `NODE_OPTIONS`.
+MUST be a plain identifier (letters, digits and `_`, starting with a letter), MUST NOT start with `AWS_`,
+`CLOUDGEAR_` or `LAMBDA_`, and cannot be `NODE_OPTIONS`.
 Declaring a store twice with different options fails. An existing certificate
 cannot change `key_algorithm`. Add a key by extending `options` in
 `src/providers.ts` and handling it in the driver.
@@ -975,9 +1036,14 @@ handler adapter (Lambda for `aws`, a Cloud Functions HTTP function for `gcp`).
 Bundles target Node.js.
 
 The output is `cloudgear.prototxt`, protobuf text format for the
-`cloudgear.Config` message in `src/config/cloudgear.proto`:
+`cloudgear.Config` message in `src/config/cloudgear.proto`. This is
+`examples/router-app`, cut down to one resource and one function:
 
 ```
+# proto-file: cloudgear.proto
+# proto-message: cloudgear.Config
+# Generated by `cloudgear generate`. Do not edit by hand.
+
 project: "router-app"
 provider: "aws"
 resource {
@@ -994,12 +1060,32 @@ function {
   runtime: "nodejs22.x"
   memory_mb: 256
   timeout_s: 10
-  source { file: "server/api.ts" export: "foo" input_type: "types.FooInput" }
-  route { method: "POST" path: "/foo/{param}" }
-  bundle { path: ".cloudgear/build/foo/index.mjs" sha256: "..." }
-  permission { resource: "myblob" action: "s3:PutObject" }
-  env { key: "CLOUDGEAR_BLOB_MYBLOB" value_from: "myblob" }
+  source {
+    file: "server/api.ts"
+    export: "foo"
+    input_type: "types.FooInput"
+  }
+  route {
+    method: "POST"
+    path: "/foo/{param}"
+    name: "createFoo"
+  }
+  bundle {
+    path: ".cloudgear/build/foo/index.mjs"
+    sha256: "..."
+  }
+  permission {
+    resource: "myblob"
+    path: ""
+    action: "s3:PutObject"
+  }
+  env {
+    key: "CLOUDGEAR_BLOB_MYBLOB"
+    value_from: "myblob"
+  }
+  reserved_concurrency: 0
 }
+authenticated: "iam"
 ```
 
 ### Environment variables the code reads
@@ -1136,7 +1222,7 @@ regions: changing `region` on an existing bucket fails the apply.
 `apply` does not try to create them again:
 
 ```sh
-cloudgear import web.tranquilo.art                 # a bucket from the config's resources
+cloudgear import web.example.com                   # a bucket from the config's resources
 cloudgear import api-items                         # a function, by name
 cloudgear import @aws.Certificate www.example.com  # when several things share a name
 cloudgear import --all                             # everything planned that already exists
@@ -1164,7 +1250,7 @@ cloudgear import --all                             # everything planned that alr
   EventBridge rule on the default bus (their names must be the ones the config
   deploys), and an S3
   bucket (`arn:aws:s3:::name`, also as the second argument:
-  `cloudgear import web.tranquilo.art arn:aws:s3:::web.tranquilo.art`). Without
+  `cloudgear import web.example.com arn:aws:s3:::web.example.com`). Without
   `--all`, one thing at a time.
 - A bucket is only recorded (optionally under another physical name:
   `cloudgear import myblob my-existing-bucket`). Imported buckets are never
@@ -1227,6 +1313,22 @@ cloudgear import --all                             # everything planned that alr
 - A function that had its own role keeps it, and `apply` adds the inline policy
   cloudgear manages to that role; check the role's other policies first.
 
+## Packages
+
+The workspace packages under `packages/` are imported by apps and bundled into
+deployed functions. They are private and not published yet.
+
+| Package | Purpose |
+| --- | --- |
+| `@cloudgear/functions` | `FunctionRouter`, `jwtAuth`, `cron`, `schedule`, `response`, the Lambda and Cloud Functions adapters |
+| `@cloudgear/blob` | `BlobStore`, `policy`, `permissions`, `grant` |
+| `@cloudgear/cdn` | `Cert` and `CDN` |
+| `@cloudgear/dns` | `DNS` and its Gandi and Route 53 drivers |
+| `@cloudgear/events` | `EventBus` and `on` |
+| `@cloudgear/secrets` | `SecretStore` |
+| `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
+| `@cloudgear/debug` | `CG_DEBUG` logging |
+
 ## Code map
 
 Where each moving part lives, since several are called across packages:
@@ -1244,8 +1346,9 @@ Where each moving part lives, since several are called across packages:
 | `analyzeApp` | `src/analyze/app.ts` | `src/generate.ts` |
 | `providerProfile` (service types, permissions) | `src/providers.ts` | `src/generate.ts` |
 | GCP function adapter | `packages/functions/drivers/gcp.ts` | bundles (`src/build/bundle.ts`) |
-| `DNS`, `registerDnsDriver` | `packages/dns/index.ts` | apps; `src/analyze/app.ts` |
-| Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` (used by `DNS` and `src/cli.ts`) |
+| `DNS` | `packages/dns/index.ts` | apps; `src/analyze/app.ts` |
+| `registerDnsDriver`, `createDnsDriver` | `packages/dns/driver.ts` | `DNS`; `src/cli.ts`; custom drivers |
+| Gandi, Route 53 and memory DNS drivers | `packages/dns/drivers/` | `createDnsDriver` |
 | `Cert`, `CDN` | `packages/cdn/index.ts` | apps; `src/analyze/app.ts` |
 | Cert drivers (`acm`, `memory`) | `packages/cdn/cert-driver.ts`, `packages/cdn/drivers/` | `Cert.status()` |
 | CDN drivers (`cloudfront`, `memory-cdn`) | `packages/cdn/cdn-driver.ts`, `packages/cdn/drivers/` | `CDN.status()`, `CDN.url()` |
@@ -1260,11 +1363,51 @@ Where each moving part lives, since several are called across packages:
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
+| `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
+| event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |
+| EventBridge bus and rule deployers | `src/deploy/aws/eventbus.ts`, `schedule.ts` | `awsDrivers` |
+| `SecretStore` | `packages/secrets/index.ts` | apps; `src/analyze/app.ts` |
+| `cloudgear secrets` (`setSecrets`, `secretStatus`), env file parsing | `src/secrets/` | `src/cli.ts` |
+| environment report, `checkEnvironment` | `src/analyze/envuse.ts`, `src/envreport.ts`, `src/envcheck.ts` | `generate`, `plan`, `apply` |
+| `adoptEntries`, `adoptByArn` | `src/deploy/adopt.ts` | `cloudgear import` |
+| resource tags (`baseTags`) | `src/deploy/aws/tags.ts` | `src/cli.ts`, the AWS deployers |
 
 ## Status
 
 Early draft. Only the `aws` provider has deploy drivers (`gcp` is described and planned, see Hybrid clouds);
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
-validated against their TypeScript types at runtime. An app has at most one
-CDN per kind (bucket or router), and uploading the static site is not built yet.
+validated against their TypeScript types at runtime. An app has any number of
+CDNs for static sites but at most one that serves the router, and uploading the
+static site is not built yet.
+
+## Testing
+
+```sh
+bun test                    # the full suite (about 5 minutes)
+bun test tests/tags.test.ts # one file
+bun run typecheck           # tsc --noEmit
+```
+
+Tests run against fakes and in-memory drivers; they need no AWS credentials.
+On a pull request, CI runs only the tests affected by the changed files (see
+`scripts/changed-tests.ts`), and a nightly run covers the full suite.
+
+## Linting
+
+```sh
+bun run lint               # biome lint .
+```
+
+[Biome](https://biomejs.dev) runs its recommended rules, configured in
+`biome.json`; formatting is not checked.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Participation is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities as described in
+[SECURITY.md](SECURITY.md).
+
+## Licence
+
+[MIT](LICENSE).

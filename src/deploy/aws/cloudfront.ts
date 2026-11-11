@@ -11,6 +11,7 @@ import {
   DescribeFunctionCommand,
   type DistributionConfig,
   GetDistributionCommand,
+  type GetDistributionCommandOutput,
   GetDistributionConfigCommand,
   GetOriginAccessControlCommand,
   ListDistributionsCommand,
@@ -311,7 +312,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       if (hint?.arn) {
         const id = /^distribution\/([A-Z0-9]+)$/.exec(expectArn(hint.arn, "cloudfront", "a CloudFront distribution").resource)?.[1];
         if (!id) throw new Error(`"${hint.arn}" is not a CloudFront distribution ARN`);
-        let got;
+        let got: GetDistributionCommandOutput;
         try {
           got = await deps.cloudfront.send(new GetDistributionCommand({ Id: id }));
         } catch (err) {

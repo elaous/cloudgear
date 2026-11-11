@@ -12,6 +12,8 @@ export class MemoryEventDriver implements EventDriver {
 
 export const memoryEvents = (): readonly (PublishedEvent & { id: string })[] => published;
 
-export const resetMemoryEvents = (): void => void (published.length = 0);
+export const resetMemoryEvents = (): void => {
+  published.length = 0;
+};
 
 export const createMemoryEventDriver = (): MemoryEventDriver => new MemoryEventDriver();

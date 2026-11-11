@@ -21,7 +21,7 @@ export function parseEnvFile(text: string, file = ".env"): Record<string, string
       const tail = body.slice(end + 1).trim();
       if (tail && !tail.startsWith("#")) throw new Error(`${file}:${start + 1}: unexpected text after the quoted value of ${key}`);
       const quoted = body.slice(0, end);
-      values[key] = first === '"' ? unescape(quoted) : quoted;
+      values[key] = first === '"' ? unescapeQuoted(quoted) : quoted;
     } else {
       values[key] = rest.replace(/\s+#.*$/, "").trim();
     }
@@ -37,6 +37,6 @@ function closingQuote(body: string, quote: string): number {
   return -1;
 }
 
-function unescape(value: string): string {
+function unescapeQuoted(value: string): string {
   return value.replace(/\\([nrt"\\])/g, (_, c: string) => ({ n: "\n", r: "\r", t: "\t", '"': '"', "\\": "\\" })[c]!);
 }

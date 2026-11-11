@@ -466,7 +466,7 @@ describe("FunctionRouter (remote mode)", () => {
         }),
         { signingDate: when },
       );
-      expect(sent.headers.get("authorization")).toBe(expected.headers["authorization"]!);
+      expect(sent.headers.get("authorization")).toBe(expected.headers.authorization!);
     });
 
     test("forwards a session token from temporary credentials", async () => {

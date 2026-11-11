@@ -1,0 +1,47 @@
+name: Pull request
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Lint
+        run: bun run lint
+      - name: Select tests
+        id: select
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --name-only -z "$BASE_SHA"...HEAD | bun scripts/changed-tests.ts --null --explain | tee -a "$GITHUB_OUTPUT"
+      - name: Run tests
+        env:
+          MODE: ${{ steps.select.outputs.mode }}
+          TESTS: ${{ steps.select.outputs.tests }}
+        run: |
+          case "$MODE" in
+            all) bun test ;;
+            targeted) read -r -a files <<< "$TESTS"; bun test "${files[@]}" ;;
+            none) echo "No tests affected by this change." ;;
+            *) echo "unexpected mode '$MODE'" >&2; exit 1 ;;
+          esac

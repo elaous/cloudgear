@@ -40,6 +40,6 @@ export function loadState(file: string, project: string, provider: string): Stat
 export function saveState(file: string, state: State): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
   fs.renameSync(tmp, file);
 }

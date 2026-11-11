@@ -2,17 +2,27 @@
   "name": "cloudgear",
   "version": "0.1.0",
   "private": true,
-  "description": "Serverless function router plus AST-inferred infrastructure: generate a prototxt config from a TypeScript app, then plan/apply it to AWS.",
+  "description": "Write your HTTP API in TypeScript and cloudgear plans the cloud infrastructure from it, reviewable before you apply.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elaous/cloudgear.git"
+  },
+  "bugs": {
+    "url": "https://github.com/elaous/cloudgear/issues"
+  },
   "type": "module",
   "module": "src/cli.ts",
   "scripts": {
     "link": "bun link cloudgear && for p in ./packages/*; do cd $p; bun link; cd -; done",
     "generate": "bun src/cli.ts generate",
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
     "test": "bun test"
   },
   "devDependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
+    "@biomejs/biome": "^2.6.6",
     "@smithy/protocol-http": "^5.6.2",
     "@smithy/signature-v4": "^5.7.4",
     "@types/bun": "latest",

@@ -187,9 +187,7 @@ export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolea
             else note((element.getPropertyNameNode() ?? element.getNameNode()).getText().replace(/^["']|["']$/g, ""), !element.getInitializer(), rel);
           }
         }
-      } else if (Node.isBinaryExpression(parent) && (parent.getOperatorToken().getKind() === SyntaxKind.InKeyword || (parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getLeft() === top))) {
-        continue;
-      } else {
+      } else if (!(Node.isBinaryExpression(parent) && (parent.getOperatorToken().getKind() === SyntaxKind.InKeyword || (parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getLeft() === top)))) {
         dynamic.push(at(node));
       }
     }

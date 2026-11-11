@@ -5,7 +5,7 @@ import { debug, timed } from "@cloudgear/debug";
 import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
-import { encodeConfig, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
+import { decodeConfig, encodeConfig, type AttachedOriginSpec, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
 import { configHash, envReportPath, type EnvReport, type EnvSource } from "./envreport";
 import { fitName, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
@@ -227,6 +227,11 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   if (config.api) providerProfile(config.api.provider);
   validateConfigOptions(config);
 
+  const previous = previousAttached(options.configPath);
+  for (const cdn of config.cdn) if (previous.get(cdn.domain)?.length) cdn.attached = previous.get(cdn.domain);
+  if (config.api?.via === "cloudfront" && previous.get(config.api.domain)?.length) config.api.attached = previous.get(config.api.domain);
+  const carried = new Set([...config.cdn.filter((c) => c.attached?.length).map((c) => c.domain), ...(config.api?.attached?.length ? [config.api.domain] : [])]);
+  for (const domain of previous.keys()) if (!carried.has(domain)) warnings.push(`the attached origins of ${domain} were dropped: it is no longer a CDN here`);
   const configText = encodeConfig(config);
   const report: EnvReport = { version: 1, config: configHash(configText), functions: {} };
   for (const name of model.optionalEnv) {
@@ -318,4 +323,18 @@ function projectName(dir: string): string {
 
 function sanitize(name: string): string {
   return name.replace(/^@/, "").replace(/[^A-Za-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "app";
+}
+
+// The TypeScript setup cannot express attached origins, so they are carried over from the existing config.
+function previousAttached(configPath: string): Map<string, AttachedOriginSpec[]> {
+  const found = new Map<string, AttachedOriginSpec[]>();
+  if (!fs.existsSync(configPath)) return found;
+  let old: CloudgearConfig;
+  try {
+    old = decodeConfig(fs.readFileSync(configPath, "utf8"));
+  } catch {
+    return found;
+  }
+  for (const item of [...old.cdn, ...(old.api ? [old.api] : [])]) if (item.attached?.length) found.set(item.domain, item.attached);
+  return found;
 }

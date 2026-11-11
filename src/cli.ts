@@ -20,6 +20,7 @@ import { parseArn } from "./deploy/aws/arn";
 import { planPolicyFiles, writePolicyFiles } from "./policyfiles";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
+import { syncAttached } from "./attached";
 import { checkDns, formatDnsCheck, systemLookup } from "./dnscheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
@@ -60,6 +61,11 @@ Options:
   --path <path>      Restrict secrets set to one declared path
   --all              Also store undeclared names from the env file under the path (secrets set)
 `;
+
+function reportAttached(sync: ReturnType<typeof syncAttached>): void {
+  for (const message of sync.written) console.log(`cloudgear: ${message}`);
+  for (const problem of sync.problems) console.warn(`warning: ${problem}`);
+}
 
 function fakeDrivers(): boolean {
   return ["CLOUDGEAR_DNS_DRIVER", "CLOUDGEAR_CERT_DRIVER", "CLOUDGEAR_CDN_DRIVER"].some((name) => process.env[name]);
@@ -319,6 +325,7 @@ async function main() {
         const deployers = await drivers(planned.filter((a) => a.type === arnType), config, configPath, values.region, deployTags(config, configPath, values));
         const found = await adoptByArn(planned, state, deployers, arnType!, values.arn, !!values["write-policies"]);
         saveState(statePath, state);
+        reportAttached(syncAttached(configPath, state));
         for (const item of found.adopted) console.log(`cloudgear: imported ${item}`);
         for (const note of found.notes) console.warn(`warning: ${note}`);
         writePoliciesAfter(found.files);
@@ -338,6 +345,7 @@ async function main() {
       const hint = values.arn || values["write-policies"] ? { ...(values.arn ? { arn: values.arn } : {}), ...(values["write-policies"] ? { exportPolicies: true } : {}) } : undefined;
       const result = await adoptEntries(planned, state, deployers, select, hint);
       saveState(statePath, state);
+      reportAttached(syncAttached(configPath, state));
       for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
       for (const note of result.notes) console.warn(`warning: ${note}`);
       writePoliciesAfter(result.files);

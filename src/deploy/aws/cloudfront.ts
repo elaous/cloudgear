@@ -23,7 +23,7 @@ import {
 import { AddPermissionCommand, GetPolicyCommand, RemovePermissionCommand } from "@aws-sdk/client-lambda";
 import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyCommand } from "@aws-sdk/client-s3";
 import type { DnsDriver } from "@cloudgear/dns";
-import type { SecretRefSpec } from "../../config/schema";
+import type { AttachedOriginSpec, SecretRefSpec } from "../../config/schema";
 import { fitName } from "../../names";
 import { WEB_ACL_ARN } from "../../providers";
 import { expectArn } from "./arn";
@@ -323,13 +323,13 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         const distribution = got.Distribution as { Id: string; ARN: string; DomainName: string; Status?: string; DistributionConfig?: { Aliases?: { Items?: string[] } } };
         const aliases = distribution.DistributionConfig?.Aliases?.Items ?? [];
         if (!aliases.includes(spec.domain)) throw new Error(`${hint.arn} does not answer to ${spec.domain} (its aliases: ${aliases.join(", ") || "none"})`);
-        return { ...found({ ...distribution, ARN: hint.arn }), notes: await overwritten(id, spec) };
+        return { ...found({ ...distribution, ARN: hint.arn }), ...(await overwritten(id, spec)) };
       }
       let marker: string | undefined;
       do {
         const list = await deps.cloudfront.send(new ListDistributionsCommand({ Marker: marker }));
         const item = (list.DistributionList?.Items ?? []).find((candidate: { Aliases?: { Items?: string[] } }) => candidate.Aliases?.Items?.includes(spec.domain));
-        if (item) return { ...found(item), notes: await overwritten(item.Id, spec) };
+        if (item) return { ...found(item), ...(await overwritten(item.Id, spec)) };
         marker = list.DistributionList?.IsTruncated ? list.DistributionList.NextMarker : undefined;
       } while (marker);
       return undefined;
@@ -388,7 +388,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   };
 
   // Apply rebuilds the config; these existing settings are dropped.
-  async function overwritten(id: string, spec: CdnComparable): Promise<string[]> {
+  async function overwritten(id: string, spec: CdnComparable): Promise<{ notes: string[]; spec?: Record<string, unknown> }> {
     const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
     const notes: string[] = [];
@@ -402,10 +402,15 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
     if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
     if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");
-    if (config.CacheBehaviors?.Quantity) notes.push(`its ${config.CacheBehaviors.Quantity} path behavior(s) will be replaced by the ones from the config`);
-    if (config.Origins?.Quantity) notes.push(`its ${config.Origins.Quantity} origin(s) will be replaced by the ones from the config`);
+    const attached = attachedOf(config, spec);
+    const keptBehaviors = attached.reduce((sum, item) => sum + item.behavior.length, 0);
+    const droppedBehaviors = (config.CacheBehaviors?.Quantity ?? 0) - keptBehaviors;
+    const droppedOrigins = (config.Origins?.Quantity ?? 0) - attached.length;
+    if (attached.length) notes.push(`its ${attached.length} other origin(s) (${attached.map((item) => item.id).join(", ")}) and ${keptBehaviors} path behavior(s) are kept and written to the config as attached origins`);
+    if (droppedBehaviors > 0) notes.push(`its ${droppedBehaviors} path behavior(s) will be replaced by the ones from the config`);
+    if (droppedOrigins > 0) notes.push(`its ${droppedOrigins} origin(s) will be replaced by the ones from the config`);
     if (config.PriceClass && config.PriceClass !== "PriceClass_All") notes.push(`its price class (${config.PriceClass}) will be reset unless the config sets price_class`);
-    return notes;
+    return { notes, ...(attached.length ? { spec: { attached } } : {}) };
   }
 
   async function removeDistribution(id: string) {
@@ -478,6 +483,24 @@ export function allowedMethods(methods: string[]): string[] {
   return set.has("OPTIONS") ? ["GET", "HEAD", "OPTIONS"] : ["GET", "HEAD"];
 }
 
+const OWN_ORIGIN = /^(cloudgear-site|cloudgear-fn-)/;
+
+// Origins reached by path behaviors cloudgear does not build, with those behaviors.
+export function attachedOf(config: Record<string, any>, spec: CdnComparable): AttachedOriginSpec[] {
+  const ownPatterns = new Set((spec.behaviors ?? []).map((b) => b.pattern));
+  const origins = new Map<string, Record<string, any>>((config.Origins?.Items ?? []).map((o: Record<string, any>) => [o.Id, o]));
+  const kept = new Map<string, AttachedOriginSpec>();
+  ((config.CacheBehaviors?.Items ?? []) as Record<string, any>[]).forEach((behavior, index) => {
+    const target = behavior.TargetOriginId as string;
+    const origin = origins.get(target);
+    if (!origin || OWN_ORIGIN.test(target) || ownPatterns.has(behavior.PathPattern)) return;
+    const item = kept.get(target) ?? { id: target, origin: JSON.stringify(origin), behavior: [] };
+    item.behavior.push({ path_pattern: behavior.PathPattern, behavior: JSON.stringify(behavior), position: index });
+    kept.set(target, item);
+  });
+  return [...kept.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 export function buildDistributionConfig(spec: CdnComparable, input: DistributionInputs): DistributionConfig {
   const methodList = (items: string[]) => ({ Quantity: items.length, Items: items });
   const siteId = "cloudgear-site";
@@ -506,7 +529,8 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     },
     OriginAccessControlId: input.oacLambda,
   }));
-  const origins = [...siteOrigins, ...functionOrigins];
+  const attachedOrigins = (spec.attached ?? []).map((item) => JSON.parse(item.origin));
+  const origins = [...siteOrigins, ...functionOrigins, ...attachedOrigins];
 
   const toFunction = {
     CachePolicyId: CACHING_DISABLED,
@@ -519,6 +543,11 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     AllowedMethods: { ...methodList(allowedMethods(behavior.methods)), CachedMethods: methodList(["GET", "HEAD"]) },
     ...toFunction,
   }));
+  const attachedBehaviors = (spec.attached ?? [])
+    .flatMap((item) => item.behavior)
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map((b) => JSON.parse(b.behavior));
+  behaviors.push(...attachedBehaviors);
 
   const defaultBehavior = spec.bucket
     ? {

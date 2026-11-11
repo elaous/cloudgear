@@ -66,6 +66,8 @@ Options (the command an option applies to is in parentheses):
 | `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
 | `--skip-env-check` | Deploy even if a variable or secret is missing (`apply`) |
+| `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
+| `--dns-server <ip>` | Resolver for the DNS check (`check-dns`, `apply`; default: the system's) |
 | `--domain <cdn domain>` | Which CDN to invalidate when the app has several (`invalidate`) |
 | `--arn <arn>`, `--all` | What `import` adopts (see `cloudgear import`) |
 | `--from-envfile <file>`, `--allow-unignored`, `--path <path>`, `--all` | Options of `secrets set` (see Secrets) |
@@ -1143,7 +1145,12 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
 - `cloudgear apply` reads the report and refuses to deploy while a required
   variable has `provided: null`, and while a declared secret is not stored (see
   `cloudgear secrets list`). `cloudgear plan` only warns. Pass
-  `--skip-env-check` to deploy anyway. Checking that secrets are stored needs
+  `--skip-env-check` to deploy anyway.
+
+**DNS check.** `cloudgear check-dns` (which `apply` runs first) looks up public DNS for what the plan creates or changes. It blocks
+when a CDN or API host that is about to be created already resolves to something, and when the DNS zone of a CDN, API or
+certificate has no name servers (not delegated). A lookup that fails (timeout, no network) is a warning, not a block. Pass
+`--skip-dns-check` to deploy anyway. Checking that secrets are stored needs
   list access to the store (`ssm:GetParametersByPath` for SSM,
   `secretsmanager:ListSecrets` for Secrets Manager, and `kms:Decrypt` for a
   named key); without it `apply` explains and suggests the flag. The report

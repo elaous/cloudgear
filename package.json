@@ -27,7 +27,7 @@
     "@smithy/signature-v4": "^5.7.4",
     "@types/bun": "latest",
     "jose": "^6.2.13",
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@aws-sdk/client-acm": "^3.700.0",

@@ -319,6 +319,13 @@ describe("what an import records and warns about", () => {
         cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "", ...(options ? { options } : {}) }],
       });
     const only = (a: { type: string }) => a.type === "@aws.CloudFront";
+    const classic = fakeAws({
+      ListDistributionsCommand: () => ({ DistributionList: { Items: [{ Id: "E1", ARN: "arn", DomainName: "d1.cloudfront.net", Status: "Deployed", Aliases: { Items: ["www.example.com"] } }] } }),
+      GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: { WebACLId: "a1b2c3d4-0000-1111-2222-333344445555" } }),
+    });
+    const fresh = emptyState();
+    const classicResult = await adoptEntries(plan(cdnConfig(), fresh), fresh, classic.drivers, only as never);
+    expect(classicResult.notes.join("\n")).toMatch(/not a WAFv2 web ACL ARN \(a WAF Classic ACL, for example\), which the web_acl option cannot keep/);
     const without = emptyState();
     const warned = await adoptEntries(plan(cdnConfig(), without), without, aws.drivers, only as never);
     expect(warned.notes.join("\n")).toContain(`options: { web_acl: "${acl}" }`);

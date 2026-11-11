@@ -5,11 +5,11 @@ import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import { decodeConfig, type CloudgearConfig } from "../src/config/schema";
-import { endpointsFrom, hasEndpoints } from "../src/deploy/apply";
+import { apply, endpointsFrom, hasEndpoints } from "../src/deploy/apply";
 import { buildDistributionConfig, invalidateDistribution } from "../src/deploy/aws/cloudfront";
 import { formatPlan, plan, type CdnComparable } from "../src/deploy/plan";
 import { generate } from "../src/generate";
-import { applyAll, baseConfig, emptyState, fakeAws } from "./helpers";
+import { applyAll, baseConfig, emptyState, fakeAws, fn } from "./helpers";
 
 const DOMAIN = "cdn.example.com";
 const CERT_KEY = `@aws.Certificate.${DOMAIN}`;
@@ -829,5 +829,46 @@ describe("sites on a wildcard certificate", () => {
     const aws = fakeAws({}, dns);
     await applyAll(baseConfig({ function: [], resource: [], certificate: [wildcard] }), emptyState(), aws);
     expect(aws.of("RequestCertificateCommand")).toHaveLength(1);
+  });
+});
+
+describe("a web ACL on a distribution", () => {
+  const acl = "arn:aws:wafv2:us-east-1:111122223333:global/webacl/mine/b576f740-7bb3-4e5f-849b-af9d3c2b0c27";
+  const withAcl = (on: boolean) => cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, ...(on ? { options: { web_acl: acl } } : {}) }] });
+
+  test("adding the option to a deployed CDN is an update, and so is taking it away; the update carries the ACL", async () => {
+    const state = emptyState();
+    await applyAll(withAcl(false), state);
+    expect(plan(withAcl(false), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+    const adding = plan(withAcl(true), state).find((a) => a.type === "@aws.CloudFront")!;
+    expect(adding).toMatchObject({ op: "update", changes: ["spec"] });
+    const added = fakeAws();
+    await apply(plan(withAcl(true), state), state, added.drivers, { save: () => {} });
+    expect(added.of("UpdateDistributionCommand").at(-1).DistributionConfig.WebACLId).toBe(acl);
+    expect(plan(withAcl(true), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+    const removing = plan(withAcl(false), state).find((a) => a.type === "@aws.CloudFront")!;
+    expect(removing).toMatchObject({ op: "update", changes: ["spec"] });
+    const removed = fakeAws();
+    await apply(plan(withAcl(false), state), state, removed.drivers, { save: () => {} });
+    expect(removed.of("UpdateDistributionCommand").at(-1).DistributionConfig.WebACLId).toBeUndefined();
+  });
+
+  test("a new distribution is created with the ACL attached", async () => {
+    const aws = await applyAll(withAcl(true), emptyState());
+    expect(aws.of("CreateDistributionCommand")[0].DistributionConfig.WebACLId).toBe(acl);
+  });
+
+  test("the router's distribution takes the option too, and a bad ARN there is refused", () => {
+    const router = (web_acl: string) => baseConfig({
+      resource: [],
+      function: [fn({ permission: [], env: [] })],
+      certificate: [{ provider: "aws", domain: DOMAIN, dns: dnsSpec, usage: "cdn" }],
+      api: { provider: "aws", domain: DOMAIN, via: "cloudfront", options: { web_acl } },
+    });
+    const entry = plan(router(acl), emptyState()).find((a) => a.type === "@aws.CloudFront")!;
+    expect((entry.desired!.spec as unknown as CdnComparable).options).toEqual({ web_acl: acl });
+    const built = buildDistributionConfig(entry.desired!.spec as unknown as CdnComparable, { certificateArn: "arn", region: "us-east-1", reference: "ref", enabled: true });
+    expect(built.WebACLId).toBe(acl);
+    expect(() => plan(router("not-an-arn"), emptyState())).toThrow(/WAFv2 web ACL ARN in us-east-1/);
   });
 });

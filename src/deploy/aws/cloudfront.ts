@@ -25,6 +25,7 @@ import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyComma
 import type { DnsDriver } from "@cloudgear/dns";
 import type { SecretRefSpec } from "../../config/schema";
 import { fitName } from "../../names";
+import { WEB_ACL_ARN } from "../../providers";
 import { expectArn } from "./arn";
 import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
@@ -391,7 +392,13 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
     const notes: string[] = [];
-    if (config.WebACLId && spec.options?.web_acl !== config.WebACLId) notes.push(`its web ACL (${config.WebACLId}) will be detached unless the CDN keeps it: options: { web_acl: "${config.WebACLId}" }`);
+    if (config.WebACLId && spec.options?.web_acl !== config.WebACLId) {
+      notes.push(
+        WEB_ACL_ARN.test(config.WebACLId)
+          ? `its web ACL (${config.WebACLId}) will be detached unless the config sets the web_acl option of this CDN to it: options: { web_acl: "${config.WebACLId}" }`
+          : `its web ACL (${config.WebACLId}) will be detached; it is not a WAFv2 web ACL ARN (a WAF Classic ACL, for example), which the web_acl option cannot keep`,
+      );
+    }
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
     if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
     if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");

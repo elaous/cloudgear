@@ -43,7 +43,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
         prefixes: { [ENV_OPTION_PREFIX]: environmentVariable },
       },
       "@aws.CloudFront": {
-        keys: { price_class: oneOf("PriceClass_100", "PriceClass_200", "PriceClass_All"), default_root_object: (v) => (/^(?!\/)(?!.*\.\.)[\w.\-/]*$/.test(v) ? undefined : "must be a relative object key") },
+        keys: { price_class: oneOf("PriceClass_100", "PriceClass_200", "PriceClass_All"), web_acl: (v) => (/^arn:aws[a-z-]*:wafv2:us-east-1:\d{12}:global\/webacl\/[\w.-]+\/[0-9a-f-]{36}$/.test(v) ? undefined : "must be a WAFv2 web ACL ARN in us-east-1 (arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>)"), default_root_object: (v) => (/^(?!\/)(?!.*\.\.)[\w.\-/]*$/.test(v) ? undefined : "must be a relative object key") },
       },
       "@aws.Certificate": { keys: { key_algorithm: oneOf("RSA_2048", "EC_prime256v1", "EC_secp384r1") } },
     },

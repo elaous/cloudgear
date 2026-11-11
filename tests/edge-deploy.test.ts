@@ -619,6 +619,14 @@ describe("CloudFront configuration", () => {
     expect(config.CacheBehaviors).toEqual({ Quantity: 0, Items: [] });
   });
 
+  test("a web ACL given as an option is attached, and none is set when it is not", () => {
+    const base: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "" };
+    const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true };
+    const acl = "arn:aws:wafv2:us-east-1:111122223333:global/webacl/mine/b576f740-7bb3-4e5f-849b-af9d3c2b0c27";
+    expect(buildDistributionConfig({ ...base, options: { web_acl: acl } }, input).WebACLId).toBe(acl);
+    expect(buildDistributionConfig(base, input).WebACLId).toBeUndefined();
+  });
+
   test("invalidateDistribution sends the paths and returns the id", async () => {
     const sent: any[] = [];
     const id = await invalidateDistribution(

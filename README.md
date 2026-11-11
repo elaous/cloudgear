@@ -1314,6 +1314,12 @@ cloudgear import --all                             # everything planned that alr
   except a function's IAM role when cloudgear did not create it (an imported
   function may use a shared one); the inline policy cloudgear adds to that
   role is removed.
+- An existing distribution's web ACL (the `CreatedByCloudFront-...` one the console
+  adds, or your own) is kept by naming it in the CDN's options: `new CDN("aws", cert,
+  { bucket, options: { web_acl: "arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>" } })`.
+  The ARN MUST be a WAFv2 web ACL in `us-east-1`; `import` prints the exact option
+  for the ACL it finds. Without it `apply` detaches the ACL. cloudgear does not
+  create or change web ACLs.
 - **Read the warnings.** `apply` rebuilds an imported distribution's config from
   yours, so `import` lists what it would drop: a web ACL, access logging,
   custom error responses, a geo restriction, path behaviors and origins that are

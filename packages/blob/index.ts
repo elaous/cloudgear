@@ -12,7 +12,6 @@ export type { BlobData, BlobDriver, BlobDriverFactory, BlobDriverOptions, BlobPr
 
 export type BlobAccess = "read" | "write" | "delete" | "list";
 
-// Provider-neutral accesses per BlobStore method; `cloudgear generate` maps them to IAM.
 export const BLOB_OPERATIONS = {
   get: ["read"],
   getText: ["read"],
@@ -24,44 +23,38 @@ export const BLOB_OPERATIONS = {
 } as const satisfies Partial<Record<keyof BlobStore, readonly BlobAccess[]>>;
 
 export interface BlobStoreOptions {
-  // Confines the store to keys under this prefix; `cloudgear generate` scopes its permissions to it.
   path?: string;
-  // AWS region of the bucket; defaults to the region the app is deployed to. `cloudgear generate`
-  // creates the bucket there, so it MUST be a string literal.
+  // Literal only: generate creates the bucket in this region.
   region?: string;
-  // Provider settings with no dedicated option; literals only.
+  // Literals only; read by generate.
   options?: ProviderOptions;
   driver?: BlobDriver;
 }
 
 export type ProviderOptions = Record<string, string | number | boolean>;
 
-// "/img-cache" and "img-cache/" both become "img-cache/"; the bucket root is "".
+// Prefix gets a trailing slash; bucket root is an empty string.
 export function normalizeBlobPath(path: string): string {
   const trimmed = path.replace(/^\/+/, "").replace(/\/+$/, "");
   if (!trimmed) return "";
   if (trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new Error(`Invalid blob path "${path}": empty, "." and ".." segments are not allowed`);
   }
-  // These would widen the generated IAM resource ("a*") or be expanded by it ("${aws:username}").
+  // Wildcards and `$` widen or expand the IAM resource.
   if (/[*?$]/.test(trimmed)) throw new Error(`Invalid blob path "${path}": "*", "?" and "$" are not allowed`);
   return `${trimmed}/`;
 }
 
-// Declares that the enclosing function needs these accesses on a store the analyzer cannot trace.
-// A no-op at runtime; `cloudgear generate` reads it and stops widening on values passed around.
+// Runtime no-op; `cloudgear generate` reads it.
 export function grant(_store: BlobStore, ..._accesses: BlobAccess[]): void {}
 
-// Names for `@policy` permission lists: `permissions.Get`, `permissions.Put`, ...
 export const permissions = { Get: "read", Put: "write", Delete: "delete", List: "list" } as const satisfies Record<string, BlobAccess>;
 
 export interface PolicyOptions {
   permissions: readonly BlobAccess[];
 }
 
-// Method decorator for a static method of an exported class: the routed function gets exactly these
-// permissions on `store`, and `cloudgear generate` fails if the function does more. Needs literals.
-// A no-op at runtime.
+// Literals only; grants exactly these permissions on `store`.
 export function policy(_store: BlobStore, _options: PolicyOptions) {
   return (_method: unknown, _context: ClassMethodDecoratorContext): void => {};
 }
@@ -95,7 +88,6 @@ export class BlobStore {
     if (options.driver) this.driverPromise = Promise.resolve(options.driver);
   }
 
-  // Env var holding a store's physical name once deployed; `cloudgear generate` sets it.
   static envVarFor(name: string): string {
     return `CLOUDGEAR_BLOB_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
   }
@@ -104,7 +96,6 @@ export class BlobStore {
     return process.env[BlobStore.envVarFor(this.name)] ?? this.name;
   }
 
-  // Bucket name is used as the host.
   url(key = ""): string {
     const encoded = key.split("/").map(encodeURIComponent).join("/");
     return `https://${this.location}/${this.path}${encoded}`;

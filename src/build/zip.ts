@@ -1,6 +1,6 @@
 import { deflateRawSync } from "node:zlib";
 
-// Minimal deterministic ZIP writer: deflate entries, fixed 1980-01-01 timestamps.
+// Deterministic: fixed 1980-01-01 timestamps, deflated entries.
 export function zip(files: { name: string; data: Uint8Array }[]): Uint8Array {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];

@@ -36,7 +36,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       | { Status?: string; DomainName?: string; Type?: string; KeyAlgorithm?: string; NotAfter?: Date | string; DomainValidationOptions?: { ResourceRecord?: { Name: string; Value: string } }[] }
       | undefined;
 
-  // Validates and waits until issued; safe to run again after a partial failure.
+  // Waits until issued; safe to rerun after partial failure.
   async function validate(arn: string, outputs: Record<string, string>, spec: CertificateComparable): Promise<Record<string, string>> {
     let record: { Name: string; Value: string } | undefined;
     deps.log("waiting for ACM's DNS validation record");
@@ -50,7 +50,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     outputs.validation_name = name;
     outputs.validation_value = record.Value;
     const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
-    // ACM reuses one validation record per account and domain, so an identical one is already ours to use.
+    // ACM shares one validation record per domain; reuse it.
     const existing = await dns.get(name, "CNAME");
     if (existing && !sameTarget(existing.values[0], record.Value)) {
       throw new Error(`DNS record ${name} already exists with a different value (${existing.values[0]}); remove it so the certificate can be validated`);
@@ -123,8 +123,8 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};
       const taken = ["@aws.CloudFront", "@aws.ApiGateway"].some((type) => context.entry(stateKey({ type, name: spec.domain })));
-      // Fail early if the endpoint could not take the record later.
-      // A wildcard has no record of its own; each hostname it serves is checked when its distribution is made.
+      // Fail early if the endpoint cannot take the record.
+      // Wildcards have no record; hostnames are checked per distribution.
       if (spec.for_endpoint && !taken && !spec.domain.startsWith("*.")) {
         const record = await (await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token)).get(spec.domain, "CNAME");
         if (record) {
@@ -143,7 +143,6 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     },
 
     async update(entry, current) {
-      // Only a previous run that stopped before the certificate was issued gets here with work to do.
       if (!current.outputs.arn) throw new Error("Certificate state has no ARN; destroy and apply again");
       const wanted = (entry.spec as unknown as CertificateComparable).region || deps.region;
       if (regionOfArn(current.outputs.arn) !== wanted) {
@@ -153,7 +152,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       if (algorithm(current.spec) !== algorithm(entry.spec)) {
         throw new Error(`Certificate ${entry.physical_name} cannot change key_algorithm; destroy it and apply again`);
       }
-      // Imported or externally validated certificates have no DNS validation record to wait for.
+      // Imported certificates have no validation record to wait for.
       if (current.outputs.validated === "externally") return { ...current.outputs };
       try {
         return await validate(current.outputs.arn, { ...current.outputs }, entry.spec as unknown as CertificateComparable);
@@ -163,10 +162,10 @@ export function certificateDriver(deps: CertificateDeps): Driver {
     },
 
     async delete(current) {
-      // The validation record stays: ACM shares it between certificates for the same domain, and an unused one is harmless.
+      // Validation record stays; ACM shares it per domain.
       if (current.outputs.validation_name) deps.log(`leaving the validation record ${current.outputs.validation_name} in place`);
       if (!current.outputs.arn) return;
-      // CloudFront releases the certificate a little after its distribution is gone.
+      // CloudFront releases the certificate after its distribution is gone.
       for (let attempt = 0; ; attempt++) {
         try {
           await deps.acm(regionOfArn(current.outputs.arn)).send(new DeleteCertificateCommand({ CertificateArn: current.outputs.arn }));

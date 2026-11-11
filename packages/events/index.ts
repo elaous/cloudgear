@@ -6,11 +6,11 @@ export type { EventDriver, EventDriverFactory, EventDriverOptions, EventProvider
 
 export const DEFAULT_SOURCE = "cloudgear";
 
-// PutEvents takes 256 KB per entry, which also holds the envelope.
+// PutEvents limit: 256 KB per entry, envelope included.
 const MAX_DETAIL_BYTES = 250_000;
 
 export interface EventBusOptions {
-  // Name of a bus cloudgear creates for the app; omit it for the account's default bus. Literal only.
+  // Literal only; omit for the account's default bus.
   name?: string;
   driver?: EventDriver;
 }
@@ -21,7 +21,6 @@ export interface EventMatch {
   source?: string;
 }
 
-// What starts a function: the events of a type published on a bus.
 export interface EventTrigger {
   readonly kind: "event";
   readonly bus: EventBus;
@@ -29,7 +28,7 @@ export interface EventTrigger {
   readonly source?: string;
 }
 
-// Constructing it does nothing; `cloudgear apply` creates a named bus and the rules for its triggers.
+// Constructing does nothing; `cloudgear apply` creates the bus.
 export class EventBus {
   private driverPromise?: Promise<EventDriver>;
 
@@ -46,7 +45,6 @@ export class EventBus {
     return this.options.name ?? "default";
   }
 
-  // The variable the deployed function finds the bus's physical name in.
   static envVarFor(name: string): string {
     return `CLOUDGEAR_EVENTBUS_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
   }
@@ -55,7 +53,6 @@ export class EventBus {
     return process.env[EventBus.envVarFor(this.name)] ?? this.name;
   }
 
-  // `on: bus.event("order.created")` on a route, or `@on(bus.event(...))` on a method.
   event(match: string | EventMatch): EventTrigger {
     const { type, source } = typeof match === "string" ? { type: match, source: undefined } : match;
     return Object.freeze({
@@ -83,7 +80,7 @@ export class EventBus {
   }
 }
 
-// A no-op at runtime; `cloudgear generate` reads it and deploys a rule that starts the method.
+// Runtime no-op; `cloudgear generate` reads it.
 export function on(_trigger: EventTrigger) {
   return (_method: unknown, _context: ClassMethodDecoratorContext): void => {};
 }

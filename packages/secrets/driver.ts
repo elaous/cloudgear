@@ -5,9 +5,7 @@ export interface SecretDriver {
   // Missing secrets are null, never an error.
   get(name: string): Promise<string | null>;
   getMany(names: string[]): Promise<Record<string, string>>;
-  // Every secret directly under the prefix, with its value.
   list(prefix: string): Promise<Record<string, string>>;
-  // The names under the prefix, without reading any value.
   names(prefix: string): Promise<string[]>;
   put(name: string, value: string): Promise<void>;
 }
@@ -49,7 +47,6 @@ export async function createSecretDriver(provider: SecretProvider, options: Secr
 const PATH_SEGMENT = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
 const MAX_DEPTH = 15;
 
-// "/cloudgear/app" or "/cloudgear/app/*"; the wildcard asks for every secret under the path.
 export function parseSecretPath(path: string): { prefix: string; all: boolean } {
   const all = path.endsWith("/*");
   const prefix = (all ? path.slice(0, -2) : path).replace(/\/+$/, "");

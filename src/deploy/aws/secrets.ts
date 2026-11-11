@@ -2,7 +2,6 @@ import type { SecretBindingSpec } from "../../config/schema";
 
 export interface SecretContext {
   account: string;
-  // The function's region, for secrets that do not name one.
   region: string;
 }
 
@@ -23,7 +22,6 @@ function keyArn(key: string, region: string, account: string): string {
   throw new Error(`kmsKey "${key}" must be a key id or ARN; an alias cannot be scoped in IAM`);
 }
 
-// Read access to exactly the secrets a function declares: one statement per service, region and kind of access.
 export function secretStatements(bindings: SecretBindingSpec[] | undefined, context: SecretContext): Statement[] {
   const read = new Map<string, Set<string>>();
   const byPath = new Map<string, Set<string>>();

@@ -10,12 +10,11 @@ export const originIdOf = (functionName: string) => `cloudgear-fn-${functionName
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// Mirrors compilePath: {param} is one segment, trailing slash optional.
+// Mirrors compilePath; trailing slash optional.
 function pathRegex(shape: string): string {
   return `^${shape.split("{}").map(escapeRegex).join("([^/]+)")}/?$`;
 }
 
-// Viewer-request CloudFront Function source selecting the origin by method and path.
 export function routeFunctionCode(routes: MethodRoute[]): string {
   const literal = (path: string) => routeShape(path).replace(/\{\}/g, "").length;
   const ordered = [...routes].sort((a, b) => literal(b.path) - literal(a.path) || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));

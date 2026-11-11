@@ -4,7 +4,6 @@ export type VercelRequestQuery = Record<string, string | string[]>;
 
 export interface VercelRequestInit {
   method: string;
-  // Path and query, as in IncomingMessage.url.
   url: string;
   headers: Record<string, string>;
   query: VercelRequestQuery;
@@ -12,7 +11,6 @@ export interface VercelRequestInit {
   raw?: Uint8Array;
 }
 
-// The subset of IncomingMessage & { query, cookies, body } that handlers use.
 export class VercelRequest extends Readable {
   readonly httpVersion = "1.1";
   readonly method: string;
@@ -37,7 +35,6 @@ export class VercelRequest extends Readable {
   override _read(): void {}
 }
 
-// The subset of ServerResponse & { send, json, status, redirect } that handlers use.
 export class VercelResponse extends Writable {
   statusCode = 200;
   readonly chunks: Buffer[] = [];
@@ -94,7 +91,7 @@ export class VercelResponse extends Writable {
     done();
   }
 
-  // Text bodies as utf8; any other content type as base64. `cookies` are the Set-Cookie values.
+  // Text bodies as utf8; other types as base64.
   result(): { status: number; headers: Record<string, string>; body: string; base64?: boolean; cookies?: string[] } {
     const headers: Record<string, string> = {};
     let cookies: string[] | undefined;
@@ -108,7 +105,7 @@ export class VercelResponse extends Writable {
     return { status: this.statusCode, headers, body: raw.toString(binary ? "base64" : "utf8"), ...(binary ? { base64: true } : {}), ...(cookies ? { cookies } : {}) };
   }
 
-  // Resolves once the writer has flushed everything, which needs the function to end it.
+  // Resolves after flush, once the function ends the writer.
   settled(): Promise<void> {
     if (this.writableFinished) return Promise.resolve();
     return new Promise((resolve) => this.once("finish", () => resolve()));

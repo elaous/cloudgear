@@ -56,7 +56,7 @@ export class S3BlobDriver implements BlobDriver {
   }
 }
 
-// S3 answers AccessDenied for a missing key when the caller cannot list the whole bucket.
+// S3 returns AccessDenied for missing keys without ListBucket.
 function withAccessHint(err: unknown): unknown {
   if ((err as { name?: string })?.name !== "AccessDenied") return err;
   return new Error(

@@ -1,7 +1,6 @@
 import { createHandler as createCoreHandler, type HandlerOptions } from "./aws";
 import type { Handler, RouteSpec } from "../http";
 
-// The Express-style request and response of a Cloud Functions HTTP function.
 export interface GcpRequest {
   method: string;
   url?: string;
@@ -43,7 +42,7 @@ export function createHandler(fn: Handler, routes: RouteSpec[], options: Handler
   };
 }
 
-// Prefers the raw bytes; a parsed body is written back in the form its content type names.
+// Uses raw bytes; parsed bodies re-encode by content type.
 function bodyText(req: GcpRequest, headers: Record<string, string | undefined>): string {
   if (req.rawBody) return Buffer.from(req.rawBody).toString("utf8");
   if (typeof req.body === "string") return req.body;

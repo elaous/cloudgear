@@ -18,7 +18,7 @@ const MAX_STRING = 160;
 const MAX_ITEMS = 10;
 const MAX_DEPTH = 3;
 
-// Keeps what identifies an operation and drops what could hold a secret or a large payload.
+// Drops values that could hold secrets or large payloads.
 export function redact(value: unknown, key = "", depth = 0): unknown {
   if (SENSITIVE.test(key)) return "[redacted]";
   if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") return value;
@@ -36,7 +36,7 @@ export function redact(value: unknown, key = "", depth = 0): unknown {
   return String(value);
 }
 
-// A function is only called when debugging is on, so building the data costs nothing otherwise.
+// Lazy: data is built only when debugging is on.
 export type DebugData = Record<string, unknown> | (() => Record<string, unknown>);
 
 export function debug(scope: string, message: string, data?: DebugData): void {
@@ -47,14 +47,13 @@ export function debug(scope: string, message: string, data?: DebugData): void {
   sink(`[cg:debug ${time}] ${scope}: ${message}${detail}`);
 }
 
-// Parse errors quote the text they failed on, which may be a request body.
+// Parse errors can quote request bodies.
 export function errorSummary(err: unknown): string {
   const e = err as { name?: string; message?: string };
   if (e?.name === "SyntaxError") return "SyntaxError: invalid input";
   return `${e?.name ?? "Error"}: ${(e?.message ?? String(err)).slice(0, 300)}`;
 }
 
-// Logs the outcome and duration of an async operation; costs nothing when debugging is off.
 export async function timed<T>(scope: string, message: string, run: () => Promise<T>, data?: DebugData): Promise<T> {
   if (!isDebug()) return run();
   const started = performance.now();

@@ -13,7 +13,7 @@ import { FunctionRouter } from "@cloudgear/functions";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
 
-// Analyzing an app and bundling functions take seconds when the machine is busy.
+// Timeout covers analysis and bundling.
 setDefaultTimeout(30_000);
 
 const fixture = (name: string) => path.join(import.meta.dir, "fixtures", "router", name);

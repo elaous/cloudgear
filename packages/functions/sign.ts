@@ -14,7 +14,7 @@ export function regionFromUrl(url: string): string | undefined {
   return FUNCTION_URL_HOST.exec(new URL(url).hostname)?.[1];
 }
 
-// SigV4-signs a POST to a Lambda function URL; SDK packages load only when signing.
+// SigV4-signs a POST; SDK packages load only when signing.
 export async function signFunctionUrlRequest(
   url: string,
   body: string,
@@ -29,7 +29,7 @@ export async function signFunctionUrlRequest(
     import("@smithy/protocol-http"),
     import("@aws-crypto/sha256-js"),
   ]);
-  // Built once: the default chain caches resolved credentials until they expire.
+  // Built once; the default chain caches credentials.
   defaultCredentials ??= options.credentials ? undefined : (await import("@aws-sdk/credential-provider-node")).defaultProvider();
   const credentials = options.credentials ?? defaultCredentials!;
 

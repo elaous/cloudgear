@@ -6,7 +6,6 @@ import type { DesiredEntry, PlannedAction } from "./plan";
 import type { State, StateEntry } from "./state";
 import { stateKey } from "./state";
 
-// What a driver can look up while applying: the state of entries applied earlier in this run.
 export interface DriverContext {
   entry(key: string): StateEntry | undefined;
 }
@@ -15,13 +14,10 @@ export interface Driver {
   create(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string>>;
   update(entry: DesiredEntry, current: StateEntry, changes: string[], context: DriverContext): Promise<Record<string, string>>;
   delete(current: StateEntry, context: DriverContext): Promise<void>;
-  // Looks the entry up in the cloud for `cloudgear import`, or returns undefined when it does not exist. A driver
-  // without it cannot import. `outputs` are what `create` would have recorded; `spec` the settings read from the
-  // cloud that the next plan must compare against; `notes` what `apply` will overwrite, for the user to read.
+  // Drivers without this lookup cannot import.
   adopt?(entry: DesiredEntry, context: DriverContext, hint?: AdoptHint): Promise<Adopted | undefined>;
 }
 
-// What the user said about which one to adopt, when the name alone is not enough.
 export interface AdoptHint {
   arn?: string;
 }
@@ -34,8 +30,8 @@ export interface Adopted {
 
 export type Drivers = Record<string, Driver>;
 
-// Thrown by a driver whose create failed part-way. `outputs` are what it already made; apply keeps
-// them in state (marked incomplete) so the next apply resumes through update() instead of creating again.
+// Thrown by create on partial failure; outputs are kept.
+// Next apply resumes through update(), not create().
 export class PartialApplyError extends Error {
   constructor(
     readonly original: unknown,
@@ -45,8 +41,7 @@ export class PartialApplyError extends Error {
   }
 }
 
-// Kept alongside the attempted spec so the next plan sees a difference and drivers still know what was set up.
-// `previous` is the last fully applied spec, so cleanup still knows what existed before the failed change.
+// Attempted spec; kept so the next plan sees the difference.
 export const incompleteSpec = (spec: Record<string, unknown>, before?: Record<string, unknown>) => {
   const previous = before?.incomplete ? before.previous : before;
   return { ...spec, incomplete: true, ...(previous ? { previous } : {}) };
@@ -57,7 +52,7 @@ export interface ApplyOptions {
   log?: (message: string) => void;
 }
 
-// Persists state after every action so a failure part-way keeps what succeeded.
+// Saves state after each action; partial failures keep progress.
 export async function apply(actions: PlannedAction[], state: State, drivers: Drivers, options: ApplyOptions): Promise<void> {
   const log = options.log ?? (() => {});
   const driverFor = (type: string) => {
@@ -158,13 +153,11 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
   }
 }
 
-// Providers whose deployers the actions need, from the types being created, changed or removed.
 export function providersNeeded(actions: PlannedAction[]): string[] {
   const needing = actions.filter((a) => a.op !== "noop" && a.op !== "dry" && a.op !== "forget");
   return [...new Set(needing.map((a) => providerOfType(a.type)))].sort();
 }
 
-// Whether there is anything worth writing to the endpoints file.
 export function hasEndpoints(endpoints: EndpointsFile): boolean {
   return Object.keys(endpoints.routes).length > 0 || !!endpoints.cdn || !!endpoints.cdns || !!endpoints.api;
 }
@@ -180,7 +173,7 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
     const distribution = state.entries[stateKey({ type: "@aws.CloudFront", name: spec.domain })];
     return distribution?.outputs.domain_name ? [{ domain: spec.domain, url: distribution.outputs.url ?? `https://${distribution.outputs.domain_name}`, id: distribution.outputs.id }] : [];
   });
-  // `cdn` is the first declared site, when it is deployed; it stays for apps with a single CDN.
+  // First declared site; kept for single-CDN apps.
   const cdn = deployed.find((site) => site.domain === config.cdn[0]?.domain);
   const viaCloudFront = config.api?.via === "cloudfront";
   const gateway = config.api && state.entries[stateKey({ type: viaCloudFront ? "@aws.CloudFront" : "@aws.ApiGateway", name: config.api.domain })];
@@ -191,7 +184,6 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
     : gateway?.outputs.url
       ? { domain: config.api!.domain, url: gateway.outputs.url, id: gateway.outputs.api_id }
       : undefined;
-  // `cdn` is the first declared site; `cdns` lists every deployed site by domain once the app declares several.
   const cdns = config.cdn.length > 1 && deployed.length ? Object.fromEntries(deployed.map((site) => [site.domain, site])) : undefined;
   return { provider: config.provider, routes, auth: config.authenticated, ...(cdn ? { cdn } : {}), ...(cdns ? { cdns } : {}), ...(api ? { api } : {}) };
 }

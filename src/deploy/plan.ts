@@ -16,9 +16,8 @@ export interface DesiredEntry {
   dry: boolean;
   spec: Record<string, unknown>;
   source: ResourceSpec | FunctionSpec | CertificateSpec | CdnSpec | ApiSpec;
-  // State keys that must exist (and be applied) first.
   deps: string[];
-  // Re-applied whenever a dependency is created or replaced, because it embeds their outputs.
+  // Reapplied when a dependency changes; embeds its outputs.
   refresh?: boolean;
 }
 
@@ -26,9 +25,8 @@ export const CLOUDFRONT_REGION = "us-east-1";
 
 export interface CertificateComparable {
   domain: string;
-  // An endpoint will own the domain's record, so it must be free.
+  // Endpoint needs the domain free: it owns the record.
   for_endpoint: boolean;
-  // Empty means the region the app is deployed to.
   region: string;
   dns_provider: string;
   dns_zone: string;
@@ -38,7 +36,6 @@ export interface CertificateComparable {
 
 export interface ScheduleComparable {
   cron: string;
-  // Carried by every run, as a query string.
   query?: Record<string, string>;
   expression: string;
   function: string;
@@ -46,7 +43,6 @@ export interface ScheduleComparable {
 }
 
 export interface EventRuleComparable {
-  // Physical name of the bus.
   bus: string;
   event_type: string;
   source: string;
@@ -56,7 +52,6 @@ export interface EventRuleComparable {
 
 export interface CdnComparable {
   domain: string;
-  // The wildcard certificate serving `domain`, when it is not the domain's own.
   certificate_domain?: string;
   dns_provider: string;
   dns_zone: string;
@@ -115,7 +110,7 @@ const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   invokers: ["invokers"],
 };
 
-// Empty options omitted so older state still matches.
+// Omit empty options so older state still matches.
 function optionsSpec(options?: Record<string, string>): { options?: Record<string, string> } {
   return options && Object.keys(options).length ? { options } : {};
 }
@@ -416,7 +411,7 @@ export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
   return actions;
 }
 
-// Dependents go before what they depend on; entries without recorded deps keep functions before resources.
+// Dependents first; entries without recorded deps: functions before resources.
 function orderForDeletion<T extends { key: string; current: StateEntry }>(items: T[]): T[] {
   const removing = new Set(items.map((item) => item.key));
   const remaining = new Set(items.map((item) => item.key));

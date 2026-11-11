@@ -222,10 +222,9 @@ async function main() {
       const [first, second, third] = args;
       if (!values.all && !first && !values.arn) throw new Error("Usage: cloudgear import <name> [physical-id] | cloudgear import <type> <name> | cloudgear import --arn <arn> | cloudgear import --all");
       if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
-      // The ARN says what kind of thing it is.
       const arnType = values.arn ? typeOfArn(values.arn) : undefined;
       const arnBucket = !values.all && !first && arnType === "@aws.S3" ? bucketOfArn(values.arn!, true) : undefined;
-      // An ARN names the physical bucket; only without a match is it taken for the config's name.
+      // ARN names the physical bucket; config name only when unmatched.
       const byArn = arnBucket ? (config.resource.filter((r) => r.physical_name === arnBucket).length ? config.resource.filter((r) => r.physical_name === arnBucket) : config.resource.filter((r) => r.name === arnBucket)) : [];
       if (byArn.length > 1) throw new Error(`${values.arn} fits several resources (${byArn.map((r) => r.name).join(", ")}); say which: cloudgear import <name> --arn <arn>`);
       const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : byArn[0];
@@ -299,7 +298,7 @@ async function main() {
   }
 }
 
-// `arn:aws:s3:::my-bucket` (an object ARN `.../key` is cut back to the bucket).
+// Object ARNs `.../key` are cut back to the bucket.
 function bucketOfArn(arn: string, bucketOnly = false): string {
   const parsed = parseArn(arn);
   if (bucketOnly && parsed?.service === "s3" && parsed.resource.includes("/") && !parsed.region) throw new Error(`"${arn}" names an object, not a bucket`);
@@ -328,7 +327,6 @@ function readConfig(configPath: string): CloudgearConfig {
   return decodeConfig(fs.readFileSync(configPath, "utf8"));
 }
 
-// One deployer set per provider the planned actions touch.
 function gitUserName(cwd: string): string {
   try {
     return Bun.spawnSync(["git", "config", "user.name"], { cwd, stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
@@ -365,13 +363,13 @@ const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, re
 };
 
 async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {
-  // The router's own `region` option wins, then --region, then the environment.
+  // Precedence: router option, then --region, then environment.
   const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });
   if (!resolvedRegion) throw new Error("Set the router's region option, --region or AWS_REGION to deploy");
   const configDir = path.dirname(configPath);
   const verified = new Map<string, { name: string; data: Uint8Array }[]>();
-  // Credentials (for example GANDI_TOKEN) are read from the environment when the first record is written.
+  // Credentials are read when the first record is written.
   if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") {
     console.warn("warning: CLOUDGEAR_DNS_DRIVER=memory is set; no real DNS records will be written");
   }

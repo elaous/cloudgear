@@ -2,51 +2,38 @@ syntax = "proto3";
 
 package cloudgear;
 
-// Written by `cloudgear generate`, read by `cloudgear plan|apply|import|destroy`.
 message Config {
   string project = 1;
-  // "aws" | "gcp" | ...
   string provider = 2;
   repeated Resource resource = 3;
   repeated Function function = 4;
-  // IAM principals (role/user ARNs or account ids) allowed to invoke the functions.
   repeated string invoker = 5;
-  // "iam" (callers must sign requests) or "none" (public function URLs).
   string authenticated = 6;
   reserved 7;
   repeated Certificate certificate = 8;
-  // Static sites, each served from a bucket on its own domain.
   repeated Cdn cdn = 9;
-  // The router's own domain, served through API Gateway.
   Api api = 11;
-  // Region of the functions; empty means the region the deployer chooses (--region or AWS_REGION).
+  // Empty: region from --region or AWS_REGION.
   string region = 10;
 }
 
 message Api {
   string provider = 1;
-  // Domain of the Certificate that serves the API.
   string domain = 2;
-  // "cloudfront" when a CDN serves the router; empty for API Gateway.
   string via = 3;
-  // A CloudFront Function routes by method as well as path.
   bool method_routing = 4;
-  // Provider settings of the CDN.
   map<string, string> options = 5;
-  // Domain of the wildcard Certificate serving `domain`; empty when `domain` is the Certificate's own.
   string certificate = 6;
 }
 
 message Dns {
-  // "gandi" | "aws"
   string provider = 1;
   string domain = 2;
   string zone = 3;
-  // Read from a secret by `apply`; never stored here.
+  // Read from a secret at apply time; never stored here.
   SecretRef token = 4;
 }
 
-// A secret by name, for infrastructure that needs a value while it is created.
 message SecretRef {
   string provider = 1;
   string service = 2;
@@ -56,15 +43,12 @@ message SecretRef {
   string kms_key = 6;
 }
 
-// A secret a function can read; `env` names the variable `generate` fills from it.
 message SecretBinding {
   string provider = 1;
   string service = 2;
   string region = 3;
   string path = 4;
-  // Empty with `all`: every secret under `path`.
   string name = 5;
-  // Empty when the code reads the secret itself.
   string env = 6;
   bool all = 7;
   string kms_key = 8;
@@ -73,11 +57,9 @@ message SecretBinding {
 message Certificate {
   string domain = 1;
   map<string, string> options = 2;
-  // The zone validating it and holding the records of what it serves.
   Dns dns = 3;
-  // "cdn" or "api"; empty when nothing uses it.
   string usage = 4;
-  // Empty means us-east-1 for a CDN or unused certificate, the function region for an API.
+  // Empty: us-east-1 for CDN or unused, function region for API.
   string region = 5;
   string provider = 6;
 }
@@ -85,35 +67,26 @@ message Certificate {
 message Cdn {
   string provider = 1;
   string domain = 2;
-  // Logical name of the Resource serving the static site.
   string bucket = 3;
-  // Key prefix of the site within the bucket ("" for the root).
   string path = 4;
   reserved 5;
   map<string, string> options = 6;
-  // Domain of the wildcard Certificate serving `domain`; empty when `domain` is the Certificate's own.
   string certificate = 7;
 }
 
 message Resource {
-  // Logical name, from the client URI, e.g. "myblob" in `new BlobStore("aws", "://myblob")`.
   string name = 1;
-  // Inferred flagship service, e.g. "@aws.S3".
   string type = 2;
   string physical_name = 3;
-  // `// cloudgear: dry` -- never created, updated or deleted.
+  // Never created, updated or deleted.
   bool dry = 4;
-  // "<file>:<line>" of the client construction.
   string source = 5;
-  // Region the resource lives in; empty means the region the app is deployed to.
   string region = 6;
-  // Provider-specific settings; validated per type by cloudgear.
   map<string, string> options = 7;
 }
 
 message Function {
   string name = 1;
-  // Inferred flagship service, e.g. "@aws.Lambda".
   string type = 2;
   string physical_name = 3;
   string runtime = 4;
@@ -127,19 +100,13 @@ message Function {
   // 0 leaves concurrency unreserved.
   int32 reserved_concurrency = 12;
   map<string, string> options = 13;
-  // Five-field UTC cron expressions that also trigger the function.
   repeated string schedule = 14;
-  // Files packaged with the function, by path from the project root; copied under the bundle's files/.
   repeated string include = 15;
-  // The function takes a Vercel-style request instead of its input.
   bool pass_request = 16;
   reserved 17;
-  // "helper" or "writer": what the function receives after its first argument.
   string response_arg = 18;
   repeated SecretBinding secret = 19;
-  // Events that also start the function.
   repeated EventTrigger event = 20;
-  // Schedules whose runs carry a query string; the others are in `schedule`.
   reserved 21;
   repeated QuerySchedule query_schedule = 22;
 }
@@ -150,7 +117,6 @@ message QuerySchedule {
 }
 
 message EventTrigger {
-  // Logical name of the bus Resource ("bus.<name>").
   string bus = 1;
   string type = 2;
   // Empty matches any source.
@@ -161,28 +127,23 @@ message Source {
   string file = 1;
   string export = 2;
   string input_type = 3;
-  // Set when the function is a method of the exported object `export`.
   string member = 4;
 }
 
 message Route {
   string method = 1;
   string path = 2;
-  // Nickname used as the key in FunctionRouter.listen() results.
   string name = 3;
 }
 
 message Bundle {
-  // Single-file bundle of the function's import tree, node_modules included.
   string path = 1;
   string sha256 = 2;
 }
 
 message Permission {
-  // Logical name of a Resource.
   string resource = 1;
   repeated string action = 2;
-  // Key prefix the access is confined to; empty means the whole bucket.
   string path = 3;
 }
 
@@ -190,7 +151,6 @@ message Env {
   string key = 1;
   oneof source {
     string value = 2;
-    // Logical name of a Resource; its physical name becomes the value.
     string value_from = 3;
   }
 }

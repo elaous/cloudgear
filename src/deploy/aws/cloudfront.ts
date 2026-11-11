@@ -44,7 +44,6 @@ export interface CloudFrontDeps {
   log: (message: string) => void;
 }
 
-// Managed cache and origin request policies.
 const CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6";
 const CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
 const ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac";
@@ -110,7 +109,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const objectArn = `arn:aws:s3:::${spec.bucket}/${spec.path}*`;
     const condition = { StringEquals: { "AWS:SourceArn": distributionArn } };
     const statements = policy.Statement.filter((s: { Sid?: string }) => !s.Sid?.startsWith(`cloudgear-cdn-${id}`));
-    // The CDN only reads objects; earlier versions also granted ListBucket, which is dropped here on the next apply.
+    // Grants read only; earlier ListBucket grants are dropped.
     statements.push({
       Sid: `cloudgear-cdn-${id}-read`,
       Effect: "Allow",
@@ -181,7 +180,6 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     for (const kind of ["url", "invoke"]) await removeStatement(functionName, `cloudgear-cdn-${tag(domain)}-${kind}`);
   }
 
-  // Publishes the routing function; returns its live ARN.
   async function publishRouteFunction(spec: CdnComparable, outputs: Record<string, string>): Promise<string> {
     const name = fitName(`cloudgear-${tag(spec.domain)}-routes`, 64);
     const code = Buffer.from(routeFunctionCode(spec.method_routes ?? []));
@@ -232,13 +230,13 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     return false;
   }
 
-  // Creates or brings an existing distribution up to date; every step tolerates being run again.
+  // Idempotent: creates or updates the distribution.
   async function converge(entry: { deps: string[]; spec: Record<string, unknown> }, context: DriverContext, outputs: Record<string, string>) {
     const spec = entry.spec as unknown as CdnComparable;
     const certificate = context.entry(stateKey({ type: "@aws.Certificate", name: spec.certificate_domain ?? spec.domain }));
     if (!certificate?.outputs.arn) throw new Error(`Certificate for ${spec.certificate_domain ?? spec.domain} is not issued yet`);
 
-    // Fail before creating anything if the name already points somewhere that is not ours.
+    // Fail if the name points at a foreign distribution.
     const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
     const record = await dns.get(spec.domain, "CNAME");
     if (record && !(outputs.domain_name && sameTarget(record.values[0], outputs.domain_name))) {
@@ -369,7 +367,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     async delete(current) {
       const spec = current.spec as unknown as Partial<CdnComparable>;
       const domain = spec.domain ?? current.name;
-      // Only remove the record if it still points at the distribution this entry created.
+      // Remove the record only while it points at this distribution.
       if (current.outputs.domain_name && spec.dns_provider && spec.dns_zone) {
         const dns = await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
         const record = await dns.get(domain, "CNAME");
@@ -387,7 +385,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     },
   };
 
-  // `apply` rebuilds the whole distribution config; these are the settings of an existing one it would not keep.
+  // Apply rebuilds the config; these existing settings are dropped.
   async function overwritten(id: string): Promise<string[]> {
     const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
@@ -417,7 +415,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       if ((err as { name?: string }).name === "NoSuchDistribution") return;
       throw err;
     }
-    // A distribution can only be deleted once disabling has propagated, and the ETag may have changed meanwhile.
+    // Deletion waits for disabling to propagate; ETag may change.
     if (!(await waitDeployed(id))) throw new Error(`Distribution ${id} is still being disabled; run apply again in a few minutes`);
     try {
       etag = (await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }))).ETag;
@@ -438,7 +436,6 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 }
 
-// Functions the spec serves, plus those of the last fully applied spec.
 function servedFunctions(spec: object, withPrevious = true): string[] {
   const names = (s: unknown) => {
     const comparable = s as Partial<CdnComparable> | undefined;
@@ -524,7 +521,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
         Compress: true,
       }
     : {
-        // Paths no behavior matches reach the first function, which answers 404.
+        // Unmatched paths reach the first function, which answers 404.
         TargetOriginId: originIdOf(functionOrigins.length ? [...originMap.keys()].sort()[0]! : ""),
         AllowedMethods: { ...methodList(ALL_METHODS), CachedMethods: methodList(["GET", "HEAD"]) },
         ...toFunction,

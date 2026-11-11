@@ -327,7 +327,6 @@ describe("FunctionRouter rate limit", () => {
     );
     for (let i = 0; i < 12_000; i++) await router.fetch(new Request("http://app/x", { headers: { "x-client": `c${i}` } }));
     expect((router as unknown as { windows: Map<string, unknown> }).windows.size).toBe(10_000);
-    // the oldest counters were dropped, the newest are kept
     expect((await router.fetch(new Request("http://app/x", { headers: { "x-client": "c0" } }))).status).toBe(200);
     expect((await router.fetch(new Request("http://app/x", { headers: { "x-client": "c11999" } }))).status).toBe(429);
   });
@@ -347,7 +346,6 @@ describe("FunctionRouter (remote mode)", () => {
     while (servers.length) servers.pop()!.stop(true);
   });
 
-  // Stands in for a Lambda function URL: HTTP request -> payload v2 event -> adapter.
   function fakeFunctionUrl(handler: ReturnType<typeof createHandler>) {
     const server = Bun.serve({
       port: 0,

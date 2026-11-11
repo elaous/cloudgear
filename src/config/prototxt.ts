@@ -1,5 +1,4 @@
-// Protobuf text format, limited to what cloudgear.proto uses: strings, numbers,
-// bools, nested messages and repeated fields.
+// Protobuf text format subset used by cloudgear.proto.
 export type ProtoValue = string | number | boolean | ProtoMessage | ProtoValue[];
 export interface ProtoMessage {
   [field: string]: ProtoValue | undefined;
@@ -50,7 +49,6 @@ function tokenize(text: string): Token[] {
     const raw = match[0];
     const c = raw[0]!;
     if (/\s/.test(c) || c === "#") {
-      // skipped
     } else if (c === '"' || c === "'") {
       tokens.push({ kind: "string", text: raw, value: unquote(raw), line });
     } else if (/[-\d]/.test(c)) {

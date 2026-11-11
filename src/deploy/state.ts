@@ -8,7 +8,6 @@ export interface StateEntry {
   physical_name: string;
   // Adopted through `cloudgear import`: never deleted, only forgotten.
   imported?: boolean;
-  // Comparable spec as last applied; see desiredEntries() in plan.ts.
   spec: Record<string, unknown>;
   outputs: Record<string, string>;
   // State keys this entry needs; deletes run in reverse dependency order.

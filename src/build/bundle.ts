@@ -5,33 +5,27 @@ export interface BundleRequest {
   name: string;
   sourceFile: string;
   exportName: string;
-  // Method name when the routed function lives on the exported object `exportName`.
   member?: string;
   routes: { method: string; path: string }[];
   provider: string;
-  // Whether the function trusts the caller identity in router calls. Off when anyone can reach the
-  // function (public URLs, or a CDN that forwards viewers' requests straight to it).
+  // Trusts caller identity in router calls; off for public URLs.
   trustContext: boolean;
-  // Token verification inside the function (see jwtAuth); `anonymous` functions skip it.
   jwt?: { settings: Record<string, unknown>; anonymous: boolean };
-  // Files copied next to the bundle, at their paths from the project root.
   include?: { rel: string; abs: string }[];
   passRequest?: boolean;
   responseKind?: "helper" | "writer";
-  // Secrets filled into the environment before the first request, and the services they come from.
   secrets?: { bindings: Record<string, unknown>[]; services: string[] };
   outDir: string;
 }
 
 export interface BundleResult {
   file: string;
-  // Covers the bundle and the included files.
   sha256: string;
 }
 
 export const INCLUDED_DIR = "files";
 
-// Where an included file lives under the files directory; a path from a config MUST stay inside it.
+// Included file path, kept inside the files directory.
 export function includedPath(filesDir: string, rel: string): string {
   const resolved = path.resolve(filesDir, rel);
   const within = path.relative(filesDir, resolved);
@@ -41,7 +35,6 @@ export function includedPath(filesDir: string, rel: string): string {
   return resolved;
 }
 
-// Hash of the bundle and of each included file's path and content, in path order.
 export function hashContents(index: Uint8Array, files: { rel: string; data: Uint8Array }[]): string {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(index);
@@ -66,8 +59,6 @@ const ADAPTERS: Record<string, string> = {
   gcp: "@cloudgear/functions/drivers/gcp",
 };
 
-// One self-contained ESM file per function: its module, every import it
-// reaches and their node_modules, wrapped in the provider's handler adapter.
 export async function bundleFunction(req: BundleRequest): Promise<BundleResult> {
   const adapter = ADAPTERS[req.provider];
   if (!adapter) throw new Error(`No function adapter for provider "${req.provider}"`);
@@ -78,7 +69,7 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
 
   const entry = path.join(dir, "entry.ts");
   const source = path.resolve(req.sourceFile);
-  // Resolved from the app so the build dir may live outside its node_modules tree.
+  // Resolved from the app; build dir may sit outside node_modules.
   const adapterPath = Bun.resolveSync(adapter, path.dirname(source));
   const authPath = req.jwt ? Bun.resolveSync("@cloudgear/functions/auth", path.dirname(source)) : "";
   const handlerOptions = `{ trustContext: ${req.trustContext}${
@@ -138,7 +129,7 @@ export async function bundleFunction(req: BundleRequest): Promise<BundleResult> 
 
 const MAX_CAUSES = 20;
 
-// Bun.build throws an AggregateError whose own message is only "Bundle failed"; the causes are in `errors`.
+// Bun.build's error message is generic; causes are in `errors`.
 export function describeBuildFailure(err: unknown): string {
   const causes = err instanceof AggregateError && err.errors.length ? err.errors : [err];
   const lines = causes.map((cause) => {
@@ -149,7 +140,7 @@ export function describeBuildFailure(err: unknown): string {
   const unique = [...new Set(lines)];
   const shown = unique.slice(0, MAX_CAUSES);
   if (unique.length > shown.length) shown.push(`... and ${unique.length - shown.length} more`);
-  // A relative import of a file named "generated" is made by the project's own build step, unlike a missing package.
+  // Relative "generated" imports are made by the project build step.
   if (unique.some((line) => /Could not resolve: "\.{1,2}\/[^"]*\bgenerated\b/.test(line))) {
     shown.push("A file with \"generated\" in its name is usually made by a build step of yours; run that step before `cloudgear generate`.");
   }

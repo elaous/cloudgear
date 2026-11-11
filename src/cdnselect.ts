@@ -1,8 +1,7 @@
 import type { CloudgearConfig } from "./config/schema";
 import type { State, StateEntry } from "./deploy/state";
 
-// The site distributions `invalidate` may clear: deployed, not the router's, and (when the config
-// declares sites) still declared.
+// Deployed non-router distributions still declared in config.
 export function siteDistributions(config: CloudgearConfig, state: State): StateEntry[] {
   const declared = new Set(config.cdn.map((c) => c.domain));
   return Object.values(state.entries).filter(

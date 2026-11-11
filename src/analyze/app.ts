@@ -23,7 +23,6 @@ export interface AnalyzedResource {
   kind: "BlobStore";
   name: string;
   provider: string;
-  // Declared region; undefined means the region the app is deployed to.
   region?: string;
   dry: boolean;
   options?: Record<string, string>;
@@ -31,7 +30,6 @@ export interface AnalyzedResource {
   line: number;
 }
 
-// One secret a function can read, as a SecretStore path declares it.
 export interface SecretBindingModel {
   provider: "aws";
   service: SecretService;
@@ -40,14 +38,13 @@ export interface SecretBindingModel {
   path: string;
   // Empty for a wildcard binding.
   name: string;
-  // The environment variable it fills; empty when the code reads the secret itself.
   env: string;
   all?: boolean;
 }
 
 export type SecretRefModel = Omit<SecretBindingModel, "env" | "all">;
 
-// An EventBus the app declares; `name` is "default" for the account's default bus.
+// Name "default" means the account's default bus.
 export interface AnalyzedBus {
   name: string;
   provider: "aws";
@@ -55,14 +52,12 @@ export interface AnalyzedBus {
   line: number;
 }
 
-// What starts a function: events of a type on a bus.
 export interface EventTriggerModel {
   bus: string;
   type: string;
   source?: string;
 }
 
-// A cron expression and the query string (`?job=backup`) the scheduled run carries.
 export interface ScheduleModel {
   cron: string;
   query?: Record<string, string>;
@@ -70,7 +65,6 @@ export interface ScheduleModel {
 
 export interface StoreUse {
   resource: string;
-  // Key prefix the store is confined to ("" for the whole bucket).
   path: string;
   accesses: Set<BlobAccess>;
 }
@@ -79,34 +73,25 @@ export interface AnalyzedFunction {
   name: string;
   file: string;
   exportName: string;
-  // Set when the routed function is a method of the exported object `exportName`.
   member?: string;
-  // Name the function has at runtime (`fn.name`); the default route name. Empty when anonymous.
   declaredName: string;
   inputType?: string;
   routes: { method: string; path: string; name: string }[];
-  // `${resource}\0${path}` -> accesses performed on that store
+  // Keyed by resource and path, NUL-separated.
   uses: Map<string, StoreUse>;
-  // Every route is `public`, so the function skips token verification.
+  // Every route is public; the function skips token checks.
   anonymous?: boolean;
   options?: Record<string, string>;
-  // Five-field UTC cron expressions that also trigger the function.
   schedules: ScheduleModel[];
   secrets: SecretBindingModel[];
-  // What the function's code reads from the environment.
   envUse: EnvUse;
-  // Events that start the function.
   events: EventTriggerModel[];
-  // Names of the buses the function publishes to.
   publishes: string[];
-  // Files copied into the function's package, by path from the project root.
   include: { rel: string; abs: string }[];
-  // The function takes a Vercel-style request instead of its input, and a response after it.
   passRequest: boolean;
   responseKind?: "helper" | "writer";
 }
 
-// Settings of the router's `authenticate: jwtAuth({...})`, for functions that verify tokens themselves.
 export interface JwtSettings {
   issuer: string;
   audience?: string | string[];
@@ -133,7 +118,7 @@ export interface CertificateModel {
   provider: string;
   domain: string;
   dns: { provider: string; domain: string; zone: string; token?: SecretRefModel };
-  // What the certificate serves; decides the region it is issued in.
+  // Decides the region the certificate is issued in.
   usage: "cdn" | "api" | "";
   region?: string;
   options?: Record<string, string>;
@@ -143,33 +128,25 @@ export interface CdnModel {
   provider: string;
   domain: string;
   options?: Record<string, string>;
-  // Domain of the Cert that serves it, when that is a wildcard covering `domain`.
   certificate: string;
-  // Name of the bucket resource and the key prefix of the static site within it.
   bucket: string;
   path: string;
 }
 
 export interface EdgeModel {
   certificates: CertificateModel[];
-  // Each CDN serves one site from a bucket, on its own domain.
   cdns: CdnModel[];
-  // The router's own domain, through API Gateway or a CDN.
   api?: { provider: string; domain: string; certificate?: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
 }
 
 export interface AppModel extends EdgeModel {
   provider: string;
-  // Region of the functions, from the router's options; undefined means the deploy default.
   region?: string;
   authenticated: Authentication;
-  // Set with an API domain, where callers reach functions directly and each verifies the token.
   jwt?: JwtSettings;
   entry: string;
   resources: AnalyzedResource[];
-  // Variables the router says the code tolerates being unset.
   optionalEnv: string[];
-  // Buses some function triggers on or publishes to.
   buses: AnalyzedBus[];
   functions: AnalyzedFunction[];
   warnings: string[];
@@ -220,7 +197,6 @@ export function analyzeApp(entryPath: string): AppModel {
   };
   const newExpressions = localFiles.flatMap((file) => file.getDescendantsOfKind(SyntaxKind.NewExpression));
 
-  // Resources
   const resourceByDecl = new Map<Node, Store>();
   const resources = new Map<string, AnalyzedResource>();
   for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/blob", "BlobStore"))) {
@@ -254,7 +230,6 @@ export function analyzeApp(entryPath: string): AppModel {
     resourceByDecl.set(decl, { resource: existing ?? resource, path: storePath });
   }
 
-  // Secret stores, and the paths, names and references built from them
   interface SecretStoreModel {
     provider: "aws";
     service: SecretService;
@@ -323,7 +298,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return undefined;
   };
 
-  // `bus.event("type")` or `bus.event({ type, source })`, written inline or held by a variable.
   function triggerOf(node: Node | undefined, at: string): EventTriggerModel {
     const e = initOf(node);
     const callee = e && Node.isCallExpression(e) ? e.getExpression() : undefined;
@@ -370,7 +344,7 @@ export function analyzeApp(entryPath: string): AppModel {
     for (const event of events) if (!fn.events.some((e) => JSON.stringify(e) === JSON.stringify(event))) fn.events.push(event);
   }
 
-  // A bus handed around as a value is not traced, so what is done with it needs no permission here.
+  // Bus passed as a value is untraced; no permission inferred.
   function noteBusValue(node: Node, decl: Node) {
     if (!publishUses || !busDecls.has(decl)) return;
     const parent = node.getParent();
@@ -397,7 +371,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "on" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/events";
   }
 
-  // Methods carrying `@on(bus.event(...))`, routed or not.
   function findEventMethods(): { node: Node; label: string; events: EventTriggerModel[] }[] {
     const found: { node: Node; label: string; events: EventTriggerModel[] }[] = [];
     for (const file of localFiles) {
@@ -423,7 +396,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return node;
   };
 
-  // `ss.path("/a/b")`, written inline or held by a variable.
   const pathOf = (node: Node | undefined): SecretPathModel | undefined => {
     const e = initOf(node);
     if (!e || !Node.isCallExpression(e)) return undefined;
@@ -441,7 +413,6 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   };
 
-  // A call of such a path: `env(["A"])`, `env({ A: "b" })` or `env("A")`.
   const callOnPath = (node: Node | undefined): { path: SecretPathModel; arg: Node | undefined; call: CallExpression } | undefined => {
     const e = initOf(node);
     if (!e || !Node.isCallExpression(e)) return undefined;
@@ -483,7 +454,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return [...seen.values()];
   };
 
-  // The `env:` option of a route or router: names to fill into the environment.
   function bindingsOf(node: Node, at: string): SecretBindingModel[] {
     const e = initOf(node);
     if (!e) return [];
@@ -502,7 +472,7 @@ export function analyzeApp(entryPath: string): AppModel {
     return namesOf(call.arg, at).map(([env, name]) => ({ ...bindingFields(call.path), name, env }));
   }
 
-  // Code that reads a secret by name needs access to it; the environment is not filled for it.
+  // Reading a secret by name needs access; env is not filled.
   function noteSecretCall(call: CallExpression) {
     if (!secretUses) return;
     const found = callOnPath(call);
@@ -518,7 +488,6 @@ export function analyzeApp(entryPath: string): AppModel {
     if (ref) secretUses.push({ ...ref, env: "" });
   }
 
-  // `env("NAME")`, written inline or held by a variable.
   function refOf(node: Node | undefined): SecretRefModel | undefined {
     const found = callOnPath(node);
     const arg = initOf(found?.arg);
@@ -526,7 +495,7 @@ export function analyzeApp(entryPath: string): AppModel {
     return { ...bindingFields(found.path), name: arg.getLiteralValue() };
   }
 
-  // The DNS provider's API token, read from a secret when `apply` runs: never a literal in source.
+  // Read from a secret at apply time; never a literal.
   function readSecretToken(options: Node | undefined, at: string): SecretRefModel | undefined {
     if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
     const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "token");
@@ -548,7 +517,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return value ? bindingsOf(value, at) : [];
   }
 
-  // Router
   const routers = newExpressions.filter((e) => isClass(e, "@cloudgear/functions", "FunctionRouter"));
   if (routers.length === 0) throw new Error(`No new FunctionRouter(...) found in ${relative(entry)} or its imports`);
   if (routers.length > 1) throw new Error(`Only one FunctionRouter per app is supported, found: ${routers.map(where).join(", ")}`);
@@ -719,7 +687,7 @@ export function analyzeApp(entryPath: string): AppModel {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
         noteSecretRef(decl);
         noteBusValue(node, decl);
-        // `@policy(store, ...)` is read separately, and is not a use of the store.
+        // `@policy(...)` is not a use of the store.
         const decorator = node.getFirstAncestorByKind(SyntaxKind.Decorator);
         if (decorator && isPolicyDecorator(decorator)) continue;
         const store = resourceByDecl.get(decl);
@@ -856,7 +824,6 @@ export function analyzeApp(entryPath: string): AppModel {
         throw new Error(`${at}: "${domain}" is the zone apex, which cannot be a CNAME; serve ${what} from a subdomain`);
       }
     };
-    // The hostname a CDN serves: the Cert's own domain, or `domain` under a wildcard Cert.
     const servedHost = (cert: CertificateModel, optionsArg: Node | undefined, at: string): string => {
       const given = readStringOption(optionsArg, "domain", `${at}: CDN options`);
       let host: string;
@@ -1046,7 +1013,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return { certificates: [...certificates.values()], cdns, api };
   }
 
-  // Declarations an identifier refers to; `{ store }` and `obj.store` lead back to the variable.
   function declarationsOf(node: Node): Node[] {
     const parent = node.getParent();
     const symbol =
@@ -1100,7 +1066,6 @@ export function analyzeApp(entryPath: string): AppModel {
     }
   }
 
-  // `cron`...`` or `{ cron: cron`...`, query: { job: "backup" } }`.
   function readSchedule(node: Node | undefined, at: string): ScheduleModel {
     if (!node || !Node.isObjectLiteralExpression(node)) return { cron: readCron(node, at) };
     let cronNode: Node | undefined;
@@ -1146,7 +1111,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return !!decl && Node.isFunctionDeclaration(decl) && decl.getName() === "schedule" && packages.nameOf(decl.getSourceFile().getFilePath()) === "@cloudgear/functions";
   }
 
-  // Methods carrying `@schedule(cron`...`)`, routed or not.
   function findScheduledMethods(): { node: Node; label: string; schedules: ScheduleModel[] }[] {
     const found: { node: Node; label: string; schedules: ScheduleModel[] }[] = [];
     for (const file of localFiles) {
@@ -1277,7 +1241,6 @@ export function analyzeApp(entryPath: string): AppModel {
     return fn;
   }
 
-  // Permissions a routed method declares with `@policy(store, { permissions: [...] })`, by store key.
   function readPolicies(fnNode: Node, fnName: string): Map<string, Set<BlobAccess>> {
     const result = new Map<string, Set<BlobAccess>>();
     if (!Node.isMethodDeclaration(fnNode)) return result;
@@ -1317,7 +1280,7 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 
   function accessesAt(start: Node): { ops?: BlobAccess[]; grants?: BlobAccess[]; widened?: true } {
-    // `this.store` and `svc.store` name the store as a property; judge the use of that whole expression.
+    // Property access names the store; judge the whole expression.
     const owner = start.getParent();
     const node = Node.isPropertyAccessExpression(owner) && owner.getNameNode() === start ? owner : start;
     const parent = node.getParent();
@@ -1351,7 +1314,7 @@ export function analyzeApp(entryPath: string): AppModel {
   }
 }
 
-// Property key text, accepting identifiers and string literals ("path": ...); computed keys cannot be analyzed.
+// Computed keys cannot be analyzed.
 function propName(prop: Node): string | undefined {
   if (!Node.isPropertyAssignment(prop) && !Node.isShorthandPropertyAssignment(prop) && !Node.isMethodDeclaration(prop)) return undefined;
   const key = prop.getNameNode();
@@ -1456,7 +1419,6 @@ function readRouteOptions(options: Node | undefined, at: string, callerFile: str
   return result;
 }
 
-// "eu-west-1", "us-gov-east-1", "cn-north-1"
 const REGION = /^[a-z]{2,5}(-[a-z]+)+-\d$/;
 
 function readRegion(options: Node | undefined, at: string): string | undefined {
@@ -1492,7 +1454,6 @@ function readStringOption(options: Node | undefined, name: string, at: string): 
   return undefined;
 }
 
-// The declaration a property's value refers to: `{ cert }` and `{ cert: cert }` alike.
 function valueDeclaration(prop: Node): Node | undefined {
   if (Node.isShorthandPropertyAssignment(prop)) return resolveSymbol(prop.getValueSymbol())?.getDeclarations()[0];
   if (Node.isPropertyAssignment(prop)) {
@@ -1513,7 +1474,6 @@ function readCertReference(options: Node | undefined, at: string): Node | undefi
   return undefined;
 }
 
-// Follows `new X().a().b()` back to `new X()`.
 function chainRoot(node: Node | undefined): Node | undefined {
   let current = node;
   while (current && Node.isCallExpression(current)) {
@@ -1526,7 +1486,7 @@ function chainRoot(node: Node | undefined): Node | undefined {
 
 const ROUTER_MEMBERS = new Set(["listen", "fetch", "provider", "mode"]);
 
-// Follows .url chains through variables; throws if the router flows anywhere untraceable.
+// Throws when the router flows somewhere untraceable.
 function collectAddCalls(router: NewExpression, where: (node: Node) => string, isCdnOption: (node: Node) => boolean): CallExpression[] {
   const calls: CallExpression[] = [];
   const followed = new Set<Node>();
@@ -1543,7 +1503,7 @@ function collectAddCalls(router: NewExpression, where: (node: Node) => string, i
       return;
     }
     if (Node.isExpressionStatement(parent)) return;
-    // Usages in other files are separate references, followed on their own.
+    // Usages in other files are followed separately.
     if (
       Node.isImportSpecifier(parent) ||
       Node.isExportSpecifier(parent) ||
@@ -1613,7 +1573,7 @@ function declaredNameOf(decl: Node): string {
   if (Node.isFunctionDeclaration(decl)) return decl.getName() ?? "";
   if (Node.isVariableDeclaration(decl)) {
     const init = decl.getInitializer();
-    // `const d = function inner() {}` has the runtime name "inner".
+    // Named function expressions keep their own name at runtime.
     return Node.isFunctionExpression(init) && init.getName() ? init.getName()! : decl.getName();
   }
   if (Node.isMethodDeclaration(decl) || Node.isPropertyAssignment(decl)) return propName(decl) ?? "";
@@ -1623,7 +1583,6 @@ function declaredNameOf(decl: Node): string {
 interface ExportTarget {
   exportName: string;
   member?: string;
-  // Module the export lives in, when it is not the declaration's own.
   file?: string;
 }
 
@@ -1651,19 +1610,16 @@ function exportTargetOf(decl: Node, instanceExport: InstanceExport, receiver?: N
   return { exportName, member };
 }
 
-// Directory of the nearest package.json at or above the file; where "/x" and "x" paths start.
 function projectRootOf(file: string): string {
   const pkg = findUp(path.dirname(file), "package.json");
   return pkg ? path.dirname(pkg) : path.dirname(file);
 }
 
-// "./x" and "../x" are relative to the calling file; "/x" and "x" to the project root.
 function resolveRoutePath(spec: string, callerFile: string): string {
   if (spec.startsWith("./") || spec.startsWith("../")) return path.resolve(path.dirname(callerFile), spec);
   return path.join(projectRootOf(callerFile), spec.replace(/^\/+/, ""));
 }
 
-// `.url(method, path, "/api/script.ts")`: the absolute path of the script, whether or not it exists.
 function scriptOf(call: CallExpression): string | undefined {
   const callee = call.getExpression();
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "url") return undefined;
@@ -1673,7 +1629,7 @@ function scriptOf(call: CallExpression): string | undefined {
   return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
 }
 
-// A script's function is named after its path from the project root: "api/v/[slug].ts" is "api-v-slug".
+// Named after its root path: "api/v/[slug].ts" is "api-v-slug".
 function scriptNameOf(scriptFile: string, callerFile: string): string {
   const rel = path.relative(projectRootOf(callerFile), scriptFile).replace(/\.[^./\\]+$/, "");
   return rel.replace(/[^A-Za-z0-9_]+/g, "-").replace(/^-+|-+$/g, "") || "script";

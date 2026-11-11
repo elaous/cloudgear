@@ -2,7 +2,6 @@ export interface CronSchedule {
   readonly expression: string;
 }
 
-// A schedule, optionally with a query string the run carries (`?job=backup`), like a Vercel cron path.
 export type ScheduleSpec = CronSchedule | { readonly cron: CronSchedule; readonly query?: Readonly<Record<string, string>> };
 
 interface FieldSpec {
@@ -23,7 +22,7 @@ const FIELDS: FieldSpec[] = [
   { name: "day-of-week", min: 0, max: 7, names: DAYS },
 ];
 
-// Standard five-field cron in UTC: minute hour day-of-month month day-of-week.
+// Five-field cron in UTC.
 export function cron(strings: TemplateStringsArray, ...values: unknown[]): CronSchedule {
   if (values.length) throw new Error("cron`...` takes a fixed expression, without ${} substitutions");
   return Object.freeze({ expression: normalizeCron(strings.raw
@@ -123,7 +122,7 @@ function renderDays(days: Set<number>): string {
   return parts.join(",");
 }
 
-// A no-op at runtime; `cloudgear generate` reads it and deploys a scheduled trigger for the method.
+// Runtime no-op; `cloudgear generate` reads it.
 export function schedule(_when: ScheduleSpec | readonly ScheduleSpec[]) {
   return (_method: unknown, _context: ClassMethodDecoratorContext): void => {};
 }

@@ -47,6 +47,7 @@ Options:
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
   --tag <key=value>  Extra tag on created resources, repeatable (apply only)
   --domain <domain>  Which CDN to invalidate when the app has several
+  --write-policies <dir>  Also write the IAM policies of imported functions' roles there as JSON (import only)
   --arn <arn>        Import exactly this certificate, distribution, function, rule or bucket (import only)
   --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
@@ -72,6 +73,7 @@ async function main() {
       "skip-env-check": { type: "boolean", default: false },
       domain: { type: "string" },
       arn: { type: "string" },
+      "write-policies": { type: "string" },
       path: { type: "string" },
       all: { type: "boolean", default: false },
       "auto-approve": { type: "boolean", default: false },
@@ -263,8 +265,9 @@ async function main() {
       const planned = plan(config, state);
       if (values.arn && !first) {
         const deployers = await drivers(planned.filter((a) => a.type === arnType), config, configPath, values.region, deployTags(config, configPath, values));
-        const found = await adoptByArn(planned, state, deployers, arnType!, values.arn);
+        const found = await adoptByArn(planned, state, deployers, arnType!, values.arn, !!values["write-policies"]);
         saveState(statePath, state);
+        writePolicyFiles(values["write-policies"], found.files);
         for (const item of found.adopted) console.log(`cloudgear: imported ${item}`);
         for (const note of found.notes) console.warn(`warning: ${note}`);
         if (!found.adopted.length) throw new Error(`No ${arnType} in ${values.config} fits ${values.arn}${found.failed.length ? `:\n  ${found.failed.join("\n  ")}` : ""}`);
@@ -279,8 +282,10 @@ async function main() {
         if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}`);
       }
       const deployers = await drivers(chosen, config, configPath, values.region, deployTags(config, configPath, values));
-      const result = await adoptEntries(planned, state, deployers, select, values.arn ? { arn: values.arn } : undefined);
+      const hint = values.arn || values["write-policies"] ? { ...(values.arn ? { arn: values.arn } : {}), ...(values["write-policies"] ? { exportPolicies: true } : {}) } : undefined;
+      const result = await adoptEntries(planned, state, deployers, select, hint);
       saveState(statePath, state);
+      writePolicyFiles(values["write-policies"], result.files);
       for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
       for (const note of result.notes) console.warn(`warning: ${note}`);
       if (values.all) {
@@ -305,6 +310,23 @@ function bucketOfArn(arn: string, bucketOnly = false): string {
   const name = parsed?.service === "s3" && !parsed.region ? /^([^/]+)/.exec(parsed.resource)?.[1] : undefined;
   if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN${parsed?.resource.startsWith("accesspoint/") ? " (an access point's ARN does not name the bucket)" : ""}`);
   return name;
+}
+
+// Writes exported files under `dir`, never outside it.
+function writePolicyFiles(dir: string | undefined, files: { path: string; content: string }[]): void {
+  if (!dir) return;
+  if (!files.length) {
+    console.log("cloudgear: no policies were exported (only the role of an imported function has any)");
+    return;
+  }
+  const root = path.resolve(dir);
+  for (const file of files) {
+    const target = path.resolve(root, file.path);
+    if (!target.startsWith(`${root}${path.sep}`)) throw new Error(`Refusing to write "${file.path}" outside ${dir}`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.content);
+    console.log(`cloudgear: wrote ${path.relative(process.cwd(), target)}`);
+  }
 }
 
 function writeEndpoints(config: CloudgearConfig, state: State, workDir: string): void {

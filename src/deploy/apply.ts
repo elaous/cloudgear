@@ -20,9 +20,13 @@ export interface Driver {
 
 export interface AdoptHint {
   arn?: string;
+  // Also read the policies of the imported function's role, to be written out as files.
+  exportPolicies?: boolean;
 }
 
 export interface Adopted {
+  // Files to write for the user (paths relative to the directory they chose), such as an exported policy.
+  files?: { path: string; content: string }[];
   outputs: Record<string, string>;
   spec?: Record<string, unknown>;
   notes?: string[];

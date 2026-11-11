@@ -566,3 +566,73 @@ describe("importing with only an ARN", () => {
     expect(result.failed.at(-1)).toBe("... and 2 more");
   });
 });
+
+describe("exporting the policies of an imported function's role", () => {
+  const encoded = (document: unknown) => encodeURIComponent(JSON.stringify(document));
+  const readBucket = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/*" }] };
+  const managed = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sqs:SendMessage", Resource: "*" }] };
+  const iam = {
+    ListRolePoliciesCommand: () => ({ PolicyNames: ["read-bucket", "cloudgear", "cloudgear-app-foo", "../evil"], IsTruncated: false }),
+    GetRolePolicyCommand: (input: { PolicyName: string }) => ({ PolicyDocument: encoded(input.PolicyName === "read-bucket" ? readBucket : { Version: "2012-10-17", Statement: [] }) }),
+    ListAttachedRolePoliciesCommand: () => ({
+      AttachedPolicies: [
+        { PolicyName: "AWSLambdaBasicExecutionRole", PolicyArn: "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" },
+        { PolicyName: "queue-writer", PolicyArn: "arn:aws:iam::111122223333:policy/queue-writer" },
+      ],
+    }),
+    GetPolicyCommand: () => ({ Policy: { DefaultVersionId: "v3" } }),
+    GetPolicyVersionCommand: () => ({ PolicyVersion: { Document: encoded(managed) } }),
+  };
+
+  test("writes the inline and customer-managed policies as JSON and an index, and skips the ones cloudgear owns", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    const files = Object.fromEntries(result.files.map((f) => [f.path, f.content]));
+    expect(Object.keys(files).sort()).toEqual(["my-own-role/index.json", "my-own-role/inline-.._evil.json", "my-own-role/inline-read-bucket.json", "my-own-role/managed-queue-writer.json"]);
+    expect(JSON.parse(files["my-own-role/inline-read-bucket.json"]!)).toEqual(readBucket);
+    expect(JSON.parse(files["my-own-role/managed-queue-writer.json"]!)).toEqual(managed);
+    expect(JSON.parse(files["my-own-role/index.json"]!)).toEqual({
+      role: "my-own-role",
+      inline: ["read-bucket", "../evil"],
+      customerManaged: [{ name: "queue-writer", arn: "arn:aws:iam::111122223333:policy/queue-writer" }],
+      awsManaged: ["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"],
+    });
+    expect(result.notes.join("\n")).toMatch(/policies of role my-own-role were exported \(2 inline, 1 customer-managed, 1 AWS-managed\); cloudgear does not manage them/);
+  });
+
+  test("a policy name cannot escape the directory, and the files end with a newline", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    for (const file of result.files) {
+      expect(file.path.split("/")).toHaveLength(2);
+      expect(file.path).not.toMatch(/\.\.\//);
+      expect(file.content.endsWith("\n")).toBe(true);
+    }
+  });
+
+  test("nothing is read from IAM unless asked, and the policies are not recorded as managed", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything);
+    expect(result.files).toEqual([]);
+    expect(aws.of("ListRolePoliciesCommand")).toEqual([]);
+  });
+
+  test("a function with no policies of its own exports just the index", async () => {
+    const aws = fakeAws({ ...existingFunction, ListRolePoliciesCommand: () => ({ PolicyNames: [] }), ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path)).toEqual(["my-own-role/index.json"]);
+  });
+
+  test("paginated policy lists are read in full", async () => {
+    const pages = [{ PolicyNames: ["a"], IsTruncated: true, Marker: "m1" }, { PolicyNames: ["b"], IsTruncated: false }];
+    let call = 0;
+    const aws = fakeAws({ ...existingFunction, ...iam, ListRolePoliciesCommand: () => pages[call++], ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path).sort()).toEqual(["my-own-role/index.json", "my-own-role/inline-a.json", "my-own-role/inline-b.json"]);
+  });
+});

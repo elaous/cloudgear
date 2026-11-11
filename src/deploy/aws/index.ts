@@ -4,7 +4,12 @@ import {
   DeleteRoleCommand,
   DeleteRolePolicyCommand,
   DetachRolePolicyCommand,
+  GetPolicyCommand,
+  GetPolicyVersionCommand,
+  GetRolePolicyCommand,
   IAMClient,
+  ListAttachedRolePoliciesCommand,
+  ListRolePoliciesCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
 import {
@@ -123,6 +128,46 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       await sleep(2000);
     }
     throw new Error(`Timed out waiting for Lambda ${name} to become active`);
+  }
+
+  // The role's own policies as JSON documents, and an index of the managed ones that are attached.
+  async function exportRolePolicies(roleName: string, skip: string[], notes: string[]): Promise<{ path: string; content: string }[]> {
+    const files: { path: string; content: string }[] = [];
+    const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+    const safe = (name: string) => name.replace(/[^A-Za-z0-9_+=,.@-]/g, "_");
+    const decode = (document: unknown) => (typeof document === "string" ? JSON.parse(decodeURIComponent(document)) : document);
+    const inline: string[] = [];
+    let marker: string | undefined;
+    do {
+      const page = await iam.send(new ListRolePoliciesCommand({ RoleName: roleName, Marker: marker }));
+      for (const name of (page.PolicyNames ?? []) as string[]) {
+        if (skip.includes(name)) continue;
+        const got = await iam.send(new GetRolePolicyCommand({ RoleName: roleName, PolicyName: name }));
+        files.push({ path: `${safe(roleName)}/inline-${safe(name)}.json`, content: json(decode(got.PolicyDocument)) });
+        inline.push(name);
+      }
+      marker = page.IsTruncated ? page.Marker : undefined;
+    } while (marker);
+    const customerManaged: { name: string; arn: string }[] = [];
+    const awsManaged: string[] = [];
+    marker = undefined;
+    do {
+      const page = await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: roleName, Marker: marker }));
+      for (const attached of (page.AttachedPolicies ?? []) as { PolicyName: string; PolicyArn: string }[]) {
+        if (attached.PolicyArn.includes(":iam::aws:policy/")) {
+          awsManaged.push(attached.PolicyArn);
+          continue;
+        }
+        const policy = await iam.send(new GetPolicyCommand({ PolicyArn: attached.PolicyArn }));
+        const version = await iam.send(new GetPolicyVersionCommand({ PolicyArn: attached.PolicyArn, VersionId: policy.Policy.DefaultVersionId }));
+        files.push({ path: `${safe(roleName)}/managed-${safe(attached.PolicyName)}.json`, content: json(decode(version.PolicyVersion.Document)) });
+        customerManaged.push({ name: attached.PolicyName, arn: attached.PolicyArn });
+      }
+      marker = page.IsTruncated ? page.Marker : undefined;
+    } while (marker);
+    files.push({ path: `${safe(roleName)}/index.json`, content: json({ role: roleName, inline, customerManaged, awsManaged }) });
+    notes.push(`the policies of role ${roleName} were exported (${inline.length} inline, ${customerManaged.length} customer-managed, ${awsManaged.length} AWS-managed); cloudgear does not manage them`);
+    return files;
   }
 
   async function putPermissions(roleName: string, spec: FunctionComparable, roleArn?: string) {
@@ -392,7 +437,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (extra.length) notes.push(`its environment variables not in the config will be removed: ${extra.sort().join(", ")}`);
           if (config.Handler && config.Handler !== "index.handler") notes.push(`its handler "${config.Handler}" will become index.handler, and its code is replaced by the bundle`);
           const concurrency = (found as { Concurrency?: { ReservedConcurrentExecutions?: number } }).Concurrency?.ReservedConcurrentExecutions;
+          const roleName = config.Role?.split("/").at(-1);
+          const files = hint?.exportPolicies && roleName ? await exportRolePolicies(roleName, [INLINE_POLICY, policyNameFor(roleName, entry.physical_name)], notes) : undefined;
           return {
+            ...(files ? { files } : {}),
             outputs: {
               arn: config.FunctionArn,
               ...(config.Role ? { role_arn: config.Role, role_name: config.Role.split("/").at(-1)! } : {}),

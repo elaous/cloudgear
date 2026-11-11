@@ -63,7 +63,7 @@ Options (the command an option applies to is in parentheses):
 | `--invoker <arn>` | IAM principal allowed to call the functions (`generate`, repeatable; see Authentication) |
 | `--reserved-concurrency <n>` | Cap each function's concurrent executions (`generate`) |
 | `--region <region>` | Cloud region (default `$AWS_REGION` or `$AWS_DEFAULT_REGION`) |
-| `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; see Tags) |
+| `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
 | `--skip-env-check` | Deploy even if a variable or secret is missing (`apply`) |
 | `--domain <cdn domain>` | Which CDN to invalidate when the app has several (`invalidate`) |
@@ -476,8 +476,9 @@ Rules the analyzer enforces:
   each assigned to a variable with literal arguments; two `Cert`s MUST NOT
   cover the same domain. Any number of `CDN`s with a `bucket`, at most one `CDN`
   with a `router`, and at most one router `cert`.
-- Two CDNs, or a CDN and the router, MUST NOT share a `Cert`: each serves its
-  own domain.
+- Two CDNs, including a CDN that serves the router, MUST NOT share a `Cert`
+  unless it is a wildcard; each serves its own domain. The router's own `cert`
+  (API Gateway) MUST NOT be shared with any CDN and MUST NOT be a wildcard.
 - A `Cert` needs neither: declare only `DNS` and `Cert` to get a validated
   certificate (it may then cover the zone apex). `new Cert(provider, dns, {
   region })` sets the region of a certificate that nothing uses; for a CDN it
@@ -495,7 +496,7 @@ Rules the analyzer enforces:
   hostname that already has a foreign record is found when its distribution is
   made, which is after the certificate is issued.
 - An app MAY have several CDNs: one per static site, each with its own `Cert`
-  (a `Cert` serves one CDN) and bucket, for example one for files and images,
+  (CDNs share a `Cert` only when it is a wildcard) and bucket, for example one for files and images,
   one for the frontend and one for an admin app, plus one more for the router
   (`{ router }`). Several CDNs MAY serve the same bucket, each under its own
   path. Each distribution has its own bucket-policy statement and is removed

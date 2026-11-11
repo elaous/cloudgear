@@ -1145,11 +1145,15 @@ cloudgear import --all                             # everything planned that alr
 - The ARN says what kind of thing it is, so the type is not needed:
   `cloudgear import --arn arn:aws:acm:...` finds the certificate it describes and
   adopts the config entry for its domain (a distribution, by the domains it
-  answers to; a function or rule, by name; a bucket, by name). With a name, the
+  answers to; a function or rule, by name; a bucket, by its physical name, else its
+  config name). With a name, the
   ARN picks the right one of several that share it: `cloudgear import
   www.example.com --arn arn:aws:acm:...` is the certificate, not the
   distribution. A type that disagrees with the ARN is an error. If no entry fits,
-  each reason is listed and nothing is recorded.
+  each reason is listed and nothing is recorded; when the ARN fits several
+  entries (a distribution with two aliases that both have a CDN entry), none is
+  recorded and you are asked to say which. An object ARN is not a bucket ARN. A
+  bucket is recorded without a lookup in the cloud, as before.
 - `--arn <arn>` says exactly which one to adopt when the name is not enough, for
   example two certificates for a domain: `cloudgear import @aws.Certificate
   www.example.com --arn arn:aws:acm:us-east-1:...:certificate/...`. Accepted

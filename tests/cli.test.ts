@@ -157,6 +157,7 @@ describe("cloudgear CLI with a CDN", () => {
     expect(run("import", "@aws.Certificate", "www.example.com", "--arn", "arn:aws:s3:::x").err).toMatch(/is a @aws\.S3 ARN, not a @aws\.Certificate one/);
     expect(run("import", "--arn", "arn:aws:sqs:us-east-1:111122223333:queue").err).toMatch(/Importing a sqs ARN is not supported/);
     expect(run("import", "--arn", "arn:aws:s3:::no-such-bucket").err).toMatch(/No bucket named "no-such-bucket"/);
+    expect(run("import", "--arn", "arn:aws:s3:::my-site/some/key").err).toMatch(/names an object, not a bucket/);
     expect(run("import", "--arn", "arn:aws:s3:::my-site").out).toMatch(/imported @aws\.S3 my-site as "my-site"/);
     fs.rmSync(stateFile, { force: true });
   });

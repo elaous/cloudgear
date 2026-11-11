@@ -224,13 +224,16 @@ async function main() {
       if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
       // The ARN says what kind of thing it is.
       const arnType = values.arn ? typeOfArn(values.arn) : undefined;
-      const arnBucket = !values.all && !first && arnType === "@aws.S3" ? bucketOfArn(values.arn!) : undefined;
-      const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : arnBucket ? config.resource.find((r) => r.name === arnBucket || r.physical_name === arnBucket) : undefined;
+      const arnBucket = !values.all && !first && arnType === "@aws.S3" ? bucketOfArn(values.arn!, true) : undefined;
+      // An ARN names the physical bucket; only without a match is it taken for the config's name.
+      const byArn = arnBucket ? (config.resource.filter((r) => r.physical_name === arnBucket).length ? config.resource.filter((r) => r.physical_name === arnBucket) : config.resource.filter((r) => r.name === arnBucket)) : [];
+      if (byArn.length > 1) throw new Error(`${values.arn} fits several resources (${byArn.map((r) => r.name).join(", ")}); say which: cloudgear import <name> --arn <arn>`);
+      const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : byArn[0];
       if (arnBucket && !bucket) throw new Error(`No bucket named "${arnBucket}" is in ${values.config}; run \`cloudgear plan\` to see the names`);
       if (bucket) {
         const existing = state.entries[stateKey(bucket)];
         if (existing && !existing.imported) {
-          throw new Error(`${bucket.type} ${first} is already managed by cloudgear; destroy it before importing another`);
+          throw new Error(`${bucket.type} ${bucket.name} is already managed by cloudgear; destroy it before importing another`);
         }
         if (values.arn && second) throw new Error("Give the bucket's ARN with --arn or as the second argument, not both");
         if (third) throw new Error("Usage: cloudgear import <bucket> [physical-id | arn]");
@@ -297,8 +300,9 @@ async function main() {
 }
 
 // `arn:aws:s3:::my-bucket` (an object ARN `.../key` is cut back to the bucket).
-function bucketOfArn(arn: string): string {
+function bucketOfArn(arn: string, bucketOnly = false): string {
   const parsed = parseArn(arn);
+  if (bucketOnly && parsed?.service === "s3" && parsed.resource.includes("/") && !parsed.region) throw new Error(`"${arn}" names an object, not a bucket`);
   const name = parsed?.service === "s3" && !parsed.region ? /^([^/]+)/.exec(parsed.resource)?.[1] : undefined;
   if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN${parsed?.resource.startsWith("accesspoint/") ? " (an access point's ARN does not name the bucket)" : ""}`);
   return name;

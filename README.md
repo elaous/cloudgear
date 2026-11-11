@@ -1142,6 +1142,18 @@ cloudgear import @aws.Certificate www.example.com  # when several things share a
 cloudgear import --all                             # everything planned that already exists
 ```
 
+- `--arn <arn>` says exactly which one to adopt when the name is not enough, for
+  example two certificates for a domain: `cloudgear import @aws.Certificate
+  www.example.com --arn arn:aws:acm:us-east-1:...:certificate/...`. Accepted
+  ARNs (any partition: `aws`, `aws-cn`, `aws-us-gov`): an ACM certificate (its domain must be the config's, it must be in the
+  certificate's region, and issued or waiting for validation), a CloudFront
+  distribution (it must answer to the config's domain), a Lambda function (the
+  function's own ARN, not a version or alias, in the functions' region) and an
+  EventBridge rule on the default bus (their names must be the ones the config
+  deploys), and an S3
+  bucket (`arn:aws:s3:::name`, also as the second argument:
+  `cloudgear import web.tranquilo.art arn:aws:s3:::web.tranquilo.art`). Without
+  `--all`, one thing at a time.
 - A bucket is only recorded (optionally under another physical name:
   `cloudgear import myblob my-existing-bucket`). Imported buckets are never
   created, changed or deleted (`destroy` only forgets them), and functions that

@@ -5,6 +5,7 @@ import { PartialApplyError, type Driver } from "../apply";
 import type { CertificateComparable } from "../plan";
 import { stateKey } from "../state";
 import type { SendClient } from "./index";
+import { expectArn } from "./arn";
 import { tagList, type Tagger } from "./tags";
 
 export interface CertificateDeps {
@@ -32,7 +33,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
   const regionOfArn = (arn: string) => arn.split(":")[3] || deps.region;
   const describe = async (arn: string) =>
     (await deps.acm(regionOfArn(arn)).send(new DescribeCertificateCommand({ CertificateArn: arn }))).Certificate as
-      | { Status?: string; DomainValidationOptions?: { ResourceRecord?: { Name: string; Value: string } }[] }
+      | { Status?: string; DomainName?: string; Type?: string; KeyAlgorithm?: string; NotAfter?: Date | string; DomainValidationOptions?: { ResourceRecord?: { Name: string; Value: string } }[] }
       | undefined;
 
   // Validates and waits until issued; safe to run again after a partial failure.
@@ -71,19 +72,38 @@ export function certificateDriver(deps: CertificateDeps): Driver {
   }
 
   return {
-    async adopt(entry) {
+    async adopt(entry, _context, hint) {
       const spec = entry.spec as unknown as CertificateComparable;
-      const acm = deps.acm(spec.region || deps.region);
       type Summary = { DomainName?: string; CertificateArn?: string; Status?: string; Type?: string; KeyAlgorithm?: string; NotAfter?: Date | string };
       const matches: Summary[] = [];
-      let token: string | undefined;
-      do {
-        const page = await acm.send(new ListCertificatesCommand({ CertificateStatuses: ["ISSUED", "PENDING_VALIDATION"], Includes: { keyTypes: KEY_TYPES as never }, NextToken: token }));
-        for (const summary of (page.CertificateSummaryList ?? []) as Summary[]) {
-          if (summary.DomainName === spec.domain && summary.CertificateArn) matches.push(summary);
+      if (hint?.arn) {
+        const arn = hint.arn;
+        const parsed = expectArn(arn, "acm", "an ACM certificate");
+        if (!parsed.resource.startsWith("certificate/")) throw new Error(`"${arn}" is not an ACM certificate ARN`);
+        const wanted = spec.region || deps.region;
+        if (parsed.region !== wanted) throw new Error(`${arn} is in ${parsed.region}, but this certificate must be in ${wanted}`);
+        let described: Summary | undefined;
+        try {
+          described = (await describe(arn)) as Summary | undefined;
+        } catch (err) {
+          if ((err as { name?: string }).name === "ResourceNotFoundException") return undefined;
+          throw err;
         }
-        token = page.NextToken;
-      } while (token);
+        if (!described) return undefined;
+        if (described.DomainName !== spec.domain) throw new Error(`${arn} is a certificate for ${described.DomainName}, not ${spec.domain}`);
+        if (described.Status !== "ISSUED" && described.Status !== "PENDING_VALIDATION") throw new Error(`${arn} is ${described.Status}; only an issued certificate, or one waiting for validation, can be imported`);
+        matches.push({ ...described, CertificateArn: arn });
+      } else {
+        const acm = deps.acm(spec.region || deps.region);
+        let token: string | undefined;
+        do {
+          const page = await acm.send(new ListCertificatesCommand({ CertificateStatuses: ["ISSUED", "PENDING_VALIDATION"], Includes: { keyTypes: KEY_TYPES as never }, NextToken: token }));
+          for (const summary of (page.CertificateSummaryList ?? []) as Summary[]) {
+            if (summary.DomainName === spec.domain && summary.CertificateArn) matches.push(summary);
+          }
+          token = page.NextToken;
+        } while (token);
+      }
       const issued = matches.filter((m) => m.Status === "ISSUED").sort((a, b) => new Date(b.NotAfter ?? 0).getTime() - new Date(a.NotAfter ?? 0).getTime());
       const chosen = issued[0] ?? matches[0];
       if (!chosen?.CertificateArn) return undefined;

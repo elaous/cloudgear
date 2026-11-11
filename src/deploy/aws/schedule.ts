@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { PartialApplyError, type Driver } from "../apply";
 import type { ScheduleComparable } from "../plan";
 import type { SendClient } from "./index";
+import { expectArn } from "./arn";
 import { tagList, type Tagger } from "./tags";
 
 export interface ScheduleDeps {
@@ -70,9 +71,17 @@ export function scheduleDriver(deps: ScheduleDeps): Driver {
   const functionArn = (spec: ScheduleComparable, context: Parameters<Driver["create"]>[1]) => context.entry(spec.function_key)?.outputs.arn;
 
   return {
-    async adopt(entry) {
+    async adopt(entry, _context, hint) {
+      if (hint?.arn) {
+        const resource = expectArn(hint.arn, "events", "an EventBridge rule").resource;
+        if (!resource.startsWith("rule/")) throw new Error(`"${hint.arn}" is not an EventBridge rule ARN`);
+        const named = resource.slice("rule/".length);
+        if (named.includes("/")) throw new Error(`${hint.arn} is a rule on a custom event bus; cloudgear's schedules are rules on the default bus`);
+        if (named !== entry.physical_name) throw new Error(`${hint.arn} is the rule "${named}", but the config deploys "${entry.physical_name}"`);
+      }
       try {
         const rule = await deps.events.send(new DescribeRuleCommand({ Name: entry.physical_name }));
+        if (rule.Arn && hint?.arn && rule.Arn !== hint.arn) throw new Error(`${hint.arn} is not the rule that was found (${rule.Arn}); check its region and account`);
         return rule.Arn ? { outputs: { rule_name: entry.physical_name, rule_arn: rule.Arn } } : undefined;
       } catch (err) {
         if ((err as { name?: string }).name === "ResourceNotFoundException") return undefined;

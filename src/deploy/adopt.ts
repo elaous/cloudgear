@@ -1,4 +1,4 @@
-import type { Drivers } from "./apply";
+import type { AdoptHint, Drivers } from "./apply";
 import type { PlannedAction } from "./plan";
 import { stateKey, type State } from "./state";
 
@@ -18,10 +18,13 @@ export interface AdoptResult {
 // is managed from here on, so the next `apply` brings it in line with the config.
 const RECORD_ONLY = new Set(["@aws.S3"]);
 
+// The drivers that can be told which one by its ARN.
+const ARN_TYPES = new Set(["@aws.Certificate", "@aws.CloudFront", "@aws.Lambda", "@aws.Schedule", "@aws.S3"]);
+
 const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
 // Looks each planned entry that is not in state yet up in the cloud and records it, in dependency order.
-export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean): Promise<AdoptResult> {
+export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean, hint?: AdoptHint): Promise<AdoptResult> {
   const result: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
   for (const action of actions) {
     if (!select(action)) continue;
@@ -35,9 +38,13 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
       result.skipped.push(label(action));
       continue;
     }
+    if (hint?.arn && !ARN_TYPES.has(action.type)) {
+      result.failed.push(`${label(action)}: importing by ARN is not supported for ${action.type}`);
+      continue;
+    }
     let found;
     try {
-      found = await driver.adopt(entry, { entry: (key) => state.entries[key] });
+      found = await driver.adopt(entry, { entry: (key) => state.entries[key] }, hint);
     } catch (err) {
       result.failed.push(`${label(action)}: ${(err as Error).message}`);
       continue;

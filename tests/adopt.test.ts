@@ -324,3 +324,136 @@ describe("what an import records and warns about", () => {
     expect(result.failed).toHaveLength(1);
   });
 });
+
+describe("importing a given ARN", () => {
+  const dnsSpec = { provider: "gandi", domain: "www.example.com", zone: "example.com" };
+  const certConfig = () => baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }] });
+  const arn = "arn:aws:acm:us-east-1:111122223333:certificate/chosen";
+
+  test("a certificate is taken by its ARN, even when others exist for the domain", async () => {
+    let listed = false;
+    const aws = fakeAws({
+      ListCertificatesCommand: () => { listed = true; return { CertificateSummaryList: [] }; },
+      DescribeCertificateCommand: () => ({ Certificate: { DomainName: "www.example.com", Status: "ISSUED", Type: "AMAZON_ISSUED", KeyAlgorithm: "RSA_2048" } }),
+    });
+    const state = emptyState();
+    const result = await adoptEntries(plan(certConfig(), state), state, aws.drivers, everything, { arn });
+    expect(result.adopted).toEqual(["@aws.Certificate www.example.com"]);
+    expect(state.entries["@aws.Certificate.www.example.com"]!.outputs.arn).toBe(arn);
+    expect(listed).toBe(false);
+  });
+
+  test("a certificate ARN for another domain, a wrong kind of ARN, and a missing certificate are errors or missing", async () => {
+    const wrong = fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "other.example.com", Status: "ISSUED" } }) });
+    const state = emptyState();
+    expect((await adoptEntries(plan(certConfig(), state), state, wrong.drivers, everything, { arn })).failed[0]).toMatch(/is a certificate for other\.example\.com, not www\.example\.com/);
+    expect((await adoptEntries(plan(certConfig(), state), state, wrong.drivers, everything, { arn: "arn:aws:s3:::bucket" })).failed[0]).toMatch(/is not an ACM certificate ARN/);
+    const none = fakeAws({ DescribeCertificateCommand: () => { throw notFound(); } });
+    expect((await adoptEntries(plan(certConfig(), state), state, none.drivers, everything, { arn })).missing).toEqual(["@aws.Certificate www.example.com"]);
+  });
+
+  const cdnConfig = () =>
+    baseConfig({
+      resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1" }],
+      function: [],
+      certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }],
+      cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "" }],
+    });
+  const distributionArn = "arn:aws:cloudfront::111122223333:distribution/E42ABC";
+
+  test("a distribution is taken by its ARN and must answer to the config's domain", async () => {
+    const aws = fakeAws({ GetDistributionCommand: () => ({ Distribution: { Id: "E42ABC", ARN: distributionArn, DomainName: "d42.cloudfront.net", Status: "Deployed", DistributionConfig: { Aliases: { Items: ["www.example.com"] } } } }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(cdnConfig(), state), state, aws.drivers, (a) => a.type === "@aws.CloudFront", { arn: distributionArn });
+    expect(result.adopted).toEqual(["@aws.CloudFront www.example.com"]);
+    expect(state.entries["@aws.CloudFront.www.example.com"]!.outputs).toMatchObject({ id: "E42ABC", arn: distributionArn, domain_name: "d42.cloudfront.net" });
+    const other = fakeAws({ GetDistributionCommand: () => ({ Distribution: { Id: "E42ABC", ARN: distributionArn, DomainName: "d42.cloudfront.net", Status: "Deployed", DistributionConfig: { Aliases: { Items: ["elsewhere.example.com"] } } } }) });
+    const fresh = emptyState();
+    expect((await adoptEntries(plan(cdnConfig(), fresh), fresh, other.drivers, (a) => a.type === "@aws.CloudFront", { arn: distributionArn })).failed[0]).toMatch(/does not answer to www\.example\.com \(its aliases: elsewhere\.example\.com\)/);
+    expect((await adoptEntries(plan(cdnConfig(), fresh), fresh, other.drivers, (a) => a.type === "@aws.CloudFront", { arn: "arn:aws:acm:us-east-1:1:certificate/x" })).failed[0]).toMatch(/not a CloudFront distribution ARN/);
+  });
+
+  test("a function ARN must be the function the config deploys", async () => {
+    const aws = fakeAws(existingFunction);
+    const state = emptyState();
+    const ok = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { arn: "arn:aws:lambda:eu-west-1:1:function:app-foo" });
+    expect(ok.adopted).toEqual(["@aws.Lambda foo"]);
+    const fresh = emptyState();
+    expect((await adoptEntries(plan(lambdaConfig(), fresh), fresh, aws.drivers, everything, { arn: "arn:aws:lambda:eu-west-1:1:function:other" })).failed[0]).toMatch(/is the function "other", but the config deploys "app-foo"/);
+    expect((await adoptEntries(plan(lambdaConfig(), fresh), fresh, aws.drivers, everything, { arn: "arn:aws:s3:::x" })).failed[0]).toMatch(/not a Lambda function ARN/);
+  });
+
+  test("a schedule rule ARN must be the rule the config deploys", async () => {
+    const config = baseConfig({ resource: [], function: [fn({ permission: [], env: [], schedule: ["0 3 * * *"] })] });
+    const aws = fakeAws({ ...existingFunction, DescribeRuleCommand: (input: { Name: string }) => ({ Arn: `arn:aws:events:eu-west-1:1:rule/${input.Name}` }) });
+    const state = emptyState();
+    const rule = plan(config, state).find((a) => a.type === "@aws.Schedule")!.desired!.physical_name;
+    const ok = await adoptEntries(plan(config, state), state, aws.drivers, (a) => a.type === "@aws.Schedule", { arn: `arn:aws:events:eu-west-1:1:rule/${rule}` });
+    expect(ok.adopted).toHaveLength(1);
+    const fresh = emptyState();
+    expect((await adoptEntries(plan(config, fresh), fresh, aws.drivers, (a) => a.type === "@aws.Schedule", { arn: "arn:aws:events:eu-west-1:1:rule/another" })).failed[0]).toMatch(/is the rule "another"/);
+  });
+});
+
+describe("ARN checks that guard against the wrong thing", () => {
+  const dnsSpec = { provider: "gandi", domain: "www.example.com", zone: "example.com" };
+  const certConfig = () => baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }] });
+  const describeCert = (status: string) => fakeAws({ DescribeCertificateCommand: () => ({ Certificate: { DomainName: "www.example.com", Status: status } }) });
+  const failure = async (aws: ReturnType<typeof fakeAws>, config: CloudgearConfig, arn: string, select: (a: { type: string }) => boolean = everything) => {
+    const state = emptyState();
+    const result = await adoptEntries(plan(config, state), state, aws.drivers, select as never, { arn });
+    return result.failed[0];
+  };
+
+  test("a certificate in another region than the config's is refused", async () => {
+    expect(await failure(describeCert("ISSUED"), certConfig(), "arn:aws:acm:eu-west-1:111122223333:certificate/x")).toMatch(/is in eu-west-1, but this certificate must be in us-east-1/);
+  });
+
+  test.each(["FAILED", "EXPIRED", "REVOKED", "INACTIVE", "VALIDATION_TIMED_OUT"])("a %s certificate cannot be imported", async (status) => {
+    expect(await failure(describeCert(status), certConfig(), "arn:aws:acm:us-east-1:111122223333:certificate/x")).toMatch(new RegExp(`is ${status}`));
+  });
+
+  test("a pending certificate can be", async () => {
+    const aws = describeCert("PENDING_VALIDATION");
+    const state = emptyState();
+    const result = await adoptEntries(plan(certConfig(), state), state, aws.drivers, everything, { arn: "arn:aws:acm:us-east-1:111122223333:certificate/x" });
+    expect(result.adopted).toHaveLength(1);
+  });
+
+  test("a China or GovCloud partition is read as an ARN, and is not mistaken for another service", async () => {
+    const { parseArn } = await import("../src/deploy/aws/arn");
+    expect(parseArn("arn:aws-cn:acm:cn-north-1:111122223333:certificate/x")).toMatchObject({ partition: "aws-cn", service: "acm", region: "cn-north-1", account: "111122223333" });
+    expect(parseArn("arn:aws-us-gov:lambda:us-gov-west-1:111122223333:function:f")?.partition).toBe("aws-us-gov");
+    expect(parseArn("not-an-arn")).toBeUndefined();
+    expect(parseArn("arn:aws:cloudfront::111122223333:distribution/E1")).toMatchObject({ region: "", resource: "distribution/E1" });
+    expect(await failure(describeCert("ISSUED"), certConfig(), "arn:aws-cn:s3:::bucket")).toMatch(/is not an ACM certificate ARN/);
+  });
+
+  test("a function ARN with a version or alias, in another region or in another account, is refused", async () => {
+    const aws = fakeAws(existingFunction);
+    expect(await failure(aws, lambdaConfig(), "arn:aws:lambda:eu-west-1:1:function:app-foo:3")).toMatch(/names a version or alias/);
+    expect(await failure(aws, lambdaConfig(), "arn:aws:lambda:us-east-1:1:function:app-foo")).toMatch(/is in us-east-1, but the functions are deployed to eu-west-1/);
+    expect(await failure(aws, lambdaConfig(), "arn:aws:lambda:eu-west-1:2:function:app-foo")).toMatch(/is in another account/);
+  });
+
+  test("a rule on a custom event bus, or in another region, is refused", async () => {
+    const config = baseConfig({ resource: [], function: [fn({ permission: [], env: [], schedule: ["0 3 * * *"] })] });
+    const aws = fakeAws({ ...existingFunction, DescribeRuleCommand: (input: { Name: string }) => ({ Arn: `arn:aws:events:eu-west-1:1:rule/${input.Name}` }) });
+    const rule = plan(config, emptyState()).find((a) => a.type === "@aws.Schedule")!.desired!.physical_name;
+    const onlySchedule = (a: { type: string }) => a.type === "@aws.Schedule";
+    expect(await failure(aws, config, `arn:aws:events:eu-west-1:1:rule/custom-bus/${rule}`, onlySchedule)).toMatch(/custom event bus/);
+    expect(await failure(aws, config, `arn:aws:events:us-east-1:1:rule/${rule}`, onlySchedule)).toMatch(/is not the rule that was found/);
+  });
+
+  test("a distribution ARN with a malformed account is refused, and a bucket ARN must name the config's bucket", async () => {
+    const aws = fakeAws();
+    const cdn = baseConfig({
+      resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1" }],
+      function: [],
+      certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }],
+      cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "" }],
+    });
+    expect(await failure(aws, cdn, "arn:aws:cloudfront::acct:distribution/E1", (a) => a.type === "@aws.CloudFront")).toMatch(/is not a CloudFront distribution ARN/);
+    expect(await failure(aws, cdn, "arn:aws:s3:::another-bucket", (a) => a.type === "@aws.S3")).toMatch(/is the bucket "another-bucket", but the config uses "my-web"/);
+  });
+});

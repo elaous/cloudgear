@@ -38,7 +38,7 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
     if (entry && state.entries[action.key] && hint?.exportPolicies && drivers[action.type]?.adopt && action.type === "@aws.Lambda") {
       // Already imported: read its policies again, without recording anything.
       try {
-        const again = await drivers[action.type]!.adopt!(entry, { entry: (key) => state.entries[key] }, hint);
+        const again = await drivers[action.type]!.adopt!(entry, { entry: (key) => state.entries[key], entries: () => Object.values(state.entries) }, hint);
         for (const note of again?.notes ?? []) result.notes.push(`${label(action)}: ${note}`);
         result.files.push(...(again?.files ?? []));
       } catch (err) {
@@ -62,7 +62,7 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
     }
     let found;
     try {
-      found = await driver.adopt(entry, { entry: (key) => state.entries[key] }, hint);
+      found = await driver.adopt(entry, { entry: (key) => state.entries[key], entries: () => Object.values(state.entries) }, hint);
     } catch (err) {
       result.failed.push(`${label(action)}: ${(err as Error).message}`);
       continue;

@@ -1165,6 +1165,14 @@ new FunctionRouter("aws", { policies: queue }).url("GET", "/items", items, { pol
   characters of inline policy in all.
 - `generate` warns about an `Allow` statement with `"Action": "*"` or
   `"Resource": "*"`: that is the line to read twice in a review.
+- Rules checked before `apply`: `Version` is `"2012-10-17"` (the old version
+  turns policy variables off), no `Principal`, a unique string `Sid`, a non-empty
+  `Action` and `Resource`, and a `Condition` that is an object. The declared
+  policies and the inferred one together MUST stay under IAM's 10,240 characters
+  for the role; `apply` refuses before it puts any of them when they do not. On
+  an imported role that is shared by several functions, a policy name that more
+  than one of them declares stays on the role until the last of them drops it,
+  and the role may carry other policies that count towards that limit.
 - Only inline policies, for now: a customer-managed policy is not a `Policy`.
   Naming a policy after one the role already has (for example after
   `cloudgear import --write-policies`) makes cloudgear take that policy over: the next `apply`

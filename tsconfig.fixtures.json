@@ -6,6 +6,7 @@
     "tests/fixtures/router/secrets/computed-name.ts",
     "tests/fixtures/router/events/bad-trigger.ts",
     "tests/fixtures/router/events/not-a-trigger.ts",
-    "tests/fixtures/router/policies/missing-json.ts"
+    "tests/fixtures/router/policies/missing-json.ts",
+    "tests/fixtures/router/policies/named-import.ts"
   ]
 }

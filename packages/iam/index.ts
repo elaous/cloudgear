@@ -27,15 +27,24 @@ export function assertPolicyName(name: string): string {
 export function assertPolicyDocument(document: unknown, name = "policy"): asserts document is PolicyDocument {
   const doc = document as Partial<PolicyDocument> | null;
   if (typeof doc !== "object" || doc === null || Array.isArray(doc)) throw new Error(`The document of ${name} must be an object`);
-  if (doc.Version !== "2012-10-17" && doc.Version !== "2008-10-17") throw new Error(`The document of ${name} needs Version "2012-10-17"`);
+  // 2008-10-17 would silently turn policy variables like ${aws:username} off.
+  if (doc.Version !== "2012-10-17") throw new Error(`The document of ${name} needs Version "2012-10-17"`);
   const statements = Array.isArray(doc.Statement) ? doc.Statement : doc.Statement ? [doc.Statement] : [];
   if (!statements.length) throw new Error(`The document of ${name} needs at least one Statement`);
+  const sids = new Set<string>();
+  const filled = (value: unknown) => (Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null && value !== "");
   for (const [index, statement] of statements.entries()) {
     const s = statement as Record<string, unknown>;
-    if (typeof s !== "object" || s === null) throw new Error(`Statement ${index} of ${name} must be an object`);
+    if (typeof s !== "object" || s === null || Array.isArray(s)) throw new Error(`Statement ${index} of ${name} must be an object`);
     if (s.Effect !== "Allow" && s.Effect !== "Deny") throw new Error(`Statement ${index} of ${name} needs Effect "Allow" or "Deny"`);
-    if (!s.Action && !s.NotAction) throw new Error(`Statement ${index} of ${name} needs an Action`);
-    if (!s.Resource && !s.NotResource) throw new Error(`Statement ${index} of ${name} needs a Resource`);
+    if (!filled(s.Action) && !filled(s.NotAction)) throw new Error(`Statement ${index} of ${name} needs an Action`);
+    if (!filled(s.Resource) && !filled(s.NotResource)) throw new Error(`Statement ${index} of ${name} needs a Resource`);
+    if ("Principal" in s || "NotPrincipal" in s) throw new Error(`Statement ${index} of ${name} has a Principal, which an identity policy cannot have`);
+    if ("Condition" in s && (typeof s.Condition !== "object" || s.Condition === null || Array.isArray(s.Condition))) throw new Error(`Statement ${index} of ${name}: Condition must be an object of operators`);
+    if (s.Sid !== undefined) {
+      if (typeof s.Sid !== "string" || sids.has(s.Sid)) throw new Error(`Statement ${index} of ${name}: Sid ${JSON.stringify(s.Sid)} is not a string, or is used twice`);
+      sids.add(s.Sid);
+    }
   }
   if (JSON.stringify(document).length > MAX_POLICY_CHARS) throw new Error(`The document of ${name} is over IAM's ${MAX_POLICY_CHARS} characters`);
 }
@@ -56,6 +65,8 @@ export function broadStatements(document: PolicyDocument): string[] {
 
 // An inline IAM policy for a function's role. Constructing it does nothing; `cloudgear apply` puts it on the role.
 export class Policy {
+  readonly kind = "policy" as const;
+
   constructor(
     readonly provider: PolicyProvider,
     readonly options: PolicyOptions,

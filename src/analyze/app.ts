@@ -331,12 +331,13 @@ export function analyzeApp(entryPath: string): AppModel {
     if (node && Node.isIdentifier(node)) {
       // The import itself (not what it resolves to): `import document from "./x.json"`.
       const decl = node.getSymbol()?.getDeclarations()[0];
-      const importDecl = decl?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
+      // Only the default import: a named one would be a part of the file, not the document.
+      const importDecl = decl && Node.isImportClause(decl) ? decl.getFirstAncestorByKind(SyntaxKind.ImportDeclaration) : undefined;
       const specifier = importDecl?.getModuleSpecifierValue();
       if (importDecl && specifier?.endsWith(".json") && specifier.startsWith(".")) {
         const file = path.resolve(path.dirname(importDecl.getSourceFile().getFilePath()), specifier);
         try {
-          return JSON.parse(fs.readFileSync(file, "utf8")) as PolicyDocument;
+          return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "")) as PolicyDocument;
         } catch (err) {
           throw new Error(`${at}: ${relative(file)} could not be read as JSON (${(err as Error).message})`);
         }
@@ -358,7 +359,8 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     if (Node.isArrayLiteralExpression(node)) return node.getElements().map((item) => literalToJson(item, at));
     if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) return node.getLiteralValue();
-    if (Node.isNumericLiteral(node)) return Number(node.getText());
+    if (Node.isNumericLiteral(node)) return node.getLiteralValue();
+    if (Node.isPrefixUnaryExpression(node) && node.getOperatorToken() === SyntaxKind.MinusToken && Node.isNumericLiteral(node.getOperand())) return -(node.getOperand() as import("ts-morph").NumericLiteral).getLiteralValue();
     if (node.getKind() === SyntaxKind.TrueKeyword) return true;
     if (node.getKind() === SyntaxKind.FalseKeyword) return false;
     if (node.getKind() === SyntaxKind.NullKeyword) return null;
@@ -368,7 +370,7 @@ export function analyzeApp(entryPath: string): AppModel {
 
   function sortKeys(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(sortKeys);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, sortKeys(v)]));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeys(v)]));
     return value;
   }
 

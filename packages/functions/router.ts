@@ -36,7 +36,7 @@ export type EndpointAuth = Authentication;
 // Shape-typed values from @cloudgear/secrets and @cloudgear/events.
 export type EnvOption = { readonly kind: "env"; readonly prefix: string; readonly names: object } | { readonly prefix: string; readonly all: true };
 export type EventOption = { readonly kind: "event"; readonly type: string };
-export type PolicyOption = { readonly provider: "aws"; readonly name: string };
+export type PolicyOption = { readonly kind: "policy"; readonly name: string };
 
 export interface RouteOptions {
   name?: string;

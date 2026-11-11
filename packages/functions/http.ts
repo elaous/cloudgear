@@ -78,7 +78,7 @@ export function assertMethod(method: string): Method {
   return upper as Method;
 }
 
-const PARAM = /\{([A-Za-z_$][\w$]*)\}/g;
+export const PARAM = /\{([A-Za-z_$][\w$]*)\}/g;
 
 export function compilePath(path: string): { regex: RegExp; params: string[] } {
   if (!path.startsWith("/")) throw new Error(`Route path "${path}" must start with "/"`);

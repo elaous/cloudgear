@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,6 +6,7 @@ import { debug, errorSummary, timed } from "@cloudgear/debug";
 import {
   INVOKE_CONTENT_TYPE,
   ROUTE_HEADER,
+  PARAM,
   assertMethod,
   buildInput,
   compilePath,
@@ -54,6 +56,24 @@ export interface RouteOptions {
   env?: EnvOption | EnvOption[];
   // Inline IAM policies put on the function's role (see @cloudgear/iam): `policies: [readBucket]`.
   policies?: PolicyOption | PolicyOption[];
+}
+
+export type FetchBody = string | Uint8Array | ArrayBuffer | URLSearchParams | Record<string, unknown> | unknown[];
+
+export interface FetchOpts {
+  // Defaults to the route's own method.
+  method?: Method | Lowercase<Method>;
+  headers?: Record<string, string> | Headers;
+  // Objects and arrays are sent as JSON.
+  body?: FetchBody;
+  query?: Record<string, string | number | boolean> | URLSearchParams | string;
+  // Fills {placeholders} in the route's path; "." and ".." are refused.
+  params?: Record<string, string | number>;
+}
+
+export interface RouterFetch {
+  (req: Request): Promise<Response>;
+  (name: string, opts?: FetchOpts): Promise<Response>;
 }
 
 export interface EndpointsFile {
@@ -170,7 +190,59 @@ export class FunctionRouter {
     return this.loadEndpoints() ? "remote" : "local";
   }
 
-  fetch = async (req: Request): Promise<Response> => {
+  fetch: RouterFetch = ((target: Request | string, opts?: FetchOpts) => (typeof target === "string" ? this.fetchRoute(target, opts) : this.handle(target))) as RouterFetch;
+
+  urlFrom(name: string, params: Record<string, string | number> = {}): URL {
+    const route = this.routes.find((r) => r.name === name);
+    if (!route) throw new Error(`No route named "${name}"; known routes: ${this.routes.map((r) => r.name).join(", ") || "none"}`);
+    const template = this.urls()[name];
+    if (!template) throw new Error(`Route "${name}" has no URL yet; deploy it or call listen() first`);
+    const unused = new Set(Object.keys(params));
+    const filled = template.replace(new RegExp(PARAM.source, "g"), (_, key: string) => {
+      if (!(key in params)) throw new Error(`Route "${name}" needs the path parameter "${key}"`);
+      unused.delete(key);
+      const value = String(params[key]);
+      if (value === "." || value === "..") throw new Error(`Path parameter "${key}" of route "${name}" cannot be "${value}"`);
+      return encodeURIComponent(value);
+    });
+    if (unused.size) throw new Error(`Route "${name}" has no path parameter ${[...unused].map((k) => `"${k}"`).join(", ")}`);
+    return new URL(filled);
+  }
+
+  private async fetchRoute(name: string, opts: FetchOpts = {}): Promise<Response> {
+    const url = this.urlFrom(name, opts.params);
+    const method = assertMethod((opts.method ?? this.routes.find((r) => r.name === name)!.method).toUpperCase());
+    if (opts.query !== undefined) {
+      const query = opts.query instanceof URLSearchParams || typeof opts.query === "string" ? new URLSearchParams(opts.query) : new URLSearchParams(Object.entries(opts.query).map(([k, v]): [string, string] => [k, String(v)]));
+      for (const [key, value] of query) url.searchParams.append(key, value);
+    }
+    const headers = new Headers(opts.headers);
+    let body: Uint8Array | string | undefined;
+    if (opts.body !== undefined) {
+      if (method === "GET" || method === "HEAD") throw new Error(`A ${method} request cannot have a body`);
+      const given = opts.body;
+      if (typeof given === "string") body = given;
+      else if (given instanceof Uint8Array) body = given;
+      else if (given instanceof ArrayBuffer) body = new Uint8Array(given);
+      else if (given instanceof URLSearchParams) {
+        body = given.toString();
+        if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded");
+      } else if (Array.isArray(given) || Object.getPrototypeOf(given) === Object.prototype || Object.getPrototypeOf(given) === null) {
+        body = JSON.stringify(given);
+        if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      } else {
+        throw new TypeError("fetch body must be a string, bytes, URLSearchParams, a plain object or an array");
+      }
+    }
+    // CloudFront origin access control needs the payload hash on writes.
+    if (method === "POST" || method === "PUT" || method === "PATCH") {
+      headers.set("x-amz-content-sha256", createHash("sha256").update(body ?? "").digest("hex"));
+    }
+    debug("router", `fetch ${method} ${name}`);
+    return fetch(url, { method, headers, body, redirect: "manual" });
+  }
+
+  private handle = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     debug("router", `${req.method} request`);
     const limited = this.checkRateLimit(req);
@@ -227,7 +299,7 @@ export class FunctionRouter {
     if (this.mode === "remote" && !this.loadEndpoints()) {
       throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
     }
-    this.server = Bun.serve({ port, fetch: this.fetch });
+    this.server = Bun.serve({ port, fetch: this.handle });
     console.log(`cloudgear: ${this.routes.length} route(s) on ${this.server.url} (${this.mode})`);
     return this.urls();
   }

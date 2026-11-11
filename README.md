@@ -232,7 +232,15 @@ returns the same map later, and `stop()` shuts the server down. In remote mode
 the URLs are the deployed function URLs plus the route path (with `"iam"`
 only signed calls can use them, so they are not links to hand to browsers); in
 local mode they are this server's. Remote mode without deployed endpoints
-throws. Path params stay as `{placeholders}`. For each
+throws. Path params stay as `{placeholders}`.
+
+`router.fetch(name, { method, headers, body, query, params })` calls a route by name at its `urls()` address and returns the
+`Response`. `method` defaults to the route's own; an object or array `body` is sent as JSON; `query` is a record, a string or
+`URLSearchParams`; `params` fills the `{placeholders}`. `POST`, `PUT` and `PATCH` carry `x-amz-content-sha256`, the SHA-256 of the body,
+which CloudFront origin access control requires. Redirects are returned, not followed, and calls are not SigV4-signed, so
+an `"iam"` function URL still answers 403. `router.fetch(request)` still serves a `Request`, as before.
+
+For each
 request the router either:
 
 - **remote**: POSTs the input object to the route's deployed function URL

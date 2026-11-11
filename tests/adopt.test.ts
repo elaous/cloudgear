@@ -566,3 +566,208 @@ describe("importing with only an ARN", () => {
     expect(result.failed.at(-1)).toBe("... and 2 more");
   });
 });
+
+describe("exporting the policies of an imported function's role", () => {
+  const encoded = (document: unknown) => encodeURIComponent(JSON.stringify(document));
+  const readBucket = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/*" }] };
+  const managed = { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sqs:SendMessage", Resource: "*" }] };
+  const iam = {
+    ListRolePoliciesCommand: () => ({ PolicyNames: ["read-bucket", "cloudgear", "cloudgear-app-foo", "../evil"], IsTruncated: false }),
+    GetRolePolicyCommand: (input: { PolicyName: string }) => ({ PolicyDocument: encoded(input.PolicyName === "read-bucket" ? readBucket : { Version: "2012-10-17", Statement: [] }) }),
+    ListAttachedRolePoliciesCommand: () => ({
+      AttachedPolicies: [
+        { PolicyName: "AWSLambdaBasicExecutionRole", PolicyArn: "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" },
+        { PolicyName: "queue-writer", PolicyArn: "arn:aws:iam::111122223333:policy/queue-writer" },
+      ],
+    }),
+    GetPolicyCommand: () => ({ Policy: { DefaultVersionId: "v3" } }),
+    GetPolicyVersionCommand: () => ({ PolicyVersion: { Document: encoded(managed) } }),
+  };
+
+  test("writes the inline and customer-managed policies as JSON and an index, and skips the ones cloudgear owns", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    const files = Object.fromEntries(result.files.map((f) => [f.path, f.content]));
+    expect(Object.keys(files).sort()).toEqual(["my-own-role/index.json", "my-own-role/inline-.._evil.json", "my-own-role/inline-cloudgear.json", "my-own-role/inline-read-bucket.json", "my-own-role/managed-queue-writer.json"]);
+    expect(JSON.parse(files["my-own-role/inline-read-bucket.json"]!)).toEqual(readBucket);
+    expect(JSON.parse(files["my-own-role/managed-queue-writer.json"]!)).toEqual(managed);
+    expect(JSON.parse(files["my-own-role/index.json"]!)).toEqual({
+      role: "my-own-role",
+      inline: ["read-bucket", "cloudgear", "../evil"],
+      customerManaged: [{ name: "queue-writer", arn: "arn:aws:iam::111122223333:policy/queue-writer" }],
+      awsManaged: ["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"],
+    });
+    expect(result.notes.join("\n")).toMatch(/policies of role my-own-role were exported \(3 inline, 1 customer-managed, 1 AWS-managed\); cloudgear does not manage them/);
+  });
+
+  test("a policy name cannot escape the directory, and the files end with a newline", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    for (const file of result.files) {
+      expect(file.path.split("/")).toHaveLength(2);
+      expect(file.path).not.toMatch(/\.\.\//);
+      expect(file.content.endsWith("\n")).toBe(true);
+    }
+  });
+
+  test("nothing is read from IAM unless asked, and the policies are not recorded as managed", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything);
+    expect(result.files).toEqual([]);
+    expect(aws.of("ListRolePoliciesCommand")).toEqual([]);
+  });
+
+  test("a function with no policies of its own exports just the index", async () => {
+    const aws = fakeAws({ ...existingFunction, ListRolePoliciesCommand: () => ({ PolicyNames: [] }), ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path)).toEqual(["my-own-role/index.json"]);
+  });
+
+  test("paginated policy lists are read in full", async () => {
+    const pages = [{ PolicyNames: ["a"], IsTruncated: true, Marker: "m1" }, { PolicyNames: ["b"], IsTruncated: false }];
+    let call = 0;
+    const aws = fakeAws({ ...existingFunction, ...iam, ListRolePoliciesCommand: () => pages[call++], ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path).sort()).toEqual(["my-own-role/index.json", "my-own-role/inline-a.json", "my-own-role/inline-b.json"]);
+  });
+
+  test("an IAM error while exporting does not stop the function from being imported", async () => {
+    const aws = fakeAws({ ...existingFunction, ListRolePoliciesCommand: () => { throw Object.assign(new Error("not authorized to perform iam:ListRolePolicies"), { name: "AccessDenied" }); } });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.adopted).toEqual(["@aws.Lambda foo"]);
+    expect(result.files).toEqual([]);
+    expect(result.notes.join("\n")).toMatch(/could not be exported \(not authorized to perform iam:ListRolePolicies\); the function is imported anyway/);
+  });
+
+  test("a policy removed while it is read is listed in the index, not fatal", async () => {
+    const aws = fakeAws({
+      ...existingFunction,
+      ...iam,
+      ListRolePoliciesCommand: () => ({ PolicyNames: ["gone", "kept"] }),
+      GetRolePolicyCommand: (input: { PolicyName: string }) => {
+        if (input.PolicyName === "gone") throw Object.assign(new Error("gone"), { name: "NoSuchEntity" });
+        return { PolicyDocument: encoded(readBucket) };
+      },
+      ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }),
+    });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    const index = JSON.parse(result.files.find((f) => f.path.endsWith("index.json"))!.content);
+    expect(index).toMatchObject({ inline: ["kept"], removedWhileReading: ["gone"] });
+  });
+
+  test("two attached policies with one name in different paths get different files", async () => {
+    const aws = fakeAws({
+      ...existingFunction,
+      ...iam,
+      ListRolePoliciesCommand: () => ({ PolicyNames: [] }),
+      ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [{ PolicyName: "writer", PolicyArn: "arn:aws:iam::1:policy/a/writer" }, { PolicyName: "writer", PolicyArn: "arn:aws:iam::1:policy/b/writer" }] }),
+    });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path).sort()).toEqual(["my-own-role/index.json", "my-own-role/managed-writer-2.json", "my-own-role/managed-writer.json"]);
+  });
+
+  test("a role named .. does not become a directory outside the target", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam, GetFunctionCommand: () => ({ Configuration: { FunctionArn: "arn:aws:lambda:eu-west-1:1:function:app-foo", Role: "arn:aws:iam::1:role/.." } }), ListRolePoliciesCommand: () => ({ PolicyNames: ["read-bucket"] }), ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    for (const file of result.files) expect(file.path).toMatch(/^role-2-dots\/[^/]+\.json$/);
+  });
+
+  test("a policy named like cloudgear's is skipped only on the role cloudgear made", async () => {
+    const foreign = fakeAws({ ...existingFunction, ...iam, ListRolePoliciesCommand: () => ({ PolicyNames: ["cloudgear", "cloudgear-app-foo"] }), ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, foreign.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path).sort()).toEqual(["my-own-role/index.json", "my-own-role/inline-cloudgear.json"]);
+    const own = fakeAws({ ...existingFunction, ...iam, GetFunctionCommand: () => ({ Configuration: { FunctionArn: "arn:aws:lambda:eu-west-1:1:function:app-foo", Role: "arn:aws:iam::1:role/app-foo-role" } }), ListRolePoliciesCommand: () => ({ PolicyNames: ["cloudgear", "audit"] }), ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const fresh = emptyState();
+    const again = await adoptEntries(plan(lambdaConfig(), fresh), fresh, own.drivers, everything, { exportPolicies: true });
+    expect(again.files.map((f) => f.path).sort()).toEqual(["app-foo-role/index.json", "app-foo-role/inline-audit.json"]);
+  });
+
+  test("a function without a role says why nothing was exported", async () => {
+    const aws = fakeAws({ ...existingFunction, GetFunctionCommand: () => ({ Configuration: { FunctionArn: "arn:aws:lambda:eu-west-1:1:function:app-foo" } }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.notes.join("\n")).toMatch(/has no role, so there are no policies to export/);
+  });
+
+  test("an already imported function is exported again without changing state", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam });
+    const state = emptyState();
+    await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything);
+    const before = JSON.stringify(state);
+    const again = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(again.adopted).toEqual([]);
+    expect(again.files.length).toBeGreaterThan(0);
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  test("a document that is already plain JSON is read as it is", async () => {
+    const aws = fakeAws({ ...existingFunction, ...iam, GetRolePolicyCommand: () => ({ PolicyDocument: JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "s3:*", Resource: "arn:aws:s3:::100%-bucket/*" }] }) }), ListRolePoliciesCommand: () => ({ PolicyNames: ["plain"] }), ListAttachedRolePoliciesCommand: () => ({ AttachedPolicies: [] }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(lambdaConfig(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(JSON.parse(result.files.find((f) => f.path.endsWith("inline-plain.json"))!.content).Statement[0].Resource).toBe("arn:aws:s3:::100%-bucket/*");
+  });
+
+  test("by ARN, only the entry that fits returns files", async () => {
+    const { adoptByArn } = await import("../src/deploy/adopt");
+    const config = baseConfig({ resource: [], function: [fn({ permission: [], env: [] }), fn({ name: "bar", physical_name: "app-bar", permission: [], env: [] })] });
+    const aws = fakeAws({ ...existingFunction, ...iam, GetFunctionCommand: (input: { FunctionName: string }) => ({ Configuration: { FunctionArn: `arn:aws:lambda:eu-west-1:1:function:${input.FunctionName}`, Role: `arn:aws:iam::1:role/${input.FunctionName}-r` } }) });
+    const state = emptyState();
+    const result = await adoptByArn(plan(config, state), state, aws.drivers, "@aws.Lambda", "arn:aws:lambda:eu-west-1:1:function:app-bar", true);
+    expect(result.adopted).toEqual(["@aws.Lambda bar"]);
+    expect(result.files.every((f) => f.path.startsWith("app-bar-r/"))).toBe(true);
+  });
+});
+
+describe("writing the exported files", () => {
+  test("they are checked together, written once each, and say what changed", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { planPolicyFiles, writePolicyFiles } = await import("../src/policyfiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-files-"));
+    try {
+      expect(() => planPolicyFiles(dir, [{ path: "ok/a.json", content: "{}\n" }, { path: "../escape.json", content: "{}\n" }])).toThrow(/Refusing to write "\.\.\/escape\.json" outside/);
+      expect(() => planPolicyFiles(dir, [{ path: "r/a.json", content: "1" }, { path: "r/a.json", content: "2" }])).toThrow(/Two different policies/);
+      const lines: string[] = [];
+      const files = [{ path: "role/a.json", content: "{}\n" }, { path: "role/a.json", content: "{}\n" }, { path: "role/index.json", content: "[]\n" }];
+      writePolicyFiles(dir, files, (l) => lines.push(l));
+      expect(lines.map((l) => l.replace(/ \S*policy-files-[^/]*\//, " "))).toEqual(["cloudgear: wrote role/a.json", "cloudgear: wrote role/index.json"]);
+      lines.length = 0;
+      fs.writeFileSync(path.join(dir, "role", "index.json"), "old\n");
+      writePolicyFiles(dir, files, (l) => lines.push(l));
+      expect(lines.map((l) => l.replace(/ \S*policy-files-[^/]*\//, " "))).toEqual(["cloudgear: role/a.json is unchanged", "cloudgear: overwrote role/index.json"]);
+      expect(fs.readFileSync(path.join(dir, "role", "index.json"), "utf8")).toBe("[]\n");
+      const none: string[] = [];
+      writePolicyFiles(dir, [], (l) => none.push(l));
+      expect(none[0]).toMatch(/no policies were exported/);
+      writePolicyFiles(undefined, files, (l) => none.push(l));
+      expect(none).toHaveLength(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an escaping path writes nothing at all", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { writePolicyFiles } = await import("../src/policyfiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-files-"));
+    try {
+      expect(() => writePolicyFiles(dir, [{ path: "role/a.json", content: "{}\n" }, { path: "../x.json", content: "{}\n" }], () => {})).toThrow(/Refusing/);
+      expect(fs.existsSync(path.join(dir, "role"))).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

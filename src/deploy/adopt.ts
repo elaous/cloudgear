@@ -9,6 +9,8 @@ export interface AdoptResult {
   skipped: string[];
   failed: string[];
   notes: string[];
+  // Files the lookups produced for the user to keep, such as exported policies.
+  files: { path: string; content: string }[];
 }
 
 // Buckets are recorded, never changed; other resources get managed.
@@ -29,10 +31,22 @@ export function typeOfArn(arn: string): string {
 const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
 export async function adoptEntries(actions: PlannedAction[], state: State, drivers: Drivers, select: (action: PlannedAction) => boolean, hint?: AdoptHint): Promise<AdoptResult> {
-  const result: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
+  const result: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [], files: [] };
   for (const action of actions) {
     if (!select(action)) continue;
     const entry = action.desired;
+    if (entry && state.entries[action.key] && hint?.exportPolicies && drivers[action.type]?.adopt && action.type === "@aws.Lambda") {
+      // Already imported: read its policies again, without recording anything.
+      try {
+        const again = await drivers[action.type]!.adopt!(entry, { entry: (key) => state.entries[key] }, hint);
+        for (const note of again?.notes ?? []) result.notes.push(`${label(action)}: ${note}`);
+        result.files.push(...(again?.files ?? []));
+      } catch (err) {
+        result.failed.push(`${label(action)}: ${(err as Error).message}`);
+      }
+      result.skipped.push(label(action));
+      continue;
+    }
     if (!entry || action.op === "dry" || state.entries[action.key]) {
       result.skipped.push(label(action));
       continue;
@@ -58,6 +72,7 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
       continue;
     }
     for (const note of found.notes ?? []) result.notes.push(`${label(action)}: ${note}`);
+    result.files.push(...(found.files ?? []));
     const recordOnly = RECORD_ONLY.has(entry.type);
     state.entries[stateKey(entry)] = {
       kind: entry.kind,
@@ -87,8 +102,8 @@ function nameInArn(type: string, arn: string): string | undefined {
 const MAX_REASONS = 5;
 
 // ARN-only lookup: records the one fitting entry, if exactly one.
-export async function adoptByArn(actions: PlannedAction[], state: State, drivers: Drivers, type: string, arn: string): Promise<AdoptResult> {
-  const total: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [] };
+export async function adoptByArn(actions: PlannedAction[], state: State, drivers: Drivers, type: string, arn: string, exportPolicies = false): Promise<AdoptResult> {
+  const total: AdoptResult = { adopted: [], missing: [], skipped: [], failed: [], notes: [], files: [] };
   const typed = actions.filter((action) => action.type === type);
   const candidates = typed.filter((action) => action.op !== "dry" && !state.entries[action.key] && action.desired);
   if (!candidates.length) {
@@ -101,7 +116,7 @@ export async function adoptByArn(actions: PlannedAction[], state: State, drivers
   for (const candidate of candidates) {
     if (named !== undefined && candidate.desired!.physical_name !== named) continue;
     const scratch: State = { ...state, entries: { ...state.entries } };
-    const result = await adoptEntries(actions, scratch, drivers, (action) => action.key === candidate.key, { arn });
+    const result = await adoptEntries(actions, scratch, drivers, (action) => action.key === candidate.key, { arn, ...(exportPolicies ? { exportPolicies } : {}) });
     if (result.adopted.length) fits.push({ action: candidate, scratch, result });
     for (const reason of [...result.failed, ...result.missing.map((m) => `${m} was not found in the cloud`)]) {
       const text = reason.replace(/^[^:]*: /, "");

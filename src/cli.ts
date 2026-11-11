@@ -249,7 +249,6 @@ async function main() {
         if (existing && !existing.imported) {
           throw new Error(`${bucket.type} ${bucket.name} is already managed by cloudgear; destroy it before importing another`);
         }
-        if (policyDir) throw new Error("--write-policies exports the policies of a function's role; a bucket has none");
         if (values.arn && second) throw new Error("Give the bucket's ARN with --arn or as the second argument, not both");
         if (third) throw new Error("Usage: cloudgear import <bucket> [physical-id | arn]");
         if (first && arnType && arnType !== "@aws.S3") throw new Error(`${values.arn} is not a bucket ARN, but "${first}" is a bucket`);
@@ -266,6 +265,17 @@ async function main() {
         };
         saveState(statePath, state);
         console.log(`cloudgear: imported ${bucket.type} ${bucket.name} as "${physical}"`);
+        if (policyDir) {
+          // The bucket policy is read from the bucket that was named, under its physical name.
+          const planned = plan(config, { ...state, entries: {} }).map((a) => (a.key === stateKey(bucket) && a.desired ? { ...a, desired: { ...a.desired, physical_name: physical } } : a));
+          const deployers = await drivers(planned.filter((a) => a.key === stateKey(bucket)), config, configPath, values.region, deployTags(config, configPath, values));
+          const scratch = { ...state, entries: {} };
+          const exported = await adoptEntries(planned, scratch, deployers, (a) => a.key === stateKey(bucket), { exportPolicies: true });
+          for (const note of exported.notes) console.warn(`warning: ${note}`);
+          for (const item of exported.failed) console.warn(`warning: ${item}`);
+          writePoliciesAfter(exported.files);
+          if (policyErrors.length) throw new Error(`The policy files could not be written: ${policyErrors.join("; ")}`);
+        }
         return;
       }
 

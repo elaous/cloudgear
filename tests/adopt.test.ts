@@ -800,3 +800,65 @@ describe("writing the exported files", () => {
     }
   });
 });
+
+describe("an issued certificate needs nothing more", () => {
+  const dnsSpec = { provider: "gandi", domain: "www.example.com", zone: "example.com" };
+  const config = () => baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }] });
+  const listed = (status: string) => ({
+    ListCertificatesCommand: () => ({ CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c", Status: status, Type: "AMAZON_ISSUED" }] }),
+    DescribeCertificateCommand: () => ({ Certificate: { DomainName: "www.example.com", Status: status } }),
+  });
+
+  test("applying an imported, issued certificate touches neither DNS nor ACM beyond reading it", async () => {
+    const aws = fakeAws(listed("ISSUED"), null);
+    const state = emptyState();
+    await adoptEntries(plan(config(), state), state, aws.drivers, () => true);
+    await apply(plan(config(), state), state, aws.drivers, { save: () => {} });
+    expect(aws.of("RequestCertificateCommand")).toEqual([]);
+    expect(aws.logs.some((l) => /is issued; nothing to do/.test(l))).toBe(true);
+    expect(plan(config(), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+  });
+
+  test("one still waiting for validation is validated as before", async () => {
+    const aws = fakeAws(listed("PENDING_VALIDATION"), null);
+    const state = emptyState();
+    await adoptEntries(plan(config(), state), state, aws.drivers, () => true);
+    await expect(apply(plan(config(), state), state, aws.drivers, { save: () => {} })).rejects.toThrow(/did not provide a DNS validation record/);
+  });
+});
+
+describe("exporting a bucket's policy", () => {
+  const config = () => baseConfig({ function: [], resource: [{ name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1" }] });
+  const policy = { Version: "2012-10-17", Statement: [{ Sid: "PublicRead", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: "arn:aws:s3:::data/*" }] };
+
+  test("the bucket's policy is written as JSON next to the function policies", async () => {
+    const aws = fakeAws({ HeadBucketCommand: () => ({}), GetBucketPolicyCommand: () => ({ Policy: JSON.stringify(policy) }) });
+    const state = emptyState();
+    const result = await adoptEntries(plan(config(), state), state, aws.drivers, everything, { exportPolicies: true });
+    expect(result.files.map((f) => f.path)).toEqual(["buckets/data/policy.json"]);
+    expect(JSON.parse(result.files[0]!.content)).toEqual(policy);
+    expect(result.files[0]!.content.endsWith("\n")).toBe(true);
+    expect(result.notes.join("\n")).toMatch(/bucket policy was exported/);
+  });
+
+  test("a bucket without a policy says so, and a policy that cannot be read is a note, not a failure", async () => {
+    const none = fakeAws({ HeadBucketCommand: () => ({}), GetBucketPolicyCommand: () => { throw Object.assign(new Error("none"), { name: "NoSuchBucketPolicy" }); } });
+    const state = emptyState();
+    const absent = await adoptEntries(plan(config(), state), state, none.drivers, everything, { exportPolicies: true });
+    expect(absent.files).toEqual([]);
+    expect(absent.notes.join("\n")).toMatch(/has no bucket policy to export/);
+    expect(absent.adopted).toEqual(["@aws.S3 data"]);
+    const denied = fakeAws({ HeadBucketCommand: () => ({}), GetBucketPolicyCommand: () => { throw Object.assign(new Error("not allowed to s3:GetBucketPolicy"), { name: "AccessDenied" }); } });
+    const fresh = emptyState();
+    const refused = await adoptEntries(plan(config(), fresh), fresh, denied.drivers, everything, { exportPolicies: true });
+    expect(refused.adopted).toEqual(["@aws.S3 data"]);
+    expect(refused.notes.join("\n")).toMatch(/could not be exported \(not allowed to s3:GetBucketPolicy\)/);
+  });
+
+  test("nothing is read unless asked", async () => {
+    const aws = fakeAws({ HeadBucketCommand: () => ({}) });
+    const state = emptyState();
+    await adoptEntries(plan(config(), state), state, aws.drivers, everything);
+    expect(aws.of("GetBucketPolicyCommand")).toEqual([]);
+  });
+});

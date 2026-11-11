@@ -25,6 +25,7 @@ import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyComma
 import type { DnsDriver } from "@cloudgear/dns";
 import type { SecretRefSpec } from "../../config/schema";
 import { fitName } from "../../names";
+import { WEB_ACL_ARN } from "../../providers";
 import { expectArn } from "./arn";
 import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
@@ -322,13 +323,13 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         const distribution = got.Distribution as { Id: string; ARN: string; DomainName: string; Status?: string; DistributionConfig?: { Aliases?: { Items?: string[] } } };
         const aliases = distribution.DistributionConfig?.Aliases?.Items ?? [];
         if (!aliases.includes(spec.domain)) throw new Error(`${hint.arn} does not answer to ${spec.domain} (its aliases: ${aliases.join(", ") || "none"})`);
-        return { ...found({ ...distribution, ARN: hint.arn }), notes: await overwritten(id) };
+        return { ...found({ ...distribution, ARN: hint.arn }), notes: await overwritten(id, spec) };
       }
       let marker: string | undefined;
       do {
         const list = await deps.cloudfront.send(new ListDistributionsCommand({ Marker: marker }));
         const item = (list.DistributionList?.Items ?? []).find((candidate: { Aliases?: { Items?: string[] } }) => candidate.Aliases?.Items?.includes(spec.domain));
-        if (item) return { ...found(item), notes: await overwritten(item.Id) };
+        if (item) return { ...found(item), notes: await overwritten(item.Id, spec) };
         marker = list.DistributionList?.IsTruncated ? list.DistributionList.NextMarker : undefined;
       } while (marker);
       return undefined;
@@ -387,11 +388,17 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   };
 
   // Apply rebuilds the config; these existing settings are dropped.
-  async function overwritten(id: string): Promise<string[]> {
+  async function overwritten(id: string, spec: CdnComparable): Promise<string[]> {
     const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
     const notes: string[] = [];
-    if (config.WebACLId) notes.push(`its web ACL (${config.WebACLId}) will be detached`);
+    if (config.WebACLId && spec.options?.web_acl !== config.WebACLId) {
+      notes.push(
+        WEB_ACL_ARN.test(config.WebACLId)
+          ? `its web ACL (${config.WebACLId}) will be detached unless the config sets the web_acl option of this CDN to it: options: { web_acl: "${config.WebACLId}" }`
+          : `its web ACL (${config.WebACLId}) will be detached; it is not a WAFv2 web ACL ARN (a WAF Classic ACL, for example), which the web_acl option cannot keep`,
+      );
+    }
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
     if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
     if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");
@@ -538,6 +545,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     Aliases: { Quantity: 1, Items: [spec.domain] },
     ...(spec.bucket ? { DefaultRootObject: spec.options?.default_root_object ?? "index.html" } : {}),
     ...(spec.options?.price_class ? { PriceClass: spec.options.price_class } : {}),
+    ...(spec.options?.web_acl ? { WebACLId: spec.options.web_acl } : {}),
     HttpVersion: "http2and3",
     IsIPV6Enabled: true,
     Origins: { Quantity: origins.length, Items: origins },

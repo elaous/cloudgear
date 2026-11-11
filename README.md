@@ -66,6 +66,8 @@ Options (the command an option applies to is in parentheses):
 | `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
 | `--skip-env-check` | Deploy even if a variable or secret is missing (`apply`) |
+| `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
+| `--dns-server <ip>` | Resolver for the DNS check (`check-dns`, `apply`; default: the system's) |
 | `--domain <cdn domain>` | Which CDN to invalidate when the app has several (`invalidate`) |
 | `--arn <arn>`, `--all` | What `import` adopts (see `cloudgear import`) |
 | `--from-envfile <file>`, `--allow-unignored`, `--path <path>`, `--all` | Options of `secrets set` (see Secrets) |
@@ -1151,6 +1153,12 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
   they differ, `apply` asks for `generate` again. If the report is missing, `apply` asks
   for `generate` first. The report holds names and file paths, never values, so
   it MAY be committed.
+
+**DNS check.** `cloudgear check-dns` (which `apply` runs first) looks up public DNS for what the plan creates or changes. It blocks
+when a CDN or API host that is about to be created already resolves to something (a wildcard record that answers for
+any name is ignored), and when neither the DNS zone of a CDN, API or certificate nor any parent of it has name servers.
+A lookup that fails (timeout, no resolver) is a warning, not a block. It is skipped when a `CLOUDGEAR_*_DRIVER` fake is set. Pass
+`--skip-dns-check` to deploy anyway.
 
 ## `cloudgear plan` / `apply` / `destroy`
 

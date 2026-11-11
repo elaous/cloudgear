@@ -20,6 +20,7 @@ import { parseArn } from "./deploy/aws/arn";
 import { planPolicyFiles, writePolicyFiles } from "./policyfiles";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
+import { checkDns, formatDnsCheck, systemLookup } from "./dnscheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
 const USAGE = `Usage: cloudgear <command> [options]
@@ -27,6 +28,7 @@ const USAGE = `Usage: cloudgear <command> [options]
 Commands:
   generate <entry.ts>          Analyze the app and write cloudgear.prototxt + function bundles
   plan                         Show what apply would change
+  check-dns                    Check public DNS for what apply would create (apply runs it first)
   apply [--auto-approve]       Create, update and delete cloud resources to match the config
   import <name> [physical-id]  Adopt an existing bucket, function, certificate, distribution or schedule into state
   import <type> <name>         The same, when several things share a name (for example @aws.Certificate www.example.com)
@@ -50,12 +52,18 @@ Options:
   --domain <domain>  Which CDN to invalidate when the app has several
   --write-policies <dir>  Also write the IAM policies of imported functions' roles there as JSON (import only)
   --arn <arn>        Import exactly this certificate, distribution, function, rule or bucket (import only)
+  --skip-dns-check   Deploy even if the DNS check finds a conflict or an undelegated zone (apply only)
+  --dns-server <ip>  Resolver for the DNS check (default: the system's)
   --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
   --path <path>      Restrict secrets set to one declared path
   --all              Also store undeclared names from the env file under the path (secrets set)
 `;
+
+function fakeDrivers(): boolean {
+  return ["CLOUDGEAR_DNS_DRIVER", "CLOUDGEAR_CERT_DRIVER", "CLOUDGEAR_CDN_DRIVER"].some((name) => process.env[name]);
+}
 
 async function main() {
   const { values, positionals } = parseArgs({
@@ -72,6 +80,8 @@ async function main() {
       "from-envfile": { type: "string" },
       "allow-unignored": { type: "boolean", default: false },
       "skip-env-check": { type: "boolean", default: false },
+      "skip-dns-check": { type: "boolean", default: false },
+      "dns-server": { type: "string" },
       domain: { type: "string" },
       arn: { type: "string" },
       "write-policies": { type: "string" },
@@ -129,6 +139,19 @@ async function main() {
       if (warning) console.warn(`\nwarning: ${warning}`);
       return;
     }
+    case "check-dns": {
+      const config = readConfig(configPath);
+      const state = loadState(statePath, config.project, config.provider);
+      if (fakeDrivers()) {
+        console.log("cloudgear: a CLOUDGEAR_*_DRIVER is set; the DNS check is skipped");
+        return;
+      }
+      const check = await checkDns(plan(config, state), systemLookup(values["dns-server"]));
+      if (check.problems.length || check.unchecked.length) console.log(formatDnsCheck(check));
+      if (check.problems.length) throw new Error("The DNS check found problems");
+      console.log(check.unchecked.length ? "cloudgear: DNS could not be fully checked" : "cloudgear: DNS looks ready");
+      return;
+    }
     case "apply":
     case "destroy": {
       const config = readConfig(configPath);
@@ -146,6 +169,11 @@ async function main() {
       console.log(formatPlan(actions));
       if (command === "apply" && config.function.length && !values["skip-env-check"]) {
         await checkEnvironment(config, configPath, values.region);
+      }
+      if (command === "apply" && hasChanges(actions) && !values["skip-dns-check"] && !fakeDrivers()) {
+        const check = await checkDns(actions, systemLookup(values["dns-server"]));
+        if (check.unchecked.length) console.warn(check.unchecked.map((u) => `warning: ${u}`).join("\n"));
+        if (check.problems.length) throw new Error(`The DNS check found problems:\n${check.problems.map((p) => `  - ${p}`).join("\n")}\nPass --skip-dns-check to deploy anyway.`);
       }
       if (!hasChanges(actions)) {
         console.log("\nNo changes.");

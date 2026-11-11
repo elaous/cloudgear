@@ -24,6 +24,7 @@ message Api {
   bool method_routing = 4;
   map<string, string> options = 5;
   string certificate = 6;
+  repeated AttachedOrigin attached = 7;
 }
 
 message Dns {
@@ -72,6 +73,19 @@ message Cdn {
   reserved 5;
   map<string, string> options = 6;
   string certificate = 7;
+  repeated AttachedOrigin attached = 8;
+}
+
+// An origin the distribution already has, kept as CloudFront's own JSON, with the path behaviors that reach it.
+message AttachedOrigin {
+  string id = 1;
+  string origin = 2;
+  repeated AttachedBehavior behavior = 3;
+}
+
+message AttachedBehavior {
+  string path_pattern = 1;
+  string behavior = 2;
 }
 
 message Resource {

@@ -47,6 +47,19 @@ export interface CertificateSpec {
   options?: Options;
 }
 
+export interface AttachedBehaviorSpec {
+  path_pattern: string;
+  // CloudFront CacheBehavior as JSON.
+  behavior: string;
+}
+
+export interface AttachedOriginSpec {
+  id: string;
+  // CloudFront Origin as JSON.
+  origin: string;
+  behavior: AttachedBehaviorSpec[];
+}
+
 export interface ApiSpec {
   provider: string;
   domain: string;
@@ -54,6 +67,7 @@ export interface ApiSpec {
   via?: "cloudfront";
   method_routing?: boolean;
   options?: Options;
+  attached?: AttachedOriginSpec[];
 }
 
 export interface CdnSpec {
@@ -63,6 +77,7 @@ export interface CdnSpec {
   bucket: string;
   path: string;
   options?: Options;
+  attached?: AttachedOriginSpec[];
 }
 
 export interface ResourceSpec {
@@ -128,6 +143,10 @@ const REPEATED = new Set([
   "certificate.options",
   "api.options",
   "cdn.options",
+  "api.attached",
+  "api.attached.behavior",
+  "cdn.attached",
+  "cdn.attached.behavior",
 ]);
 
 export function encodeConfig(config: CloudgearConfig): string {
@@ -166,6 +185,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       path: String(c.path ?? ""),
       ...(c.certificate ? { certificate: String(c.certificate) } : {}),
       ...optionsFrom(c),
+      ...attachedFrom(c),
     })),
     api: raw.api && {
       provider: str(raw.api, "provider"),
@@ -174,6 +194,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...(raw.api.via === "cloudfront" ? { via: "cloudfront" as const } : {}),
       ...(raw.api.method_routing === true ? { method_routing: true } : {}),
       ...optionsFrom(raw.api),
+      ...attachedFrom(raw.api),
     },
     resource: (raw.resource ?? []).map((r: Record<string, any>) => ({
       name: str(r, "name"),
@@ -260,8 +281,38 @@ function optionsToProto(config: CloudgearConfig): unknown {
     resource: config.resource.map(withOptions),
     function: config.function.map((f) => ({ ...withOptions(f), query_schedule: f.query_schedule?.map((q) => ({ cron: q.cron, query: entries(q.query) })) })),
     certificate: config.certificate.map(withOptions),
-    cdn: config.cdn.map(withOptions),
-    api: config.api && withOptions(config.api),
+    cdn: config.cdn.map((c) => withOptions({ ...c, attached: c.attached?.length ? c.attached : undefined })),
+    api: config.api && withOptions({ ...config.api, attached: config.api.attached?.length ? config.api.attached : undefined }),
+  };
+}
+
+function attachedFrom(message: Record<string, any>): { attached?: AttachedOriginSpec[] } {
+  const items = (message.attached ?? []) as Record<string, any>[];
+  if (!items.length) return {};
+  return {
+    attached: items.map((item) => {
+      const id = str(item, "id");
+      const json = (text: string, what: string) => {
+        try {
+          const value = JSON.parse(text);
+          if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("not an object");
+          return value as Record<string, unknown>;
+        } catch (err) {
+          throw new Error(`cloudgear config: attached origin "${id}": ${what} is not a JSON object (${(err as Error).message})`);
+        }
+      };
+      const origin = String(item.origin ?? "");
+      if (json(origin, "origin").Id !== id) throw new Error(`cloudgear config: attached origin "${id}": its origin JSON has another Id`);
+      const behavior = ((item.behavior ?? []) as Record<string, any>[]).map((b) => {
+        const path_pattern = str(b, "path_pattern");
+        const text = String(b.behavior ?? "");
+        const parsed = json(text, `behavior "${path_pattern}"`);
+        if (parsed.PathPattern !== path_pattern) throw new Error(`cloudgear config: attached origin "${id}": behavior "${path_pattern}" has another PathPattern in its JSON`);
+        if (parsed.TargetOriginId !== id) throw new Error(`cloudgear config: attached origin "${id}": behavior "${path_pattern}" targets another origin`);
+        return { path_pattern, behavior: text };
+      });
+      return { id, origin, behavior };
+    }),
   };
 }
 

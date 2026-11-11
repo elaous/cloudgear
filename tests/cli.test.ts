@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { decodeConfig, encodeConfig } from "../src/config/schema";
 
 // Timeout covers analysis and bundling.
 setDefaultTimeout(30_000);
@@ -120,6 +122,17 @@ describe("cloudgear CLI with a CDN", () => {
     expect(order[2]).toBeGreaterThan(order[1]!);
     expect(order[4]).toBeGreaterThan(order[3]!);
     expect(plan).toContain("Plan: 8 to create");
+  });
+
+  test("generate keeps the attached origins an earlier import wrote into the config", () => {
+    const parsed = decodeConfig(fs.readFileSync(config(), "utf8"));
+    const attached = [{ id: "legacy-api", origin: JSON.stringify({ Id: "legacy-api", DomainName: "legacy.example.org" }), behavior: [{ path_pattern: "/legacy/*", behavior: JSON.stringify({ PathPattern: "/legacy/*", TargetOriginId: "legacy-api" }) }] }];
+    parsed.cdn[0]!.attached = attached;
+    fs.writeFileSync(config(), encodeConfig(parsed));
+    expect(run("generate", cdnEntry, "--project", "edge").err).toBe("");
+    expect(decodeConfig(fs.readFileSync(config(), "utf8")).cdn[0]!.attached).toEqual(attached);
+    const report = JSON.parse(fs.readFileSync(config().replace(/\.prototxt$/, ".env.json"), "utf8"));
+    expect(report.config).toBe(createHash("sha256").update(fs.readFileSync(config(), "utf8")).digest("hex"));
   });
 
   test("invalidate before anything is deployed explains what to do", () => {

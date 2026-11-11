@@ -1,4 +1,4 @@
-import type { ApiSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec, SecretBindingSpec, SecretRefSpec } from "../config/schema";
+import type { ApiSpec, AttachedOriginSpec, CdnSpec, CertificateSpec, CloudgearConfig, FunctionSpec, ResourceSpec, SecretBindingSpec, SecretRefSpec } from "../config/schema";
 import { createHash } from "node:crypto";
 import { wildcardCovers } from "@cloudgear/dns";
 import { toEventBridgeCron } from "@cloudgear/functions";
@@ -50,6 +50,24 @@ export interface EventRuleComparable {
   function_key: string;
 }
 
+const OWN_ORIGIN = /^(cloudgear-site|cloudgear-fn-)/;
+
+function attachedSpec(attached: AttachedOriginSpec[] | undefined, domain: string, ownPatterns: string[]): { attached?: AttachedOriginSpec[] } {
+  if (!attached?.length) return {};
+  const ids = new Set<string>();
+  const patterns = new Set(ownPatterns);
+  for (const origin of attached) {
+    if (OWN_ORIGIN.test(origin.id)) throw new Error(`cloudgear config: ${domain}: the attached origin "${origin.id}" uses an id cloudgear keeps for its own origins`);
+    if (ids.has(origin.id)) throw new Error(`cloudgear config: ${domain}: the attached origin "${origin.id}" is listed twice`);
+    ids.add(origin.id);
+    for (const { path_pattern } of origin.behavior) {
+      if (patterns.has(path_pattern)) throw new Error(`cloudgear config: ${domain}: the path pattern "${path_pattern}" of the attached origin "${origin.id}" is already used`);
+      patterns.add(path_pattern);
+    }
+  }
+  return { attached };
+}
+
 export interface CdnComparable {
   domain: string;
   certificate_domain?: string;
@@ -64,6 +82,8 @@ export interface CdnComparable {
   behaviors?: { pattern: string; methods: string[]; function: string }[];
   // Set instead of behaviors when a CloudFront Function routes.
   method_routes?: { method: string; path: string; function: string }[];
+  // Origins the distribution already had, kept with their path behaviors.
+  attached?: AttachedOriginSpec[];
 }
 
 export interface ApiComparable {
@@ -276,6 +296,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         bucket_region: (bucket as ResourceSpec).region ?? "",
         path: cdn.path,
         ...optionsSpec(cdn.options),
+        ...attachedSpec(cdn.attached, cdn.domain, []),
       } satisfies CdnComparable,
       source: cdn,
       deps: [certificateKey, stateKey(bucket)],
@@ -316,6 +337,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
                 .sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
             }
           : { behaviors: behaviorsFor(routes) }),
+        ...attachedSpec(api.attached, api.domain, api.method_routing ? [] : behaviorsFor(routes).map((b) => b.pattern)),
       } satisfies CdnComparable,
       source: api,
       deps: [certificateKey, ...routed.map((fn) => stateKey(fn))],

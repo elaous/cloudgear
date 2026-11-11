@@ -58,6 +58,59 @@ describe("router.fetch(name, opts)", () => {
     }
   });
 
+  test("path parameters cannot climb out of the route or go unused", async () => {
+    const r = serve();
+    expect(() => r.urlFrom("item", { id: ".." })).toThrow(/cannot be "\.\."/);
+    expect(() => r.urlFrom("item", { id: "." })).toThrow(/cannot be "\."/);
+    expect(() => r.urlFrom("item", { id: "1", other: "2" })).toThrow(/no path parameter "other"/);
+    expect(r.urlFrom("item", { id: "a/b" }).pathname).toBe("/items/a%2Fb");
+  });
+
+  test("the method defaults to the route's own", async () => {
+    const seen: string[] = [];
+    const server = Bun.serve({ port: 0, fetch: (req) => { seen.push(req.method); return new Response("ok"); } });
+    try {
+      const r = new FunctionRouter("aws", { mode: "remote", endpoints: { "POST /echo": server.url.origin }, authenticated: "none" }).url("POST", "/echo", () => ({}), { name: "echo" });
+      await r.fetch("echo", { body: "x" });
+      expect(seen).toEqual(["POST"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("bodies that are not text, bytes or plain data are refused", async () => {
+    const r = serve();
+    await expect(r.fetch("echo", { body: new Blob(["x"]) as never })).rejects.toThrow(/fetch body must be/);
+    await expect(r.fetch("echo", { body: new FormData() as never })).rejects.toThrow(/fetch body must be/);
+  });
+
+  test("bytes and form bodies are hashed as sent", async () => {
+    const seen: { headers: Headers; text: string }[] = [];
+    const server = Bun.serve({ port: 0, fetch: async (req) => { seen.push({ headers: req.headers, text: await req.text() }); return new Response("ok"); } });
+    try {
+      const r = new FunctionRouter("aws", { mode: "remote", endpoints: { "POST /echo": server.url.origin }, authenticated: "none" }).url("POST", "/echo", () => ({}), { name: "echo" });
+      await r.fetch("echo", { body: new TextEncoder().encode("bytes") });
+      await r.fetch("echo", { body: new URLSearchParams({ a: "1 2" }) });
+      await r.fetch("echo", { body: { a: 1 }, headers: new Headers({ "Content-Type": "application/vnd.api+json" }) });
+      expect(seen[0]!.headers.get("x-amz-content-sha256")).toBe(sha("bytes"));
+      expect(seen[1]!.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
+      expect(seen[1]!.headers.get("x-amz-content-sha256")).toBe(sha(seen[1]!.text));
+      expect(seen[2]!.headers.get("content-type")).toBe("application/vnd.api+json");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a registered route without a deployed endpoint says so", () => {
+    const r = new FunctionRouter("aws", { mode: "remote", endpoints: { "GET /other": "http://x" }, authenticated: "none" }).url("GET", "/other", () => ({}), { name: "other" }).url("GET", "/lost", () => ({}), { name: "lost" });
+    expect(() => r.urlFrom("lost")).toThrow(/has no URL yet/);
+  });
+
+  test("a destructured fetch still serves a Request", async () => {
+    const { fetch: serveRequest } = serve();
+    expect((await serveRequest(new Request("http://app/items?q=d"))).status).toBe(200);
+  });
+
   test("a body on GET is refused, and fetch(Request) still serves", async () => {
     const r = serve();
     await expect(r.fetch("api-items", { body: "x" })).rejects.toThrow(/GET request cannot have a body/);

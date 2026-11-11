@@ -6,6 +6,7 @@ import { debug, errorSummary, timed } from "@cloudgear/debug";
 import {
   INVOKE_CONTENT_TYPE,
   ROUTE_HEADER,
+  PARAM,
   assertMethod,
   buildInput,
   compilePath,
@@ -60,12 +61,13 @@ export interface RouteOptions {
 export type FetchBody = string | Uint8Array | ArrayBuffer | URLSearchParams | Record<string, unknown> | unknown[];
 
 export interface FetchOpts {
+  // Defaults to the route's own method.
   method?: Method | Lowercase<Method>;
   headers?: Record<string, string> | Headers;
   // Objects and arrays are sent as JSON.
   body?: FetchBody;
   query?: Record<string, string | number | boolean> | URLSearchParams | string;
-  // Fills {placeholders} in the route's path.
+  // Fills {placeholders} in the route's path; "." and ".." are refused.
   params?: Record<string, string | number>;
 }
 
@@ -191,18 +193,25 @@ export class FunctionRouter {
   fetch: RouterFetch = ((target: Request | string, opts?: FetchOpts) => (typeof target === "string" ? this.fetchRoute(target, opts) : this.handle(target))) as RouterFetch;
 
   urlFrom(name: string, params: Record<string, string | number> = {}): URL {
+    const route = this.routes.find((r) => r.name === name);
+    if (!route) throw new Error(`No route named "${name}"; known routes: ${this.routes.map((r) => r.name).join(", ") || "none"}`);
     const template = this.urls()[name];
-    if (!template) throw new Error(`No route named "${name}"; known routes: ${this.routes.map((r) => r.name).join(", ") || "none"}`);
-    const url = template.replace(/\{(\w+)\}/g, (_, key: string) => {
+    if (!template) throw new Error(`Route "${name}" has no URL yet; deploy it or call listen() first`);
+    const unused = new Set(Object.keys(params));
+    const filled = template.replace(new RegExp(PARAM.source, "g"), (_, key: string) => {
       if (!(key in params)) throw new Error(`Route "${name}" needs the path parameter "${key}"`);
-      return encodeURIComponent(String(params[key]));
+      unused.delete(key);
+      const value = String(params[key]);
+      if (value === "." || value === "..") throw new Error(`Path parameter "${key}" of route "${name}" cannot be "${value}"`);
+      return encodeURIComponent(value);
     });
-    return new URL(url);
+    if (unused.size) throw new Error(`Route "${name}" has no path parameter ${[...unused].map((k) => `"${k}"`).join(", ")}`);
+    return new URL(filled);
   }
 
   private async fetchRoute(name: string, opts: FetchOpts = {}): Promise<Response> {
-    const method = assertMethod((opts.method ?? "GET").toUpperCase());
     const url = this.urlFrom(name, opts.params);
+    const method = assertMethod((opts.method ?? this.routes.find((r) => r.name === name)!.method).toUpperCase());
     if (opts.query !== undefined) {
       const query = opts.query instanceof URLSearchParams || typeof opts.query === "string" ? new URLSearchParams(opts.query) : new URLSearchParams(Object.entries(opts.query).map(([k, v]): [string, string] => [k, String(v)]));
       for (const [key, value] of query) url.searchParams.append(key, value);
@@ -218,9 +227,11 @@ export class FunctionRouter {
       else if (given instanceof URLSearchParams) {
         body = given.toString();
         if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded");
-      } else {
+      } else if (Array.isArray(given) || Object.getPrototypeOf(given) === Object.prototype || Object.getPrototypeOf(given) === null) {
         body = JSON.stringify(given);
         if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      } else {
+        throw new TypeError("fetch body must be a string, bytes, URLSearchParams, a plain object or an array");
       }
     }
     // CloudFront origin access control needs the payload hash on writes.

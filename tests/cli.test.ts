@@ -149,6 +149,11 @@ describe("cloudgear CLI with a CDN", () => {
     expect(run("import", "my-site", "--arn", "arn:aws:s3:::second").out).toMatch(/as "second"/);
     expect(run("import", "my-site", "arn:aws:acm:us-east-1:1:certificate/x").err).toMatch(/is not an S3 bucket ARN/);
     expect(run("import", "--all", "--arn", "arn:aws:s3:::x").err).toMatch(/--arn names one thing/);
+    expect(run("import", "my-site", "existing", "--arn", "arn:aws:s3:::other").err).toMatch(/not both/);
+    expect(run("import", "my-site", "--arn", "just-a-name").err).toMatch(/is not an ARN/);
+    expect(run("import", "my-site", "arn:aws-cn:s3:::cn-bucket").out).toMatch(/as "cn-bucket"/);
+    expect(run("import", "my-site", "arn:aws:s3:us-east-1:111122223333:accesspoint/ap").err).toMatch(/access point's ARN does not name the bucket/);
+    expect(run("import", "www.example.com", "--arn", "arn:aws:acm:us-east-1:1:certificate/x").err).toMatch(/say which: cloudgear import <type> www\.example\.com --arn <arn>/);
     fs.rmSync(stateFile, { force: true });
   });
 

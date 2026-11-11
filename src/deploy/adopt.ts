@@ -18,6 +18,9 @@ export interface AdoptResult {
 // is managed from here on, so the next `apply` brings it in line with the config.
 const RECORD_ONLY = new Set(["@aws.S3"]);
 
+// The drivers that can be told which one by its ARN.
+const ARN_TYPES = new Set(["@aws.Certificate", "@aws.CloudFront", "@aws.Lambda", "@aws.Schedule", "@aws.S3"]);
+
 const label = (action: PlannedAction) => `${action.type} ${action.name}`;
 
 // Looks each planned entry that is not in state yet up in the cloud and records it, in dependency order.
@@ -33,6 +36,10 @@ export async function adoptEntries(actions: PlannedAction[], state: State, drive
     const driver = drivers[action.type];
     if (!driver?.adopt) {
       result.skipped.push(label(action));
+      continue;
+    }
+    if (hint?.arn && !ARN_TYPES.has(action.type)) {
+      result.failed.push(`${label(action)}: importing by ARN is not supported for ${action.type}`);
       continue;
     }
     let found;

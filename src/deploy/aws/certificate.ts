@@ -5,6 +5,7 @@ import { PartialApplyError, type Driver } from "../apply";
 import type { CertificateComparable } from "../plan";
 import { stateKey } from "../state";
 import type { SendClient } from "./index";
+import { expectArn } from "./arn";
 import { tagList, type Tagger } from "./tags";
 
 export interface CertificateDeps {
@@ -77,7 +78,10 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       const matches: Summary[] = [];
       if (hint?.arn) {
         const arn = hint.arn;
-        if (!arn.startsWith("arn:aws:acm:")) throw new Error(`"${arn}" is not an ACM certificate ARN`);
+        const parsed = expectArn(arn, "acm", "an ACM certificate");
+        if (!parsed.resource.startsWith("certificate/")) throw new Error(`"${arn}" is not an ACM certificate ARN`);
+        const wanted = spec.region || deps.region;
+        if (parsed.region !== wanted) throw new Error(`${arn} is in ${parsed.region}, but this certificate must be in ${wanted}`);
         let described: Summary | undefined;
         try {
           described = (await describe(arn)) as Summary | undefined;
@@ -87,6 +91,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
         }
         if (!described) return undefined;
         if (described.DomainName !== spec.domain) throw new Error(`${arn} is a certificate for ${described.DomainName}, not ${spec.domain}`);
+        if (described.Status !== "ISSUED" && described.Status !== "PENDING_VALIDATION") throw new Error(`${arn} is ${described.Status}; only an issued certificate, or one waiting for validation, can be imported`);
         matches.push({ ...described, CertificateArn: arn });
       } else {
         const acm = deps.acm(spec.region || deps.region);

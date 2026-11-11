@@ -24,6 +24,7 @@ import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyComma
 import type { DnsDriver } from "@cloudgear/dns";
 import type { SecretRefSpec } from "../../config/schema";
 import { fitName } from "../../names";
+import { expectArn } from "./arn";
 import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
 import type { CdnComparable } from "../plan";
@@ -310,7 +311,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         outputs: { id: item.Id, arn: item.ARN, domain_name: item.DomainName, url: `https://${item.DomainName}`, status: item.Status === "Deployed" ? "Deployed" : "InProgress" },
       });
       if (hint?.arn) {
-        const id = /^arn:aws:cloudfront::\d+:distribution\/([A-Z0-9]+)$/.exec(hint.arn)?.[1];
+        const id = /^distribution\/([A-Z0-9]+)$/.exec(expectArn(hint.arn, "cloudfront", "a CloudFront distribution").resource)?.[1];
         if (!id) throw new Error(`"${hint.arn}" is not a CloudFront distribution ARN`);
         let got;
         try {

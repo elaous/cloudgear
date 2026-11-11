@@ -40,6 +40,7 @@ import { environmentOptions } from "../../providers";
 import { secretStatements, type SecretContext } from "./secrets";
 import { zip } from "../../build/zip";
 import { fitName } from "../../names";
+import { expectArn, parseArn } from "./arn";
 import { taggerFor, tagList, type Tags } from "./tags";
 import { certificateDriver } from "./certificate";
 import { apiGatewayDriver } from "./apigateway";
@@ -263,8 +264,12 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         }
         return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
       },
-      async adopt(entry) {
+      async adopt(entry, _context, hint) {
         const region = (entry.spec.region as string | undefined) || options.region;
+        if (hint?.arn) {
+          const bucket = expectArn(hint.arn, "s3", "an S3 bucket").resource;
+          if (bucket !== entry.physical_name) throw new Error(`${hint.arn} is the bucket "${bucket}", but the config uses "${entry.physical_name}"`);
+        }
         try {
           await s3For(region).send(new HeadBucketCommand({ Bucket: entry.physical_name }));
         } catch (err) {
@@ -366,14 +371,18 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       async adopt(entry, _context, hint) {
         const spec = entry.spec as unknown as FunctionComparable;
         if (hint?.arn) {
-          const named = /^arn:aws:lambda:[a-z0-9-]+:\d+:function:([^:]+)(?::.+)?$/.exec(hint.arn)?.[1];
-          if (!named) throw new Error(`"${hint.arn}" is not a Lambda function ARN`);
+          const parsed = expectArn(hint.arn, "lambda", "a Lambda function");
+          const [kind, named, qualifier] = parsed.resource.split(":");
+          if (kind !== "function" || !named) throw new Error(`"${hint.arn}" is not a Lambda function ARN`);
+          if (qualifier) throw new Error(`${hint.arn} names a version or alias; give the function's own ARN (without ":${qualifier}")`);
           if (named !== entry.physical_name) throw new Error(`${hint.arn} is the function "${named}", but the config deploys "${entry.physical_name}"`);
+          if (parsed.region !== options.region) throw new Error(`${hint.arn} is in ${parsed.region}, but the functions are deployed to ${options.region}`);
         }
         try {
           const found = await lambda.send(new GetFunctionCommand({ FunctionName: entry.physical_name }));
           const config = found.Configuration as { FunctionArn?: string; Role?: string; PackageType?: string; Handler?: string; Environment?: { Variables?: Record<string, string> } } | undefined;
           if (!config?.FunctionArn) return undefined;
+          if (hint?.arn && parseArn(config.FunctionArn)?.account !== parseArn(hint.arn)?.account) throw new Error(`${hint.arn} is in another account than the function that was found (${config.FunctionArn})`);
           if (config.PackageType === "Image") throw new Error(`function "${entry.physical_name}" is a container image; cloudgear deploys zip bundles and cannot manage it`);
           const url = await lambda.send(new GetFunctionUrlConfigCommand({ FunctionName: entry.physical_name })).then(
             (res: { FunctionUrl?: string; AuthType?: string }) => res,

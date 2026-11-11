@@ -16,6 +16,7 @@ import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
 import pkg from "../package.json";
 import { adoptEntries } from "./deploy/adopt";
+import { parseArn } from "./deploy/aws/arn";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
@@ -226,6 +227,9 @@ async function main() {
         if (existing && !existing.imported) {
           throw new Error(`${bucket.type} ${first} is already managed by cloudgear; destroy it before importing another`);
         }
+        if (values.arn && second) throw new Error("Give the bucket's ARN with --arn or as the second argument, not both");
+        if (third) throw new Error("Usage: cloudgear import <bucket> [physical-id | arn]");
+        if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
         const given = values.arn ?? second;
         const physical = given?.startsWith("arn:") ? bucketOfArn(given) : (given ?? bucket.physical_name);
         state.entries[stateKey(bucket)] = {
@@ -253,7 +257,8 @@ async function main() {
       const chosen = planned.filter(select);
       if (!values.all) {
         if (!chosen.length) throw new Error(`Nothing named "${name}" is in ${values.config}; run \`cloudgear plan\` to see the names`);
-        if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}`);
+        if (chosen.length > 1) throw new Error(`"${name}" names several things (${chosen.map((a) => a.type).join(", ")}); say which: cloudgear import <type> ${name}${values.arn ? " --arn <arn>" : ""}`);
+        if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
       }
       const deployers = await drivers(chosen, config, configPath, values.region, deployTags(config, configPath, values));
       const result = await adoptEntries(planned, state, deployers, select, values.arn ? { arn: values.arn } : undefined);
@@ -277,8 +282,9 @@ async function main() {
 
 // `arn:aws:s3:::my-bucket` (an object ARN `.../key` is cut back to the bucket).
 function bucketOfArn(arn: string): string {
-  const name = /^arn:aws:s3:::([^/]+)/.exec(arn)?.[1];
-  if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN`);
+  const parsed = parseArn(arn);
+  const name = parsed?.service === "s3" && !parsed.region ? /^([^/]+)/.exec(parsed.resource)?.[1] : undefined;
+  if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN${parsed?.resource.startsWith("accesspoint/") ? " (an access point's ARN does not name the bucket)" : ""}`);
   return name;
 }
 

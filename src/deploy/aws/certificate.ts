@@ -123,8 +123,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       const spec = entry.spec as unknown as CertificateComparable;
       const outputs: Record<string, string> = {};
       const taken = ["@aws.CloudFront", "@aws.ApiGateway"].some((type) => context.entry(stateKey({ type, name: spec.domain })));
-      // Fail early if the endpoint cannot take the record.
-      // Wildcards have no record; hostnames are checked per distribution.
+      // Fail early if endpoint rejects the record; wildcards have none.
       if (spec.for_endpoint && !taken && !spec.domain.startsWith("*.")) {
         const record = await (await deps.dns(spec.dns_provider, spec.dns_zone, spec.dns_token)).get(spec.domain, "CNAME");
         if (record) {

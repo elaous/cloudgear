@@ -44,9 +44,7 @@ export const not =
 
 type Routed = (this: any, ...args: any[]) => unknown;
 
-// Runs only when all checks pass: 401 without caller, 403 otherwise.
 // Context is the last argument; input is the first.
-// Async wrapper; keeps the method name.
 export function guard(...checks: Check[]) {
   const allowed = allOf(...checks);
   return <T extends Routed>(method: T, _context: ClassMethodDecoratorContext): T => {

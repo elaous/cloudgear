@@ -67,8 +67,7 @@ export interface RateLimit {
   windowMs: number;
   // Required unless `trustProxy` is set.
   key?: (req: Request) => string;
-  // Uses the first X-Forwarded-For address; enable only behind a proxy.
-  // The proxy overwrites that header; otherwise clients can spoof it.
+  // Enable only behind a proxy that overwrites X-Forwarded-For.
   trustProxy?: boolean;
 }
 
@@ -82,15 +81,12 @@ export interface FunctionRouterOptions {
   // Literal only: generate reads it; defaults to --region or AWS_REGION.
   region?: string;
   // Return null for 401; `public` routes skip it.
-  // Reaches functions as `context.auth` when authenticated is "iam".
   authenticate?: Authenticator;
-  // Also serves routes on the Cert's domain, via API Gateway.
-  // Requests there skip `authenticate`; generate reads it.
+  // Also serves Cert's domain routes via API Gateway; skips `authenticate`.
   cert?: { readonly domain: string };
   // Literals only; read by generate.
   functionOptions?: ProviderOptions;
-  // Variables the code tolerates unset; generate does not require them.
-  // Names are string literals only.
+  // Tolerated unset variables; literal names, not required by generate.
   optionalEnv?: string[];
   env?: EnvOption | EnvOption[];
   // Per-process; serverless instances do not share counters.
@@ -236,8 +232,7 @@ export class FunctionRouter {
     this.server = undefined;
   }
 
-  // Route URLs: deployed URL in remote mode, else this server's.
-  // Path params stay as {placeholders}.
+  // Path params stay as {placeholders}; remote mode uses deployed URL.
   urls(): Record<string, string> {
     const remote = this.mode === "remote";
     const endpoints = remote ? this.loadEndpoints() : null;

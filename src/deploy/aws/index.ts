@@ -138,8 +138,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const statementId = (kind: string, principal: string) =>
     `cloudgear-${kind}-${createHash("sha256").update(principal).digest("hex").slice(0, 12)}`;
 
-  // Retries may meet existing statements; that is expected.
-  // "Update in progress" error must not be skipped.
+  // "Update in progress" errors must not be skipped.
   const addPermission = async (input: ConstructorParameters<typeof AddPermissionCommand>[0]) => {
     try {
       await lambda.send(new AddPermissionCommand(input));

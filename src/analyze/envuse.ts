@@ -42,9 +42,7 @@ const isGuardBranch = (statement: Node): boolean =>
   statement.getDescendantsOfKind(SyntaxKind.ThrowStatement).length > 0 ||
   statement.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => /^(process|Bun|Deno)\.exit$/.test(call.getExpression().getText()));
 
-// Reads that tolerate an unset variable: fallbacks, comparisons, checks.
-// Throwing or exiting checks mean the variable is required.
-// NaN is falsy; String(undefined) is truthy.
+// Tolerant reads: fallbacks, comparisons, checks; throwing checks require it.
 const NUMERIC = new Set(["Number", "parseInt", "parseFloat"]);
 
 function isOptionalRead(read: Node): boolean {
@@ -91,8 +89,7 @@ function isWrite(read: Node): boolean {
 
 const OBJECT_METHODS = new Set(["hasOwnProperty", "toString", "valueOf", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]);
 
-// Env reads reachable from the function through project imports.
-// Not followed: node_modules and dynamic imports.
+// Follows project imports only; not node_modules or dynamic imports.
 export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolean, relative: (file: string) => string): EnvUse {
   const variables = new Map<string, { required: boolean; files: Set<string> }>();
   const dynamic: string[] = [];

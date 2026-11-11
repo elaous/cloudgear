@@ -30,8 +30,7 @@ export interface Adopted {
 
 export type Drivers = Record<string, Driver>;
 
-// Thrown by create on partial failure; outputs are kept.
-// Next apply resumes through update(), not create().
+// Thrown by create on partial failure; next apply uses update().
 export class PartialApplyError extends Error {
   constructor(
     readonly original: unknown,

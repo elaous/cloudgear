@@ -51,6 +51,7 @@ export interface AttachedBehaviorSpec {
   path_pattern: string;
   // CloudFront CacheBehavior as JSON.
   behavior: string;
+  position?: number;
 }
 
 export interface AttachedOriginSpec {
@@ -309,7 +310,7 @@ function attachedFrom(message: Record<string, any>): { attached?: AttachedOrigin
         const parsed = json(text, `behavior "${path_pattern}"`);
         if (parsed.PathPattern !== path_pattern) throw new Error(`cloudgear config: attached origin "${id}": behavior "${path_pattern}" has another PathPattern in its JSON`);
         if (parsed.TargetOriginId !== id) throw new Error(`cloudgear config: attached origin "${id}": behavior "${path_pattern}" targets another origin`);
-        return { path_pattern, behavior: text };
+        return { path_pattern, behavior: text, ...(b.position !== undefined ? { position: Number(b.position) } : {}) };
       });
       return { id, origin, behavior };
     }),

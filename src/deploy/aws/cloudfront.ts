@@ -490,14 +490,14 @@ export function attachedOf(config: Record<string, any>, spec: CdnComparable): At
   const ownPatterns = new Set((spec.behaviors ?? []).map((b) => b.pattern));
   const origins = new Map<string, Record<string, any>>((config.Origins?.Items ?? []).map((o: Record<string, any>) => [o.Id, o]));
   const kept = new Map<string, AttachedOriginSpec>();
-  for (const behavior of (config.CacheBehaviors?.Items ?? []) as Record<string, any>[]) {
+  ((config.CacheBehaviors?.Items ?? []) as Record<string, any>[]).forEach((behavior, index) => {
     const target = behavior.TargetOriginId as string;
     const origin = origins.get(target);
-    if (!origin || OWN_ORIGIN.test(target) || ownPatterns.has(behavior.PathPattern)) continue;
+    if (!origin || OWN_ORIGIN.test(target) || ownPatterns.has(behavior.PathPattern)) return;
     const item = kept.get(target) ?? { id: target, origin: JSON.stringify(origin), behavior: [] };
-    item.behavior.push({ path_pattern: behavior.PathPattern, behavior: JSON.stringify(behavior) });
+    item.behavior.push({ path_pattern: behavior.PathPattern, behavior: JSON.stringify(behavior), position: index });
     kept.set(target, item);
-  }
+  });
   return [...kept.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -543,7 +543,10 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     AllowedMethods: { ...methodList(allowedMethods(behavior.methods)), CachedMethods: methodList(["GET", "HEAD"]) },
     ...toFunction,
   }));
-  const attachedBehaviors = (spec.attached ?? []).flatMap((item) => item.behavior.map((b) => JSON.parse(b.behavior)));
+  const attachedBehaviors = (spec.attached ?? [])
+    .flatMap((item) => item.behavior)
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map((b) => JSON.parse(b.behavior));
   behaviors.push(...attachedBehaviors);
 
   const defaultBehavior = spec.bucket

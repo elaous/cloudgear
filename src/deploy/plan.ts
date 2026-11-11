@@ -50,6 +50,8 @@ export interface EventRuleComparable {
   function_key: string;
 }
 
+const globMatches = (glob: string, text: string): boolean => new RegExp(`^${glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\?/g, ".")).join(".*")}$`).test(text);
+
 const OWN_ORIGIN = /^(cloudgear-site|cloudgear-fn-)/;
 
 function attachedSpec(attached: AttachedOriginSpec[] | undefined, domain: string, ownPatterns: string[]): { attached?: AttachedOriginSpec[] } {
@@ -61,6 +63,8 @@ function attachedSpec(attached: AttachedOriginSpec[] | undefined, domain: string
     if (ids.has(origin.id)) throw new Error(`cloudgear config: ${domain}: the attached origin "${origin.id}" is listed twice`);
     ids.add(origin.id);
     for (const { path_pattern } of origin.behavior) {
+      const shadow = ownPatterns.find((own) => own !== path_pattern && globMatches(own, path_pattern));
+      if (shadow) throw new Error(`cloudgear config: ${domain}: the path pattern "${path_pattern}" of the attached origin "${origin.id}" is shadowed by "${shadow}", which cloudgear matches first`);
       if (patterns.has(path_pattern)) throw new Error(`cloudgear config: ${domain}: the path pattern "${path_pattern}" of the attached origin "${origin.id}" is already used`);
       patterns.add(path_pattern);
     }

@@ -86,6 +86,8 @@ message AttachedOrigin {
 message AttachedBehavior {
   string path_pattern = 1;
   string behavior = 2;
+  // Place in the distribution's behavior list; lower is matched first.
+  int32 position = 3;
 }
 
 message Resource {

@@ -8,7 +8,7 @@ import { adoptEntries } from "../src/deploy/adopt";
 import { buildDistributionConfig, attachedOf } from "../src/deploy/aws/cloudfront";
 import { plan, type CdnComparable } from "../src/deploy/plan";
 import { configHash, envReportPath } from "../src/envreport";
-import { baseConfig, emptyState, fakeAws } from "./helpers";
+import { baseConfig, emptyState, fakeAws, fn } from "./helpers";
 
 const origin = { Id: "legacy-api", DomainName: "legacy.example.org", OriginPath: "", CustomOriginConfig: { HTTPPort: 80, HTTPSPort: 443, OriginProtocolPolicy: "https-only" } };
 const behavior = { PathPattern: "/legacy/*", TargetOriginId: "legacy-api", ViewerProtocolPolicy: "https-only", CachePolicyId: "abc" };
@@ -92,6 +92,33 @@ describe("attached origins", () => {
     expect(() => plan(withCdn([attached[0]!, second]), emptyState())).toThrow(/already used/);
   });
 
+  test("behaviors keep their order across origins", async () => {
+    const other = { ...origin, Id: "a-other" };
+    const behaviors = [
+      { PathPattern: "/api/v2/*", TargetOriginId: "legacy-api" },
+      { PathPattern: "/api/*", TargetOriginId: "a-other" },
+      { PathPattern: "/api/v2/x", TargetOriginId: "legacy-api" },
+    ];
+    const aws = fakeAws(existing([site, origin, other], behaviors));
+    const state = emptyState();
+    await adoptEntries(plan(withCdn(), state), state, aws.drivers, (a) => a.type === "@aws.CloudFront");
+    const entry = Object.values(state.entries).find((e) => e.type === "@aws.CloudFront")!;
+    const spec: CdnComparable = { domain: "www.example.com", dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", attached: (entry.spec as { attached: never }).attached };
+    const built = buildDistributionConfig(spec, { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true });
+    expect(built.CacheBehaviors!.Items!.map((b) => b.PathPattern)).toEqual(["/api/v2/*", "/api/*", "/api/v2/x"]);
+  });
+
+  test("an attached pattern that cloudgear's own pattern would shadow is refused", () => {
+    const shadowed = { id: "legacy-api", origin: JSON.stringify(origin), behavior: [{ path_pattern: "/api/internal/*", behavior: JSON.stringify({ ...behavior, PathPattern: "/api/internal/*" }) }] };
+    const config = baseConfig({
+      resource: [],
+      function: [fn({ permission: [], env: [], route: [{ name: "get", method: "GET", path: "/api/{id}" }] })],
+      certificate: [{ provider: "aws", domain: "api.example.com", dns: { ...dnsSpec, domain: "api.example.com" }, usage: "cdn" }],
+      api: { provider: "aws", domain: "api.example.com", via: "cloudfront", attached: [shadowed] },
+    });
+    expect(() => plan(config, emptyState())).toThrow(/shadowed by "\/api\/\*"/);
+  });
+
   describe("written to the config on import", () => {
     let dir: string | undefined;
     afterEach(() => dir && fs.rmSync(dir, { recursive: true, force: true }));
@@ -114,8 +141,8 @@ describe("attached origins", () => {
 
     test("the attached origins land in the config and the env report still matches it", async () => {
       const file = setup(withCdn());
-      const messages = syncAttached(file, await imported());
-      expect(messages).toEqual([`www.example.com: kept 1 attached origin(s) in ${file}`]);
+      const sync = syncAttached(file, await imported());
+      expect(sync).toEqual({ written: [`www.example.com: kept 1 attached origin(s) in ${file}`], problems: [] });
       const written = fs.readFileSync(file, "utf8");
       expect(decodeConfig(written).cdn[0]!.attached![0]!.id).toBe("legacy-api");
       expect(JSON.parse(fs.readFileSync(envReportPath(file), "utf8")).config).toBe(configHash(written));
@@ -126,8 +153,24 @@ describe("attached origins", () => {
       const mine = [{ id: "mine", origin: JSON.stringify({ ...origin, Id: "mine" }), behavior: [] }];
       const file = setup(withCdn(mine));
       const before = fs.readFileSync(file, "utf8");
-      expect(syncAttached(file, await imported())).toEqual([]);
+      const sync = syncAttached(file, await imported());
+      expect(sync.written).toEqual([]);
+      expect(sync.problems.join("\n")).toMatch(/legacy-api will be removed by apply/);
       expect(fs.readFileSync(file, "utf8")).toBe(before);
+    });
+
+    test("a config laid out by hand is reported, not silently left to lose the origins", async () => {
+      const file = setup(withCdn());
+      fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("cdn {", "cdn{"));
+      const sync = syncAttached(file, await imported());
+      expect(sync.written).toEqual([]);
+      expect(sync.problems.join("\n")).toMatch(/could not be added .* not in the generated layout/);
+    });
+
+    test("an unreadable config is reported too", async () => {
+      const file = setup(withCdn());
+      fs.writeFileSync(file, "cdn {");
+      expect((syncAttached(file, await imported())).problems.join("\n")).toMatch(/could not be read/);
     });
   });
 });

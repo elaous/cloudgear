@@ -229,7 +229,9 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const previous = previousAttached(options.configPath);
   for (const cdn of config.cdn) if (previous.get(cdn.domain)?.length) cdn.attached = previous.get(cdn.domain);
-  if (config.api && previous.get(config.api.domain)?.length) config.api.attached = previous.get(config.api.domain);
+  if (config.api?.via === "cloudfront" && previous.get(config.api.domain)?.length) config.api.attached = previous.get(config.api.domain);
+  const carried = new Set([...config.cdn.filter((c) => c.attached?.length).map((c) => c.domain), ...(config.api?.attached?.length ? [config.api.domain] : [])]);
+  for (const domain of previous.keys()) if (!carried.has(domain)) warnings.push(`the attached origins of ${domain} were dropped: it is no longer a CDN here`);
   const configText = encodeConfig(config);
   const report: EnvReport = { version: 1, config: configHash(configText), functions: {} };
   for (const name of model.optionalEnv) {

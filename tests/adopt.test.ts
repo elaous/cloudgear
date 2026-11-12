@@ -817,10 +817,22 @@ describe("an issued certificate needs nothing more", () => {
     const aws = fakeAws(listed("ISSUED"), null);
     const state = emptyState();
     await adoptEntries(plan(config(), state), state, aws.drivers, () => true);
-    await apply(plan(config(), state), state, aws.drivers, { save: () => {} });
+    expect(plan(config(), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+    const moved = baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: { ...dnsSpec, zone: "other.example.com" }, usage: "cdn" }] });
+    await apply(plan(moved, state), state, aws.drivers, { save: () => {} });
     expect(aws.of("RequestCertificateCommand")).toEqual([]);
     expect(aws.logs.some((l) => /is issued; nothing to do/.test(l))).toBe(true);
-    expect(plan(config(), state).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+  });
+
+  test("an imported, issued certificate that matches the config shows no update, but a different key algorithm still does", async () => {
+    const aws = fakeAws({ ...listed("ISSUED"), ListCertificatesCommand: () => ({ CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c", Status: "ISSUED", Type: "AMAZON_ISSUED", KeyAlgorithm: "EC_prime256v1" }] }) }, null);
+    const differing = emptyState();
+    await adoptEntries(plan(config(), differing), differing, aws.drivers, () => true);
+    expect(plan(config(), differing).find((a) => a.type === "@aws.Certificate")!.op).toBe("update");
+    const ec = baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn", options: { key_algorithm: "EC_prime256v1" } }] });
+    const matching = emptyState();
+    await adoptEntries(plan(ec, matching), matching, aws.drivers, () => true);
+    expect(plan(ec, matching).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
   });
 
   test("one still waiting for validation is validated as before", async () => {

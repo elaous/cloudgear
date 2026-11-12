@@ -111,10 +111,12 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       if (matches.length > 1) notes.push(`${matches.length} certificates exist for ${spec.domain}; using ${chosen.CertificateArn}${issued.length ? ", the issued one that expires last" : ""}`);
       const external = chosen.Type !== undefined && chosen.Type !== "AMAZON_ISSUED";
       if (external) notes.push(`it is an ${chosen.Type} certificate, not one ACM validates by DNS; cloudgear will use it as it is`);
-      const algorithm = chosen.KeyAlgorithm;
+      const actual = chosen.KeyAlgorithm ?? "RSA_2048";
+      const wanted = spec.options?.key_algorithm ?? "RSA_2048";
       return {
         outputs: { arn: chosen.CertificateArn, ...(external ? { validated: "externally" } : {}) },
-        ...(algorithm && algorithm !== "RSA_2048" ? { spec: { options: { key_algorithm: algorithm } } } : {}),
+        // An issued certificate that matches is recorded as the config describes it: nothing left to update.
+        spec: actual === wanted && chosen.Status === "ISSUED" ? (entry.spec as Record<string, unknown>) : { options: { key_algorithm: actual } },
         notes,
       };
     },

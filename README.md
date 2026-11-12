@@ -760,7 +760,7 @@ new CDN("aws", cert, { bucket, options: { price_class: "PriceClass_100" } });
 | --- | --- |
 | `@aws.S3` | `versioning` (`true`, `false`) |
 | `@aws.Lambda` | `tracing` (`Active`, `PassThrough`), `ephemeral_storage_mb` (512 to 10240), `env.<NAME>` |
-| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`), `default_root_object`, `web_acl` (a WAFv2 web ACL ARN in `us-east-1`) |
+| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`), `default_root_object`, `web_acl` (`true` to keep the distribution's own, or a WAFv2 web ACL ARN in `us-east-1`) |
 | `@aws.Certificate` | `key_algorithm` (`RSA_2048`, `EC_prime256v1`, `EC_secp384r1`) |
 
 A function's options are the router's `functionOptions` overridden by its
@@ -1342,15 +1342,16 @@ cloudgear import --all                             # everything planned that alr
   again; remove it from `.cloudgear/state.json` and import it again to pick them
   up. The default behavior's origin is still replaced.
 - An existing distribution's web ACL (the `CreatedByCloudFront-...` one the console
-  adds, or your own) is kept by naming it in the CDN's options: `new CDN("aws", cert,
-  { bucket, options: { web_acl: "arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>" } })`.
-  The ARN MUST be a WAFv2 web ACL in `us-east-1` (the `aws` partition only). The
-  option works for a new distribution as well as an imported one, and in the
-  options of the CDN that serves the router. `import` prints the exact option for
-  the ACL it finds (not for a WAF Classic ACL, whose id is not an ARN and cannot
-  be kept). Without the option `apply` detaches the ACL, and removing the option
-  detaches it too. cloudgear does not create or change web ACLs; the ACL MUST be in
-  the account the distribution is in, and associating it may need
+  adds, or your own) is kept with `options: { web_acl: true }` on the CDN, for
+  example `new CDN("aws", cert, { bucket, options: { web_acl: true } })`; the
+  options of the CDN that serves the router take it too. `apply` then leaves
+  whatever ACL the distribution has (a WAFv2 ACL or a WAF Classic one) in place,
+  and `import` says which one it keeps. To name one instead, give its WAFv2 web ACL
+  ARN in `us-east-1` (the `aws` partition only): `web_acl: "arn:aws:wafv2:..."`;
+  that ACL is attached on create as well as on update. Without the option `apply`
+  detaches the ACL, and removing the option detaches it too. `true` on a new
+  distribution attaches nothing. cloudgear does not create or change web ACLs; the
+  ACL MUST be in the account the distribution is in, and associating it may need
   `wafv2:GetWebACL` and `wafv2:AssociateWebACL` (and `wafv2:DisassociateWebACL` to
   detach) next to the CloudFront permissions; an ACL the credentials cannot use
   fails `apply` with AWS's error.

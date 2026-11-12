@@ -32,7 +32,7 @@ describe("provider options in source", () => {
     });
     const edge = analyzeApp(fixture("edge.ts"));
     expect(edge.certificates[0]!.options).toEqual({ key_algorithm: "EC_prime256v1" });
-    expect(edge.cdns[0]!.options).toEqual({ price_class: "PriceClass_100", default_root_object: "home.html" });
+    expect(edge.cdns[0]!.options).toEqual({ price_class: "PriceClass_100", default_root_object: "home.html", web_acl: "true" });
   });
 
   test.each([
@@ -103,6 +103,7 @@ describe("option validation", () => {
     expect(check("@aws.CloudFront", { default_root_object: "docs/home.html" })).not.toThrow();
     const acl = "arn:aws:wafv2:us-east-1:920042984913:global/webacl/CreatedByCloudFront-eab45982/b576f740-7bb3-4e5f-849b-af9d3c2b0c27";
     expect(check("@aws.CloudFront", { web_acl: acl })).not.toThrow();
+    expect(check("@aws.CloudFront", { web_acl: "true" })).not.toThrow();
     for (const value of ["", "arn:aws:wafv2:eu-west-1:920042984913:regional/webacl/x/b576f740-7bb3-4e5f-849b-af9d3c2b0c27", "arn:aws:s3:::bucket", "web-acl", "arn:aws-cn:wafv2:us-east-1:920042984913:global/webacl/x/b576f740-7bb3-4e5f-849b-af9d3c2b0c27", "arn:aws:wafv2:us-east-1:920042984913:global/webacl/x/------------------------------------", " arn:aws:wafv2:us-east-1:920042984913:global/webacl/x/b576f740-7bb3-4e5f-849b-af9d3c2b0c27", "b576f740-7bb3-4e5f-849b-af9d3c2b0c27"]) {
       expect(check("@aws.CloudFront", { web_acl: value })).toThrow(/WAFv2 web ACL ARN in us-east-1/);
     }

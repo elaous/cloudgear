@@ -858,6 +858,19 @@ describe("a web ACL on a distribution", () => {
     expect(aws.of("CreateDistributionCommand")[0].DistributionConfig.WebACLId).toBe(acl);
   });
 
+  test("web_acl: true keeps whatever ACL the distribution has, and a classic id too", async () => {
+    const keep = cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, options: { web_acl: "true" } }] });
+    const state = emptyState();
+    const created = await applyAll(keep, state);
+    expect(created.of("CreateDistributionCommand")[0].DistributionConfig.WebACLId).toBeUndefined();
+    for (const [current, price_class] of [[acl, "PriceClass_100"], ["a1b2c3d4-0000-1111-2222-333344445555", "PriceClass_200"]] as const) {
+      const changed = cdnConfig({ cdn: [{ ...keep.cdn[0]!, options: { web_acl: "true", price_class } }] });
+      const aws = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: { CallerReference: "ref", WebACLId: current } }) });
+      await apply(plan(changed, state), state, aws.drivers, { save: () => {} });
+      expect(aws.of("UpdateDistributionCommand").at(-1).DistributionConfig.WebACLId).toBe(current);
+    }
+  });
+
   test("the router's distribution takes the option too, and a bad ARN there is refused", () => {
     const router = (web_acl: string) => baseConfig({
       resource: [],

@@ -325,13 +325,17 @@ describe("what an import records and warns about", () => {
     });
     const fresh = emptyState();
     const classicResult = await adoptEntries(plan(cdnConfig(), fresh), fresh, classic.drivers, only as never);
-    expect(classicResult.notes.join("\n")).toMatch(/not a WAFv2 web ACL ARN \(a WAF Classic ACL, for example\), which the web_acl option cannot keep/);
+    expect(classicResult.notes.join("\n")).toContain("options: { web_acl: true }");
     const without = emptyState();
     const warned = await adoptEntries(plan(cdnConfig(), without), without, aws.drivers, only as never);
-    expect(warned.notes.join("\n")).toContain(`options: { web_acl: "${acl}" }`);
+    expect(warned.notes.join("\n")).toContain("options: { web_acl: true }");
     const kept = emptyState();
     const quiet = await adoptEntries(plan(cdnConfig({ web_acl: acl }), kept), kept, aws.drivers, only as never);
     expect(quiet.notes.join("\n")).not.toMatch(/web ACL/);
+    const keeping = emptyState();
+    const keptNote = await adoptEntries(plan(cdnConfig({ web_acl: "true" }), keeping), keeping, aws.drivers, only as never);
+    expect(keptNote.notes.join("\n")).toContain(`its web ACL (${acl}) is kept`);
+    expect(keptNote.notes.join("\n")).not.toMatch(/detached/);
   });
 
   test("a bucket the credentials cannot read, or in another region, says so", async () => {

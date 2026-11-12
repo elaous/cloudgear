@@ -302,7 +302,7 @@ describe("what an import records and warns about", () => {
     const state = emptyState();
     const result = await adoptEntries(plan(config, state), state, aws.drivers, (a) => a.type === "@aws.CloudFront");
     const notes = result.notes.join("\n");
-    for (const part of [/web ACL/, /access logging/, /2 custom error/, /geo restriction/, /3 path behavior/, /2 origin/, /price class/]) expect(notes).toMatch(part);
+    for (const part of [/web ACL/, /access logging/, /2 custom error/, /geo restriction/, /3 path behavior/, /price class/]) expect(notes).toMatch(part);
   });
 
   test("a default root object that differs from the config's is warned about, and the warning goes away once it matches", async () => {

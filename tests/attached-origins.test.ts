@@ -48,8 +48,41 @@ describe("attached origins", () => {
     expect(JSON.parse(attached[0]!.behavior[0]!.behavior)).toEqual(behavior);
     const notes = result.notes.join("\n");
     expect(notes).toMatch(/1 other origin\(s\) \(legacy-api\) and 1 path behavior\(s\) are kept/);
-    expect(notes).toMatch(/1 origin\(s\) will be replaced/);
+    expect(notes).not.toMatch(/origin\(s\) will be replaced/);
     expect(notes).not.toMatch(/path behavior\(s\) will be replaced/);
+  });
+
+  test("an origin no behavior reaches is kept too, and the bucket's own origin is not", async () => {
+    const unused = { Id: "old-lambda", DomainName: "abc.lambda-url.us-east-1.on.aws", OriginPath: "/api/items" };
+    const aws = fakeAws(existing([site, unused], []));
+    const state = emptyState();
+    const result = await adoptEntries(plan(withCdn(), state), state, aws.drivers, (a) => a.type === "@aws.CloudFront");
+    const entry = Object.values(state.entries).find((e) => e.type === "@aws.CloudFront")!;
+    const attached = (entry.spec as { attached: ReturnType<typeof attachedOf> }).attached;
+    expect(attached.map((a) => [a.id, a.behavior.length])).toEqual([["old-lambda", 0]]);
+    expect(JSON.parse(attached[0]!.origin).OriginPath).toBe("/api/items");
+    expect(result.notes.join("\n")).toMatch(/1 other origin\(s\) \(old-lambda\) and 0 path behavior\(s\) are kept/);
+    expect(result.notes.join("\n")).not.toMatch(/will be replaced/);
+  });
+
+  test("the bucket's own origin is told apart by name, and kept when a path behavior of its own uses it", () => {
+    const spec = { bucket: "web" } as unknown as CdnComparable;
+    const origins = (...domains: string[]) => ({ Origins: { Items: domains.map((DomainName, i) => ({ Id: `o${i}`, DomainName })) } });
+    const ids = (config: Record<string, unknown>) => attachedOf(config, spec).map((a) => a.id);
+    expect(ids(origins("web.s3.us-east-1.amazonaws.com", "web.s3.amazonaws.com"))).toEqual([]);
+    expect(ids(origins("web.example.com.s3.us-east-1.amazonaws.com", "web.s3-website-us-east-1.amazonaws.com", "other.example.org"))).toEqual(["o0", "o1", "o2"]);
+    const used = { ...origins("web.s3.us-east-1.amazonaws.com", "web.s3.us-east-1.amazonaws.com"), CacheBehaviors: { Items: [{ PathPattern: "/img/*", TargetOriginId: "o1" }] } };
+    expect(attachedOf(used, spec).map((a) => [a.id, a.behavior.map((b) => b.path_pattern)])).toEqual([["o1", ["/img/*"]]]);
+  });
+
+  test("a router CDN keeps a live S3 origin, and cloudgear's own origins count as replaced", async () => {
+    const router = { bucket: "" } as unknown as CdnComparable;
+    expect(attachedOf({ Origins: { Items: [{ Id: "s3", DomainName: "x.s3.us-east-1.amazonaws.com" }] } }, router).map((a) => a.id)).toEqual(["s3"]);
+    const aws = fakeAws(existing([site, { Id: "cloudgear-fn-old", DomainName: "old.lambda-url.us-east-1.on.aws" }], [{ PathPattern: "/old", TargetOriginId: "cloudgear-fn-old" }]));
+    const state = emptyState();
+    const result = await adoptEntries(plan(withCdn(), state), state, aws.drivers, (a) => a.type === "@aws.CloudFront");
+    expect(result.notes.join("\n")).toMatch(/1 origin\(s\) will be replaced/);
+    expect(result.notes.join("\n")).toMatch(/1 path behavior\(s\) will be replaced/);
   });
 
   test("cloudgear's own origins and behaviors are never attached", () => {

@@ -988,6 +988,7 @@ describe("an imported distribution that already matches the config", () => {
     const bare = live();
     delete (bare as { PriceClass?: string }).PriceClass;
     delete (bare as { Logging?: unknown }).Logging;
+    Object.assign(bare, { ContinuousDeploymentPolicyId: "", Staging: false });
     const applying = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: bare }) });
     await apply(plan(config(options), state), state, applying.drivers, { save: () => {} });
     expect(applying.of("CreateOriginAccessControlCommand")).toEqual([]);
@@ -997,6 +998,7 @@ describe("an imported distribution that already matches the config", () => {
     expect(sent.Logging).toEqual({ Enabled: false, IncludeCookies: false, Bucket: "", Prefix: "" });
     expect(sent.Restrictions.GeoRestriction.RestrictionType).toBe("none");
     expect(sent.CustomErrorResponses).toEqual({ Quantity: 0 });
+    expect(sent).toMatchObject({ ContinuousDeploymentPolicyId: "", Staging: false });
     expect(aws.of("UpdateDistributionCommand")).toEqual([]);
   });
 

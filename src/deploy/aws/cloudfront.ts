@@ -284,7 +284,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       deps.log(`updating distribution ${outputs.id}`);
       const current = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: outputs.id }));
       await deps.cloudfront.send(
-        new UpdateDistributionCommand({ Id: outputs.id, IfMatch: current.ETag, DistributionConfig: config(current.DistributionConfig.CallerReference, true, current.DistributionConfig.WebACLId) }),
+        new UpdateDistributionCommand({ Id: outputs.id, IfMatch: current.ETag, DistributionConfig: { ...current.DistributionConfig, ...config(current.DistributionConfig.CallerReference, true, current.DistributionConfig.WebACLId) } }),
       );
     }
 
@@ -413,7 +413,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       const wanted = spec.options?.default_root_object ?? "index.html";
       if (live !== wanted) notes.push(`its default root object is ${live ? `"${live}"` : "empty"}; apply will set ${wanted ? `"${wanted}"` : "it empty"} unless the config sets options: { default_root_object: "${live}" } on this CDN`);
     }
-    if (!spec.bucket && config.DefaultRootObject) notes.push(`its default root object ("${config.DefaultRootObject}") will be removed; a router distribution has none`);
+    if (!spec.bucket && config.DefaultRootObject && config.DefaultRootObject !== (spec.options?.default_root_object ?? "")) notes.push(`its default root object ("${config.DefaultRootObject}") will be removed unless the config sets options: { default_root_object: "${config.DefaultRootObject}" }`);
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
     if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
     if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");
@@ -579,11 +579,22 @@ function managedView(config: Record<string, any>, siteId: string): unknown {
   };
 }
 
-function webAclOf(spec: CdnComparable, input: DistributionInputs): { WebACLId?: string } {
+// Always present: an empty id is how an update detaches the ACL.
+function webAclOf(spec: CdnComparable, input: DistributionInputs): { WebACLId: string } {
   const wanted = spec.options?.web_acl;
-  const id = wanted === "true" ? input.currentWebAcl : wanted;
-  return id ? { WebACLId: id } : {};
+  return { WebACLId: (wanted === "true" ? input.currentWebAcl : wanted) ?? "" };
 }
+
+// Members UpdateDistribution expects even when they are off; a console-made distribution returns them all.
+const ZERO_ORIGIN = { CustomHeaders: { Quantity: 0 }, OriginShield: { Enabled: false }, ConnectionAttempts: 3, ConnectionTimeout: 10 };
+const ZERO_BEHAVIOR = {
+  TrustedSigners: { Enabled: false, Quantity: 0 },
+  TrustedKeyGroups: { Enabled: false, Quantity: 0 },
+  LambdaFunctionAssociations: { Quantity: 0 },
+  FunctionAssociations: { Quantity: 0 },
+  SmoothStreaming: false,
+  FieldLevelEncryptionId: "",
+};
 
 export function buildDistributionConfig(spec: CdnComparable, input: DistributionInputs): DistributionConfig {
   const methodList = (items: string[]) => ({ Quantity: items.length, Items: items });
@@ -598,6 +609,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
           OriginPath: originPath,
           S3OriginConfig: { OriginAccessIdentity: "" },
           OriginAccessControlId: input.oacS3,
+          ...ZERO_ORIGIN,
         },
       ]
     : [];
@@ -612,6 +624,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
       OriginSslProtocols: { Quantity: 1, Items: ["TLSv1.2"] },
     },
     OriginAccessControlId: input.oacLambda,
+    ...ZERO_ORIGIN,
   }));
   const attachedOrigins = (spec.attached ?? []).map((item) => JSON.parse(item.origin));
   const origins = [...siteOrigins, ...functionOrigins, ...attachedOrigins];
@@ -628,6 +641,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     TargetOriginId: originIdOf(behavior.function),
     AllowedMethods: { ...methodList(allowedMethods(behavior.methods)), CachedMethods: methodList(["GET", "HEAD"]) },
     ViewerProtocolPolicy: viewerPolicy(allowedMethods(behavior.methods)),
+    ...ZERO_BEHAVIOR,
     ...toFunction,
   }));
   const attachedBehaviors = (spec.attached ?? [])
@@ -643,12 +657,14 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
         AllowedMethods: { ...methodList(["GET", "HEAD"]), CachedMethods: methodList(["GET", "HEAD"]) },
         CachePolicyId: CACHING_OPTIMIZED,
         Compress: true,
+        ...ZERO_BEHAVIOR,
       }
     : {
         // Unmatched paths reach the first function, which answers 404.
         TargetOriginId: originIdOf(functionOrigins.length ? [...originMap.keys()].sort()[0]! : ""),
         AllowedMethods: { ...methodList(ALL_METHODS), CachedMethods: methodList(["GET", "HEAD"]) },
         ViewerProtocolPolicy: viewerPolicy(ALL_METHODS),
+        ...ZERO_BEHAVIOR,
         ...toFunction,
         ...(input.routeFunctionArn
           ? { FunctionAssociations: { Quantity: 1, Items: [{ EventType: "viewer-request", FunctionARN: input.routeFunctionArn }] } }

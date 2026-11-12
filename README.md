@@ -1325,8 +1325,9 @@ cloudgear import --all                             # everything planned that alr
   certificate's region; an issued one wins over a pending one), CloudFront
   distributions (by alias hostname) and schedule rules (by name) are looked up
   in AWS and their ARNs, role, URL and ids recorded. They are managed from then
-  on: the next `cloudgear plan` shows them as updates, and `apply` brings them in
-  line with the config without creating them again. `destroy` deletes them,
+  on: the next `cloudgear plan` shows them as updates (except an issued
+  certificate that already matches the config, which has nothing to update), and
+  `apply` brings them in line with the config without creating them again. `destroy` deletes them,
   except a function's IAM role when cloudgear did not create it (an imported
   function may use a shared one); the inline policy cloudgear adds to that
   role is removed.

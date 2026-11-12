@@ -305,8 +305,9 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   }
 
   return {
-    async adopt(entry, _context, hint) {
+    async adopt(entry, context, hint) {
       const spec = entry.spec as unknown as CdnComparable;
+      const adoption = (base: { outputs: Record<string, string> }, result: { notes: string[]; spec?: Record<string, unknown>; outputs?: Record<string, string> }) => ({ outputs: { ...base.outputs, ...result.outputs }, notes: result.notes, ...(result.spec ? { spec: result.spec } : {}) });
       const found = (item: { Id: string; ARN: string; DomainName: string; Status?: string }) => ({
         outputs: { id: item.Id, arn: item.ARN, domain_name: item.DomainName, url: `https://${item.DomainName}`, status: item.Status === "Deployed" ? "Deployed" : "InProgress" },
       });
@@ -323,13 +324,13 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         const distribution = got.Distribution as { Id: string; ARN: string; DomainName: string; Status?: string; DistributionConfig?: { Aliases?: { Items?: string[] } } };
         const aliases = distribution.DistributionConfig?.Aliases?.Items ?? [];
         if (!aliases.includes(spec.domain)) throw new Error(`${hint.arn} does not answer to ${spec.domain} (its aliases: ${aliases.join(", ") || "none"})`);
-        return { ...found({ ...distribution, ARN: hint.arn }), ...(await overwritten(id, spec)) };
+        return adoption(found({ ...distribution, ARN: hint.arn }), await overwritten(id, spec, entry, context));
       }
       let marker: string | undefined;
       do {
         const list = await deps.cloudfront.send(new ListDistributionsCommand({ Marker: marker }));
         const item = (list.DistributionList?.Items ?? []).find((candidate: { Aliases?: { Items?: string[] } }) => candidate.Aliases?.Items?.includes(spec.domain));
-        if (item) return { ...found(item), ...(await overwritten(item.Id, spec)) };
+        if (item) return adoption(found(item), await overwritten(item.Id, spec, entry, context));
         marker = list.DistributionList?.IsTruncated ? list.DistributionList.NextMarker : undefined;
       } while (marker);
       return undefined;
@@ -388,10 +389,20 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   };
 
   // Apply rebuilds the config; these existing settings are dropped.
-  async function overwritten(id: string, spec: CdnComparable): Promise<{ notes: string[]; spec?: Record<string, unknown> }> {
+  async function overwritten(id: string, spec: CdnComparable, entry: { deps: string[]; spec: Record<string, unknown> }, context: DriverContext): Promise<{ notes: string[]; spec?: Record<string, unknown>; outputs?: Record<string, string> }> {
     const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
     const notes: string[] = [];
+    // The bucket's console-made access control is reused, and a distribution that already matches is left alone.
+    const site = spec.bucket ? ((config.Origins?.Items ?? []) as Record<string, any>[]).find((o) => isSiteOrigin(o, spec)) : undefined;
+    const reuse = site?.OriginAccessControlId ? { oac_s3: String(site.OriginAccessControlId) } : undefined;
+    const certificate = context.entry(stateKey({ type: "@aws.Certificate", name: spec.certificate_domain ?? spec.domain }))?.outputs.arn;
+    if (site && reuse && certificate && !attachedOf(config, spec).length) {
+      const built = buildDistributionConfig(spec, { certificateArn: certificate, region: spec.bucket_region || deps.region, oacS3: reuse.oac_s3, reference: "r", enabled: true, currentWebAcl: config.WebACLId });
+      if (JSON.stringify(managedView(config, site.Id)) === JSON.stringify(managedView(built as Record<string, any>, "cloudgear-site"))) {
+        return { notes: ["it already matches the config; apply has nothing to change"], spec: entry.spec, outputs: reuse };
+      }
+    }
     if (config.WebACLId && spec.options?.web_acl !== "true" && spec.options?.web_acl !== config.WebACLId) {
       notes.push(`its web ACL (${config.WebACLId}) will be detached unless the config sets webAcl: true on this CDN to keep it`);
     }
@@ -412,7 +423,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     if (droppedBehaviors > 0) notes.push(`its ${droppedBehaviors} path behavior(s) will be replaced by the ones from the config`);
     if (droppedOrigins > 0) notes.push(`its ${droppedOrigins} origin(s) will be replaced by the ones from the config`);
     if (config.PriceClass && config.PriceClass !== "PriceClass_All") notes.push(`its price class (${config.PriceClass}) will be reset unless the config sets price_class`);
-    return { notes, ...(attached.length ? { spec: { attached } } : {}) };
+    return { notes, ...(attached.length ? { spec: { attached } } : {}), ...(reuse ? { outputs: reuse } : {}) };
   }
 
   async function removeDistribution(id: string) {
@@ -511,6 +522,40 @@ export function attachedOf(config: Record<string, any>, spec: CdnComparable): At
     item.behavior.push({ path_pattern: behavior.PathPattern, behavior: JSON.stringify(behavior), position: index });
   });
   return [...kept.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// What cloudgear decides about a distribution; the comment and HTTP version are left out.
+function managedView(config: Record<string, any>, siteId: string): unknown {
+  const sorted = (items?: string[]) => [...(items ?? [])].sort();
+  const behavior = (b: Record<string, any> | undefined) => ({
+    path: b?.PathPattern ?? "",
+    target: b?.TargetOriginId === siteId ? "site" : (b?.TargetOriginId ?? ""),
+    viewer: b?.ViewerProtocolPolicy ?? "",
+    methods: sorted(b?.AllowedMethods?.Items),
+    cached: sorted(b?.AllowedMethods?.CachedMethods?.Items),
+    cachePolicy: b?.CachePolicyId ?? "",
+    requestPolicy: b?.OriginRequestPolicyId ?? "",
+    compress: !!b?.Compress,
+    functions: b?.FunctionAssociations?.Quantity ?? 0,
+    lambdas: b?.LambdaFunctionAssociations?.Quantity ?? 0,
+  });
+  return {
+    aliases: sorted(config.Aliases?.Items),
+    root: config.DefaultRootObject ?? "",
+    price: config.PriceClass ?? "PriceClass_All",
+    acl: config.WebACLId ?? "",
+    ipv6: !!config.IsIPV6Enabled,
+    enabled: config.Enabled !== false,
+    origins: ((config.Origins?.Items ?? []) as Record<string, any>[])
+      .map((o) => ({ id: o.Id === siteId ? "site" : o.Id, domain: o.DomainName, path: o.OriginPath ?? "", oac: o.OriginAccessControlId ?? "", s3: !!o.S3OriginConfig }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    default: behavior(config.DefaultCacheBehavior),
+    behaviors: ((config.CacheBehaviors?.Items ?? []) as Record<string, any>[]).map(behavior),
+    certificate: { arn: config.ViewerCertificate?.ACMCertificateArn ?? "", method: config.ViewerCertificate?.SSLSupportMethod ?? "", minimum: config.ViewerCertificate?.MinimumProtocolVersion ?? "" },
+    logging: !!config.Logging?.Enabled,
+    errors: config.CustomErrorResponses?.Quantity ?? 0,
+    geo: config.Restrictions?.GeoRestriction?.RestrictionType ?? "none",
+  };
 }
 
 function webAclOf(spec: CdnComparable, input: DistributionInputs): { WebACLId?: string } {

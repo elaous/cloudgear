@@ -1327,11 +1327,19 @@ cloudgear import --all                             # everything planned that alr
   distributions (by alias hostname) and schedule rules (by name) are looked up
   in AWS and their ARNs, role, URL and ids recorded. They are managed from then
   on: the next `cloudgear plan` shows them as updates (except an issued
-  certificate that already matches the config, which has nothing to update), and
+  certificate, or a distribution that serves a bucket, that already matches the config,
+  which have nothing to update), and
   `apply` brings them in line with the config without creating them again. `destroy` deletes them,
   except a function's IAM role when cloudgear did not create it (an imported
   function may use a shared one); the inline policy cloudgear adds to that
   role is removed.
+- `import` compares an imported bucket distribution with what `apply` would build
+  (aliases, certificate, the bucket origin, default behavior, root object, price
+  class, web ACL, logging, custom errors, geo restriction; not the comment or the HTTP
+  version). If they match, it is recorded as up to date and `plan` shows no change; the
+  access control the console made for the bucket origin is reused instead of a new
+  one. Otherwise it plans as an update, which `apply` runs in place. A distribution
+  with other origins, and the router's, are always updates.
 - Every other origin of an imported distribution (all but the bucket's own and
   cloudgear's, with the path behaviors that reach them, if any) is kept without anything in the TypeScript setup.
   `import` writes them into `cloudgear.prototxt` as `attached` blocks of that

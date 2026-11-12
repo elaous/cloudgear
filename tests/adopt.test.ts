@@ -928,3 +928,119 @@ describe("exporting a bucket's policy", () => {
     expect(aws.of("GetBucketPolicyCommand")).toEqual([]);
   });
 });
+
+describe("an imported distribution that already matches the config", () => {
+  const dnsSpec = { provider: "gandi", domain: "www.example.com", zone: "example.com" };
+  const certArn = "arn:aws:acm:us-east-1:1:certificate/c";
+  const live = (overrides: Record<string, unknown> = {}) => ({
+    CallerReference: "ref",
+    Origins: { Quantity: 1, Items: [{ Id: "my-web.s3.us-east-1.amazonaws.com-x1", DomainName: "my-web.s3.us-east-1.amazonaws.com", OriginPath: "", S3OriginConfig: { OriginAccessIdentity: "" }, OriginAccessControlId: "CONSOLE-OAC" }] },
+    DefaultCacheBehavior: { TargetOriginId: "my-web.s3.us-east-1.amazonaws.com-x1", ViewerProtocolPolicy: "redirect-to-https", AllowedMethods: { Quantity: 2, Items: ["HEAD", "GET"], CachedMethods: { Quantity: 2, Items: ["HEAD", "GET"] } }, Compress: true, CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6", FunctionAssociations: { Quantity: 0 } },
+    Comment: "made in the console",
+    Enabled: true,
+    Aliases: { Quantity: 1, Items: ["www.example.com"] },
+    DefaultRootObject: "",
+    CacheBehaviors: { Quantity: 0 },
+    CustomErrorResponses: { Quantity: 0 },
+    Logging: { Enabled: false },
+    PriceClass: "PriceClass_All",
+    ViewerCertificate: { ACMCertificateArn: certArn, SSLSupportMethod: "sni-only", MinimumProtocolVersion: "TLSv1.2_2021" },
+    Restrictions: { GeoRestriction: { RestrictionType: "none" } },
+    WebACLId: "a1b2c3d4-0000-1111-2222-333344445555",
+    HttpVersion: "http2",
+    IsIPV6Enabled: true,
+    ...overrides,
+  });
+  const config = (options: Record<string, string>) =>
+    baseConfig({
+      resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1", region: "us-east-1" }],
+      function: [],
+      certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }],
+      cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "", options }],
+    });
+  const clients = (distribution: Record<string, unknown>) => ({
+    ListCertificatesCommand: () => ({ CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: certArn, Status: "ISSUED", Type: "AMAZON_ISSUED", KeyAlgorithm: "RSA-2048" }] }),
+    DescribeCertificateCommand: () => ({ Certificate: { DomainName: "www.example.com", Status: "ISSUED" } }),
+    HeadBucketCommand: () => ({}),
+    ListDistributionsCommand: () => ({ DistributionList: { Items: [{ Id: "E1", ARN: "arn", DomainName: "d1.cloudfront.net", Status: "Deployed", Aliases: { Items: ["www.example.com"] } }] } }),
+    GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: distribution }),
+  });
+  const importAll = async (options: Record<string, string>, distribution: Record<string, unknown>) => {
+    const aws = fakeAws(clients(distribution));
+    const state = emptyState();
+    const result = await adoptEntries(plan(config(options), state), state, aws.drivers, () => true);
+    return { aws, state, result };
+  };
+  const cloudfront = (ops: ReturnType<typeof plan>) => ops.find((a) => a.type === "@aws.CloudFront")!.op;
+
+  test("it plans as no change, and says so", async () => {
+    const options = { default_root_object: "", web_acl: "true" };
+    const { state, result } = await importAll(options, live());
+    expect(cloudfront(plan(config(options), state))).toBe("noop");
+    expect(result.notes.join("\n")).toContain("it already matches the config; apply has nothing to change");
+    expect(Object.values(state.entries).find((e) => e.type === "@aws.CloudFront")!.outputs.oac_s3).toBe("CONSOLE-OAC");
+  });
+
+  test("a different setting still plans as an update, and apply keeps the console's access control", async () => {
+    const options = { default_root_object: "", web_acl: "true", price_class: "PriceClass_100" };
+    const { aws, state } = await importAll(options, live());
+    expect(cloudfront(plan(config(options), state))).toBe("update");
+    const applying = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: live() }) });
+    await apply(plan(config(options), state), state, applying.drivers, { save: () => {} });
+    expect(applying.of("CreateOriginAccessControlCommand")).toEqual([]);
+    const sent = applying.of("UpdateDistributionCommand").at(-1).DistributionConfig;
+    expect(sent.Origins.Items[0].OriginAccessControlId).toBe("CONSOLE-OAC");
+    expect(sent.PriceClass).toBe("PriceClass_100");
+    expect(aws.of("UpdateDistributionCommand")).toEqual([]);
+  });
+
+  test("a web ACL the config does not keep, or a different root object, means an update", async () => {
+    const withoutAcl = await importAll({ default_root_object: "" }, live());
+    expect(cloudfront(plan(config({ default_root_object: "" }), withoutAcl.state))).toBe("update");
+    const rooted = await importAll({ web_acl: "true" }, live());
+    expect(cloudfront(plan(config({ web_acl: "true" }), rooted.state))).toBe("update");
+  });
+
+  test("settings the config cannot express make it an update, so apply's warnings still apply", async () => {
+    const options = { default_root_object: "", web_acl: "true" };
+    const withPolicy = live();
+    (withPolicy.DefaultCacheBehavior as Record<string, unknown>).ResponseHeadersPolicyId = "security-headers";
+    const policy = await importAll(options, withPolicy);
+    expect(cloudfront(plan(config(options), policy.state))).toBe("update");
+    const private_ = live();
+    (private_.DefaultCacheBehavior as Record<string, unknown>).TrustedKeyGroups = { Enabled: true, Quantity: 1, Items: ["kg"] };
+    const keyed = await importAll(options, private_);
+    expect(cloudfront(plan(config(options), keyed.state))).toBe("update");
+    const shielded = live();
+    (shielded.Origins as { Items: Record<string, unknown>[] }).Items[0]!.OriginShield = { Enabled: true, OriginShieldRegion: "us-east-1" };
+    const shield = await importAll(options, shielded);
+    expect(cloudfront(plan(config(options), shield.state))).toBe("update");
+  });
+
+  test("without its certificate in state it is not matched, and an access control it found is not deleted on destroy", async () => {
+    const options = { default_root_object: "", web_acl: "true" };
+    const aws = fakeAws(clients(live()));
+    const alone = emptyState();
+    await adoptEntries(plan(config(options), alone), alone, aws.drivers, (a) => a.type === "@aws.CloudFront");
+    expect(cloudfront(plan(config(options), alone))).toBe("update");
+    const { state, aws: imported } = await importAll(options, live());
+    const gone = await (async () => {
+      const destroying = fakeAws({ GetDistributionConfigCommand: () => { throw Object.assign(new Error("gone"), { name: "NoSuchDistribution" }); } });
+      await apply(plan({ ...config(options), resource: [], cdn: [], certificate: [] }, state), state, destroying.drivers, { save: () => {} });
+      return destroying;
+    })();
+    expect(Object.values(state.entries).some((e) => e.type === "@aws.CloudFront")).toBe(false);
+    expect(gone.of("DeleteOriginAccessControlCommand")).toEqual([]);
+    expect(imported.of("CreateOriginAccessControlCommand")).toEqual([]);
+  });
+
+  test("a distribution with other origins is not treated as matching", async () => {
+    const options = { default_root_object: "", web_acl: "true" };
+    const extra = { Id: "legacy", DomainName: "legacy.example.org" };
+    const distribution = live();
+    (distribution.Origins as { Items: unknown[]; Quantity: number }).Items.push(extra);
+    (distribution.Origins as { Quantity: number }).Quantity = 2;
+    const { state } = await importAll(options, distribution);
+    expect(cloudfront(plan(config(options), state))).toBe("update");
+  });
+});

@@ -21,6 +21,7 @@ import { planPolicyFiles, writePolicyFiles } from "./policyfiles";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
 import { syncAttached } from "./attached";
+import { dumpDistributions } from "./dumpdistributions";
 import { checkDns, formatDnsCheck, systemLookup } from "./dnscheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
 
@@ -34,6 +35,8 @@ Commands:
   import <name> [physical-id]  Adopt an existing bucket, function, certificate, distribution or schedule into state
   import <type> <name>         The same, when several things share a name (for example @aws.Certificate www.example.com)
   import --all                 Adopt everything planned that already exists; the rest is created by apply
+  dump-distributions [domain...] [--dir <dir>] [--all]
+                               Write each distribution's live CloudFront config as JSON (default: the config's CDNs)
   invalidate [path...] [--domain <cdn>]  Clear a CDN's cache (default: everything)
   destroy [--auto-approve]     Delete every managed resource (imported buckets are only forgotten)
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
@@ -50,6 +53,7 @@ Options:
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
   --tag <key=value>  Extra tag on created resources, repeatable (apply only)
+  --dir <dir>        Where dump-distributions writes (default: .cloudgear/distributions)
   --domain <domain>  Which CDN to invalidate when the app has several
   --write-policies <dir>  Also write the IAM policies of imported functions' roles there as JSON (import only)
   --arn <arn>        Import exactly this certificate, distribution, function, rule or bucket (import only)
@@ -89,6 +93,7 @@ async function main() {
       "skip-dns-check": { type: "boolean", default: false },
       "dns-server": { type: "string" },
       domain: { type: "string" },
+      dir: { type: "string" },
       arn: { type: "string" },
       "write-policies": { type: "string" },
       path: { type: "string" },
@@ -209,6 +214,17 @@ async function main() {
         return;
       }
       writeEndpoints(config, state, workDir);
+      return;
+    }
+    case "dump-distributions": {
+      const config = readConfig(configPath);
+      const domains = args.length ? args : [...config.cdn.map((c) => c.domain), ...(config.api?.via === "cloudfront" ? [config.api.domain] : [])];
+      if (!values.all && !domains.length) throw new Error("Name the domains to dump, or pass --all; the config has no CDN");
+      const dir = values.dir ? path.resolve(values.dir) : path.join(workDir, "distributions");
+      const dumped = await dumpDistributions(new CloudFrontClient({ region: "us-east-1" }), values.all ? "all" : domains, dir);
+      for (const file of dumped.written) console.log(`cloudgear: wrote ${path.relative(process.cwd(), file)}`);
+      for (const domain of dumped.missing) console.warn(`warning: no distribution answers to ${domain}`);
+      if (!dumped.written.length) throw new Error("No distribution was written");
       return;
     }
     case "invalidate": {

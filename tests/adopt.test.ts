@@ -856,6 +856,27 @@ describe("an issued certificate needs nothing more", () => {
     expect(plan(ec, matching).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
   });
 
+  test("ACM's dashed key algorithm names count as the config's underscored ones", async () => {
+    const dashed = (algorithm: string) => fakeAws({ ...listed("ISSUED"), ListCertificatesCommand: () => ({ CertificateSummaryList: [{ DomainName: "www.example.com", CertificateArn: "arn:aws:acm:us-east-1:1:certificate/c", Status: "ISSUED", Type: "AMAZON_ISSUED", KeyAlgorithm: algorithm }] }) }, null);
+    const rsa = emptyState();
+    await adoptEntries(plan(config(), rsa), rsa, dashed("RSA-2048").drivers, () => true);
+    expect(plan(config(), rsa).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+    const ec = baseConfig({ resource: [], function: [], certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn", options: { key_algorithm: "EC_prime256v1" } }] });
+    const ecState = emptyState();
+    await adoptEntries(plan(ec, ecState), ecState, dashed("EC-prime256v1").drivers, () => true);
+    expect(plan(ec, ecState).every((a) => a.op === "noop" || a.op === "dry")).toBe(true);
+  });
+
+  test("a certificate recorded with the dashed name still applies", async () => {
+    const aws = fakeAws(listed("ISSUED"), null);
+    const state = emptyState();
+    await adoptEntries(plan(config(), state), state, aws.drivers, () => true);
+    const entry = Object.values(state.entries).find((e) => e.type === "@aws.Certificate")!;
+    entry.spec = { options: { key_algorithm: "RSA-2048" } };
+    await apply(plan(config(), state), state, aws.drivers, { save: () => {} });
+    expect(aws.logs.some((l) => /is issued; nothing to do/.test(l))).toBe(true);
+  });
+
   test("one still waiting for validation is validated as before", async () => {
     const aws = fakeAws(listed("PENDING_VALIDATION"), null);
     const state = emptyState();

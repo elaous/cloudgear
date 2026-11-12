@@ -309,6 +309,7 @@ describe("analyzeApp", () => {
     expect(byName.raw).toEqual({ clients: ["delete", "list", "read", "write"] });
     expect(byName.narrowed).toEqual({ clients: ["read"] });
     expect(model.warnings).toHaveLength(1);
+    expect(model.warnings[0]).toMatch(/BlobStore "clients" uses its raw client\(\); granting every operation on it/);
   });
 
   test("warns when authenticate cannot reach functions because URLs are public", () => {

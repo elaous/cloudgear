@@ -638,7 +638,9 @@ calls the wrapper does not have, such as presigned URLs or multipart uploads. Th
 bucket is `store.location`, and with a `path` the key prefix is `store.path`: the client
 does not add either. cloudgear cannot see what a client does, so a function that calls
 `client()` is granted every access to the store, with a warning, unless `grant(store, ...)`
-narrows it. The in-memory driver has no client, and `client()` throws there.
+narrows it, and a method with a `@policy` cannot call it (the policy cannot bound the client).
+The in-memory driver has no client, and `client()` throws there. The `aws` types come from
+`@aws-sdk/client-s3`, which cloudgear installs.
 
 Deployed functions find the physical store through the env var
 `BlobStore.envVarFor(name)` (`CLOUDGEAR_BLOB_<NAME>`), which `cloudgear

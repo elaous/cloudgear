@@ -149,7 +149,7 @@ export class BlobStore<P extends BlobProvider = BlobProvider> {
   // analyzed: cloudgear grants every operation on the store unless `grant(store, ...)` narrows it.
   async client(): Promise<BlobClients[P]> {
     const driver = await this.driver();
-    if (driver.client === undefined) throw new Error(`The ${this.provider} blob driver in use has no client (it is the in-memory driver when CLOUDGEAR_BLOB_DRIVER=memory)`);
+    if (driver.client === undefined) throw new Error(`The ${this.provider} blob driver in use has no client (the in-memory driver, used when CLOUDGEAR_BLOB_DRIVER=memory, never has one)`);
     return driver.client as BlobClients[P];
   }
 

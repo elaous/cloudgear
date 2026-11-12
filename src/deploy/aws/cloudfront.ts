@@ -490,17 +490,22 @@ export function allowedMethods(methods: string[]): string[] {
 const OWN_ORIGIN = /^(cloudgear-site|cloudgear-fn-)/;
 
 // The origin cloudgear builds for the bucket; the console names it the same way.
-const isSiteOrigin = (origin: Record<string, any>, spec: CdnComparable): boolean => !!spec.bucket && String(origin.DomainName ?? "").startsWith(`${spec.bucket}.s3.`);
+const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const isSiteOrigin = (origin: Record<string, any>, spec: CdnComparable): boolean =>
+  !!spec.bucket && new RegExp(`^${escapeRegex(spec.bucket)}\\.s3[.-](?!website)`).test(String(origin.DomainName ?? ""));
 
 // Every origin cloudgear does not build, with the path behaviors that reach it.
 export function attachedOf(config: Record<string, any>, spec: CdnComparable): AttachedOriginSpec[] {
   const ownPatterns = new Set((spec.behaviors ?? []).map((b) => b.pattern));
+  const reached = (config.CacheBehaviors?.Items ?? []) as Record<string, any>[];
   const kept = new Map<string, AttachedOriginSpec>();
   for (const origin of (config.Origins?.Items ?? []) as Record<string, any>[]) {
-    if (OWN_ORIGIN.test(origin.Id) || isSiteOrigin(origin, spec)) continue;
+    if (OWN_ORIGIN.test(origin.Id)) continue;
+    // The bucket's own origin is rebuilt, unless a path behavior of its own uses it.
+    if (isSiteOrigin(origin, spec) && !reached.some((b) => b.TargetOriginId === origin.Id && !ownPatterns.has(b.PathPattern))) continue;
     kept.set(origin.Id, { id: origin.Id, origin: JSON.stringify(origin), behavior: [] });
   }
-  ((config.CacheBehaviors?.Items ?? []) as Record<string, any>[]).forEach((behavior, index) => {
+  reached.forEach((behavior, index) => {
     const item = kept.get(behavior.TargetOriginId);
     if (!item || ownPatterns.has(behavior.PathPattern)) return;
     item.behavior.push({ path_pattern: behavior.PathPattern, behavior: JSON.stringify(behavior), position: index });
@@ -548,13 +553,15 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
   const toFunction = {
     CachePolicyId: CACHING_DISABLED,
     OriginRequestPolicyId: ALL_VIEWER_EXCEPT_HOST,
-    ViewerProtocolPolicy: "redirect-to-https",
     Compress: true,
   };
+  // Behaviors that accept writes refuse plain http; read-only ones redirect to https.
+  const viewerPolicy = (methods: string[]) => (methods === ALL_METHODS ? "https-only" : "redirect-to-https");
   const behaviors = (spec.behaviors ?? []).map((behavior) => ({
     PathPattern: behavior.pattern,
     TargetOriginId: originIdOf(behavior.function),
     AllowedMethods: { ...methodList(allowedMethods(behavior.methods)), CachedMethods: methodList(["GET", "HEAD"]) },
+    ViewerProtocolPolicy: viewerPolicy(allowedMethods(behavior.methods)),
     ...toFunction,
   }));
   const attachedBehaviors = (spec.attached ?? [])
@@ -575,6 +582,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
         // Unmatched paths reach the first function, which answers 404.
         TargetOriginId: originIdOf(functionOrigins.length ? [...originMap.keys()].sort()[0]! : ""),
         AllowedMethods: { ...methodList(ALL_METHODS), CachedMethods: methodList(["GET", "HEAD"]) },
+        ViewerProtocolPolicy: viewerPolicy(ALL_METHODS),
         ...toFunction,
         ...(input.routeFunctionArn
           ? { FunctionAssociations: { Quantity: 1, Items: [{ EventType: "viewer-request", FunctionARN: input.routeFunctionArn }] } }

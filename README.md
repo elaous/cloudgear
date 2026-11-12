@@ -1344,7 +1344,7 @@ cloudgear import --all                             # everything planned that alr
   again; remove it from `.cloudgear/state.json` and import it again to pick them
   up. The default behavior itself is still rebuilt, so an origin only it used is
   kept but unused. Behaviors that send requests to functions redirect `http` to
-  `https` and set `Compress`, as the console does.
+  `https` when they only read (GET, HEAD), and refuse `http` when they accept writes.
 - An existing distribution's web ACL (the `CreatedByCloudFront-...` one the console
   adds, or your own) is kept with `webAcl: true` on the CDN, for
   example `new CDN("aws", cert, { bucket, webAcl: true })`; the CDN that serves

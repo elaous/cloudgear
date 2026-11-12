@@ -60,6 +60,8 @@ export interface CdnOptions {
   domain?: string;
   // Runs a CloudFront Function per request; literal only.
   methodRouting?: "function";
+  // `true` keeps the web ACL the distribution has; or a WAFv2 web ACL ARN in us-east-1. Literal only.
+  webAcl?: true | string;
   options?: ProviderOptions;
   driver?: CdnDriver;
 }

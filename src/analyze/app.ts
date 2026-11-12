@@ -1003,7 +1003,7 @@ export function analyzeApp(entryPath: string): AppModel {
         provider: "aws",
         domain: host,
         certificate: cdnCert.domain,
-        options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
+        options: readCdnOptions(optionsArg, `${at}: CDN`),
         bucket: bucketStore.resource.name,
         path: bucketStore.path,
       });
@@ -1115,7 +1115,7 @@ export function analyzeApp(entryPath: string): AppModel {
         ...(routerHost !== cert.domain ? { certificate: cert.domain } : {}),
         via: "cloudfront",
         ...(methodRouting === "function" && conflicts.length ? { method_routing: true } : {}),
-        options: readOptionsMap(optionsArg, "options", `${at}: CDN`),
+        options: readCdnOptions(optionsArg, `${at}: CDN`),
       };
     }
     return { certificates: [...certificates.values()], cdns, api };
@@ -1435,6 +1435,20 @@ function propName(prop: Node): string | undefined {
 
 function sameOptions(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
   return JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
+}
+
+// `webAcl: true` (keep the distribution's own) or a WAFv2 ARN is the typed form of options.web_acl.
+function readCdnOptions(optionsArg: Node | undefined, at: string): Record<string, string> | undefined {
+  const options = readOptionsMap(optionsArg, "options", at);
+  if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) return options;
+  const prop = optionsArg.getProperties().find((p) => propName(p) === "webAcl");
+  if (!prop) return options;
+  if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: webAcl must be true or a string literal`);
+  const value = prop.getInitializer();
+  const text = value?.getKind() === SyntaxKind.TrueKeyword ? "true" : value && (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) ? value.getLiteralValue() : undefined;
+  if (text === undefined) throw new Error(`${at}: webAcl must be true or a string literal, got: ${value?.getText()}`);
+  if (options?.web_acl !== undefined) throw new Error(`${at}: give webAcl or options.web_acl, not both`);
+  return { ...options, web_acl: text };
 }
 
 function readOptionsMap(options: Node | undefined, name: string, at: string): Record<string, string> | undefined {

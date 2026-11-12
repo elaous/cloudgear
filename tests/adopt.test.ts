@@ -325,10 +325,10 @@ describe("what an import records and warns about", () => {
     });
     const fresh = emptyState();
     const classicResult = await adoptEntries(plan(cdnConfig(), fresh), fresh, classic.drivers, only as never);
-    expect(classicResult.notes.join("\n")).toContain("options: { web_acl: true }");
+    expect(classicResult.notes.join("\n")).toContain("webAcl: true");
     const without = emptyState();
     const warned = await adoptEntries(plan(cdnConfig(), without), without, aws.drivers, only as never);
-    expect(warned.notes.join("\n")).toContain("options: { web_acl: true }");
+    expect(warned.notes.join("\n")).toContain("webAcl: true");
     const kept = emptyState();
     const quiet = await adoptEntries(plan(cdnConfig({ web_acl: acl }), kept), kept, aws.drivers, only as never);
     expect(quiet.notes.join("\n")).not.toMatch(/web ACL/);

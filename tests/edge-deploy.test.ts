@@ -627,6 +627,10 @@ describe("CloudFront configuration", () => {
     expect(config.Logging).toEqual({ Enabled: false, IncludeCookies: false, Bucket: "", Prefix: "" });
     expect(config.Restrictions).toEqual({ GeoRestriction: { RestrictionType: "none", Quantity: 0 } });
     expect(config.CustomErrorResponses).toEqual({ Quantity: 0 });
+    expect(config.OriginGroups).toEqual({ Quantity: 0 });
+    expect(config.DefaultRootObject).toBe("index.html");
+    const router: CdnComparable = { ...base, bucket: "", behaviors: [] };
+    expect(buildDistributionConfig(router, input).DefaultRootObject).toBe("");
     expect(buildDistributionConfig({ ...base, options: { price_class: "PriceClass_100" } }, input).PriceClass).toBe("PriceClass_100");
   });
 

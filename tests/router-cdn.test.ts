@@ -131,7 +131,7 @@ describe("applying a CDN that serves the router", () => {
       { Name: `cloudgear-${DOMAIN}-lambda`, OriginAccessControlOriginType: "lambda", SigningBehavior: "always", SigningProtocol: "sigv4" },
     ]);
     const config = aws.of("CreateDistributionCommand")[0].DistributionConfig;
-    expect(config.DefaultRootObject).toBeUndefined();
+    expect(config.DefaultRootObject).toBe("");
     expect(config.Origins.Items.map((o: any) => o.Id)).toEqual(["cloudgear-fn-app-item", "cloudgear-fn-app-items"]);
     expect(config.Origins.Items[0]).toMatchObject({
       DomainName: "app-item.lambda-url.eu-west-1.on.aws",

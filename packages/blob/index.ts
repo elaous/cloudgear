@@ -1,3 +1,4 @@
+import type { S3Client } from "@aws-sdk/client-s3";
 import { debug, timed } from "@cloudgear/debug";
 import {
   createBlobDriver,
@@ -9,6 +10,13 @@ import {
 
 export { registerBlobDriver, parseBlobUri, URI_SCHEMES } from "./driver";
 export type { BlobData, BlobDriver, BlobDriverFactory, BlobDriverOptions, BlobProvider } from "./driver";
+
+// The client `client()` returns for each provider.
+export interface BlobClients {
+  aws: S3Client;
+  gcp: unknown;
+  azure: unknown;
+}
 
 export type BlobAccess = "read" | "write" | "delete" | "list";
 
@@ -68,17 +76,18 @@ function withDebug(driver: BlobDriver, store: string): BlobDriver {
     delete: (key) => run("delete", key, () => driver.delete(key)),
     list: (prefix) => run("list", prefix, () => driver.list(prefix)),
     exists: (key) => run("exists", key, () => driver.exists(key)),
+    client: driver.client,
   };
 }
 
-export class BlobStore {
+export class BlobStore<P extends BlobProvider = BlobProvider> {
   readonly name: string;
   readonly path: string;
   readonly region: string | undefined;
   private driverPromise?: Promise<BlobDriver>;
 
   constructor(
-    readonly provider: BlobProvider,
+    readonly provider: P,
     uri: string,
     options: BlobStoreOptions = {},
   ) {
@@ -134,6 +143,14 @@ export class BlobStore {
 
   async delete(key: string): Promise<void> {
     return (await this.driver()).delete(this.path + key);
+  }
+
+  // The provider's own client, bound to this store's region. Calls made through it are not
+  // analyzed: cloudgear grants every operation on the store unless `grant(store, ...)` narrows it.
+  async client(): Promise<BlobClients[P]> {
+    const driver = await this.driver();
+    if (driver.client === undefined) throw new Error(`The ${this.provider} blob driver in use has no client (it is the in-memory driver when CLOUDGEAR_BLOB_DRIVER=memory)`);
+    return driver.client as BlobClients[P];
   }
 
   async list(prefix = ""): Promise<string[]> {

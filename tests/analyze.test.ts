@@ -303,6 +303,14 @@ describe("analyzeApp", () => {
     expect(model.warnings[0]).toMatch(/passed around as a value; granting every operation on it \(use grant/);
   });
 
+  test("client() grants every operation unless grant() narrows it", () => {
+    const model = analyzeApp(fixture("blob-client.ts"));
+    const byName = Object.fromEntries(model.functions.map((f) => [f.name, accesses(f.uses)]));
+    expect(byName.raw).toEqual({ clients: ["delete", "list", "read", "write"] });
+    expect(byName.narrowed).toEqual({ clients: ["read"] });
+    expect(model.warnings).toHaveLength(1);
+  });
+
   test("warns when authenticate cannot reach functions because URLs are public", () => {
     const model = analyzeApp(fixture("none-with-authenticate.ts"));
     expect(model.warnings).toEqual([

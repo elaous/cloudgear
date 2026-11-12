@@ -1396,6 +1396,8 @@ export function analyzeApp(entryPath: string): AppModel {
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === node) {
       const member = parent.getName();
       if (Object.hasOwn(BLOB_OPERATIONS, member)) return { ops: [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]] };
+      // The raw client can do anything, so it widens like passing the store around.
+      if (member === "client") return { widened: true };
       return {};
     }
     if (Node.isCallExpression(parent) && parent.getArguments()[0] === node && isGrantCall(parent)) {

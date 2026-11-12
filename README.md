@@ -632,6 +632,14 @@ only imports the SDK of the provider it uses. `aws` (`drivers/s3.ts`, needs
 provider: `s3`, `gs`, `az`). `CLOUDGEAR_BLOB_DRIVER=memory` swaps in an
 in-memory driver for local runs and tests.
 
+`await store.client()` returns the provider's own client for the store (an `S3Client`
+on `aws`, bound to the store's `region`, created on first use and then reused), for
+calls the wrapper does not have, such as presigned URLs or multipart uploads. The
+bucket is `store.location`, and with a `path` the key prefix is `store.path`: the client
+does not add either. cloudgear cannot see what a client does, so a function that calls
+`client()` is granted every access to the store, with a warning, unless `grant(store, ...)`
+narrows it. The in-memory driver has no client, and `client()` throws there.
+
 Deployed functions find the physical store through the env var
 `BlobStore.envVarFor(name)` (`CLOUDGEAR_BLOB_<NAME>`), which `cloudgear
 generate` writes into the config and `BlobStore.location` reads.

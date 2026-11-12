@@ -660,7 +660,11 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     Enabled: input.enabled,
     Aliases: { Quantity: 1, Items: [spec.domain] },
     ...(spec.bucket ? { DefaultRootObject: spec.options?.default_root_object ?? "index.html" } : {}),
-    ...(spec.options?.price_class ? { PriceClass: spec.options.price_class } : {}),
+    // UpdateDistribution refuses a config without these, so their defaults are sent explicitly.
+    PriceClass: spec.options?.price_class ?? "PriceClass_All",
+    Logging: { Enabled: false, IncludeCookies: false, Bucket: "", Prefix: "" },
+    Restrictions: { GeoRestriction: { RestrictionType: "none", Quantity: 0 } },
+    CustomErrorResponses: { Quantity: 0 },
     ...webAclOf(spec, input),
     HttpVersion: "http2and3",
     IsIPV6Enabled: true,

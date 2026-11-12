@@ -27,6 +27,9 @@ export function sameTarget(a: string | undefined, b: string | undefined): boolea
   return normalize(a) === normalize(b);
 }
 
+// ACM reports key algorithms with a dash (RSA-2048) but takes them with an underscore.
+const normalizeAlgorithm = (algorithm: string): string => algorithm.replace("-", "_");
+
 const KEY_TYPES = ["RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096", "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"];
 
 export function certificateDriver(deps: CertificateDeps): Driver {
@@ -111,7 +114,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       if (matches.length > 1) notes.push(`${matches.length} certificates exist for ${spec.domain}; using ${chosen.CertificateArn}${issued.length ? ", the issued one that expires last" : ""}`);
       const external = chosen.Type !== undefined && chosen.Type !== "AMAZON_ISSUED";
       if (external) notes.push(`it is an ${chosen.Type} certificate, not one ACM validates by DNS; cloudgear will use it as it is`);
-      const actual = chosen.KeyAlgorithm ?? "RSA_2048";
+      const actual = normalizeAlgorithm(chosen.KeyAlgorithm ?? "RSA_2048");
       const wanted = spec.options?.key_algorithm ?? "RSA_2048";
       return {
         outputs: { arn: chosen.CertificateArn, ...(external ? { validated: "externally" } : {}) },
@@ -149,7 +152,7 @@ export function certificateDriver(deps: CertificateDeps): Driver {
       if (regionOfArn(current.outputs.arn) !== wanted) {
         throw new Error(`Certificate ${entry.physical_name} cannot move from ${regionOfArn(current.outputs.arn)} to ${wanted}; destroy it and apply again`);
       }
-      const algorithm = (spec: Record<string, unknown>) => (spec.options as Record<string, string> | undefined)?.key_algorithm ?? "RSA_2048";
+      const algorithm = (spec: Record<string, unknown>) => normalizeAlgorithm((spec.options as Record<string, string> | undefined)?.key_algorithm ?? "RSA_2048");
       if (algorithm(current.spec) !== algorithm(entry.spec)) {
         throw new Error(`Certificate ${entry.physical_name} cannot change key_algorithm; destroy it and apply again`);
       }

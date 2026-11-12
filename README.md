@@ -69,7 +69,8 @@ Options (the command an option applies to is in parentheses):
 | `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
 | `--dns-server <ip>` | Resolver for the DNS check (`check-dns`, `apply`; default: the system's) |
 | `--domain <cdn domain>` | Which CDN to invalidate when the app has several (`invalidate`) |
-| `--arn <arn>`, `--all` | What `import` adopts (see `cloudgear import`) |
+| `--arn <arn>`, `--all` | What `import` adopts (see `cloudgear import`); with `dump-distributions`, `--all` means every distribution that has an alias |
+| `--dir <dir>` | Where `dump-distributions` writes, relative to the current directory (default `.cloudgear/distributions`) |
 | `--from-envfile <file>`, `--allow-unignored`, `--path <path>`, `--all` | Options of `secrets set` (see Secrets) |
 
 See `examples/router-app` for a complete app and `examples/cdn-app` for one with
@@ -1356,6 +1357,15 @@ cloudgear import --all                             # everything planned that alr
   `wafv2:GetWebACL` and `wafv2:AssociateWebACL` (and `wafv2:DisassociateWebACL` to
   detach) next to the CloudFront permissions; an ACL the credentials cannot use
   fails `apply` with AWS's error.
+- `cloudgear dump-distributions [domain...]` writes each distribution's live CloudFront
+  config as JSON, found by alias (default: the CDNs in the config; `--all`: every
+  distribution that has an alias, once each), to `.cloudgear/distributions/<domain>.json`.
+  It only reads, and needs `cloudfront:ListDistributions`, `cloudfront:GetDistribution`
+  and `cloudfront:GetDistributionConfig`. A named domain with no distribution is a warning
+  and a non-zero exit. The values of custom origin headers are replaced by `<redacted>`;
+  the rest is as CloudFront returns it (ARNs, account ids, the free-text comment), so
+  check it before sharing. `.cloudgear/` SHOULD be git-ignored, and so MUST any other
+  `--dir`.
 - **Read the warnings.** `apply` rebuilds an imported distribution's config from
   yours, so `import` lists what it would drop: a web ACL, access logging,
   custom error responses, a geo restriction, path behaviors and origins that are

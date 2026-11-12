@@ -7,6 +7,8 @@ export interface BlobDriver {
   delete(key: string): Promise<void>;
   list(prefix: string): Promise<string[]>;
   exists(key: string): Promise<boolean>;
+  // The provider's own client (an S3Client for aws), when the driver has one.
+  readonly client?: unknown;
 }
 
 export interface BlobDriverOptions {

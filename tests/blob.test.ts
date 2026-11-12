@@ -225,6 +225,31 @@ describe("BlobStore path prefix", () => {
   });
 });
 
+describe("BlobStore.client()", () => {
+  const original = process.env.CLOUDGEAR_BLOB_DRIVER;
+  afterEach(() => {
+    if (original === undefined) delete process.env.CLOUDGEAR_BLOB_DRIVER;
+    else process.env.CLOUDGEAR_BLOB_DRIVER = original;
+  });
+
+  test("returns the provider's own client, bound to the store's region", async () => {
+    delete process.env.CLOUDGEAR_BLOB_DRIVER;
+    const store = new BlobStore("aws", "://clients", { region: "eu-west-1" });
+    const client = await store.client();
+    expect(typeof client.send).toBe("function");
+    expect(await client.config.region()).toBe("eu-west-1");
+    expect(await store.client()).toBe(client);
+  });
+
+  test("a driver you pass in can carry a client, and one without says so", async () => {
+    const marker = { send: async () => ({}) };
+    const withClient = new BlobStore("aws", "://x", { driver: Object.assign(new MemoryBlobDriver(), { client: marker }) });
+    expect(await withClient.client()).toBe(marker as never);
+    process.env.CLOUDGEAR_BLOB_DRIVER = "memory";
+    await expect(new BlobStore("aws", "://y").client()).rejects.toThrow(/has no client/);
+  });
+});
+
 describe("S3BlobDriver", () => {
   const client = (respond: (name: string, input: any) => any) =>
     ({ send: async (command: any) => respond(command.constructor.name, command.input) }) as any;

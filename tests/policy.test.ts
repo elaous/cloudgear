@@ -80,6 +80,10 @@ describe("@policy on a static method of an exported class", () => {
     expect([...model.functions[0]!.uses.values()][0]!.accesses).toEqual(new Set(["read", "delete"]));
   });
 
+  test("a policy cannot guard the raw client either", () => {
+    expect(() => analyzeApp(fixture("client.ts"))).toThrow(/uses its raw client\(\), so the @policy of "Api-run" cannot guard it/);
+  });
+
   test("a store passed to a helper cannot be guarded by a policy, unless grant() states what it does", () => {
     expect(() => analyzeApp(fixture("widened.ts"))).toThrow(/passed around as a value, so the @policy of "Api-run" cannot guard it/);
     const model = analyzeApp(fixture("grant-inside.ts"));

@@ -1139,7 +1139,7 @@ export function analyzeApp(entryPath: string): AppModel {
         const isOperation =
           Node.isPropertyAccessExpression(parent) &&
           parent.getExpression() === ref &&
-          Object.hasOwn(BLOB_OPERATIONS, parent.getName());
+          (Object.hasOwn(BLOB_OPERATIONS, parent.getName()) || parent.getName() === "client");
         if (isOperation && !ref.getFirstAncestor((a) => Node.isFunctionLikeDeclaration(a) || Node.isClassDeclaration(a))) {
           warnings.push(
             `${where(ref)}: BlobStore "${resourceByDecl.get(decl)!.resource.name}" is used outside any function; no permission is inferred for it`,
@@ -1320,7 +1320,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const extra = [...(tally ? [...tally.ops, ...tally.grants] : [])].filter((access) => !allowed.has(access));
       if (tally?.widenedAt && tally.grants.size === 0) {
         throw new Error(
-          `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value, so the @policy of "${fn.name}" cannot guard it; call it directly or declare grant(store, ...)`,
+          `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" ${widenedHow(tally.widenedAt)}, so the @policy of "${fn.name}" cannot guard it; call it directly or declare grant(store, ...)`,
         );
       }
       if (tally && extra.length) {
@@ -1336,7 +1336,7 @@ export function analyzeApp(entryPath: string): AppModel {
       if (tally.widenedAt && tally.grants.size === 0) {
         accesses = new Set(ALL_ACCESS);
         warnings.push(
-          `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" is passed around as a value; granting every operation on it (use grant(store, ...) to narrow)`,
+          `${where(tally.widenedAt)}: BlobStore "${tally.store.resource.name}" ${widenedHow(tally.widenedAt)}; granting every operation on it (use grant(store, ...) to narrow)`,
         );
       }
       fn.uses.set(key, { resource: tally.store.resource.name, path: tally.store.path, accesses });
@@ -1388,6 +1388,11 @@ export function analyzeApp(entryPath: string): AppModel {
     throw new Error(`${at}: @policy permissions must be permissions.Get/Put/Delete/List from @cloudgear/blob, got: ${element.getText()}`);
   }
 
+  function widenedHow(node: Node): string {
+    const parent = node.getParent();
+    return Node.isPropertyAccessExpression(parent) && parent.getExpression() === node && parent.getName() === "client" ? "uses its raw client()" : "is passed around as a value";
+  }
+
   function accessesAt(start: Node): { ops?: BlobAccess[]; grants?: BlobAccess[]; widened?: true } {
     // Property access names the store; judge the whole expression.
     const owner = start.getParent();
@@ -1396,6 +1401,8 @@ export function analyzeApp(entryPath: string): AppModel {
     if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === node) {
       const member = parent.getName();
       if (Object.hasOwn(BLOB_OPERATIONS, member)) return { ops: [...BLOB_OPERATIONS[member as keyof typeof BLOB_OPERATIONS]] };
+      // The raw client can do anything, so it widens like passing the store around.
+      if (member === "client") return { widened: true };
       return {};
     }
     if (Node.isCallExpression(parent) && parent.getArguments()[0] === node && isGrantCall(parent)) {

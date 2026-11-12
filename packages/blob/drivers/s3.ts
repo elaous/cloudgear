@@ -11,7 +11,7 @@ import type { BlobDriver } from "../driver";
 export class S3BlobDriver implements BlobDriver {
   constructor(
     private readonly bucket: string,
-    private readonly client = new S3Client({}),
+    readonly client = new S3Client({}),
   ) {}
 
   async get(key: string) {

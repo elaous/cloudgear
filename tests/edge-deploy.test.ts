@@ -640,6 +640,23 @@ describe("CloudFront configuration", () => {
     expect(buildDistributionConfig({ ...base, options: { price_class: "PriceClass_100" } }, input).PriceClass).toBe("PriceClass_100");
   });
 
+  test("origins and behaviors carry every member CloudFront returns for them, as UpdateDistribution requires", () => {
+    const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", oacLambda: "oacl", reference: "ref", enabled: true };
+    const bucket: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "" };
+    const router: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "", bucket_region: "", path: "", behaviors: [{ pattern: "/x", methods: ["GET"], function: "f" }] };
+    const common = ["Id", "DomainName", "OriginPath", "CustomHeaders", "ConnectionAttempts", "ConnectionTimeout", "OriginShield", "OriginAccessControlId"];
+    const behavior = ["TargetOriginId", "ViewerProtocolPolicy", "TrustedSigners", "TrustedKeyGroups", "AllowedMethods", "SmoothStreaming", "Compress", "LambdaFunctionAssociations", "FunctionAssociations", "FieldLevelEncryptionId", "CachePolicyId", "GrpcConfig"];
+    const site = buildDistributionConfig(bucket, input);
+    expect(Object.keys(site.Origins!.Items![0]!)).toEqual(expect.arrayContaining([...common, "S3OriginConfig"]));
+    expect(site.Origins!.Items![0]!.S3OriginConfig).toEqual({ OriginAccessIdentity: "", OriginReadTimeout: 30 });
+    expect(Object.keys(site.DefaultCacheBehavior!)).toEqual(expect.arrayContaining(behavior));
+    const functions = buildDistributionConfig(router, { ...input, origins: new Map([["f", { physical: "f", host: "f.lambda-url.us-east-1.on.aws" }]]) as never });
+    expect(Object.keys(functions.Origins!.Items![0]!)).toEqual(expect.arrayContaining([...common, "CustomOriginConfig"]));
+    expect(Object.keys(functions.Origins!.Items![0]!.CustomOriginConfig!)).toEqual(expect.arrayContaining(["HTTPPort", "HTTPSPort", "OriginProtocolPolicy", "OriginSslProtocols", "OriginReadTimeout", "OriginKeepaliveTimeout", "IpAddressType"]));
+    expect(Object.keys(functions.DefaultCacheBehavior!)).toEqual(expect.arrayContaining(behavior));
+    expect(Object.keys(functions.CacheBehaviors!.Items![0]!)).toEqual(expect.arrayContaining([...behavior, "PathPattern"]));
+  });
+
   test("a web ACL given as an option is attached, and none is set when it is not", () => {
     const base: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "" };
     const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true };

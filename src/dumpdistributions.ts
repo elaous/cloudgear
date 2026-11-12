@@ -29,7 +29,15 @@ export async function dumpDistributions(client: SendClient, domains: string[] | 
     marker = page.DistributionList?.IsTruncated ? page.DistributionList.NextMarker : undefined;
   } while (marker);
 
-  const wanted = domains === "all" ? [...byAlias.keys()].sort() : domains;
+  const names = domains === "all" ? [...byAlias.keys()].sort() : domains.map((domain) => domain.toLowerCase());
+  const seen = new Set<string>();
+  const wanted = names.filter((name) => {
+    const id = byAlias.get(name);
+    const key = id ?? name;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const result: DumpResult = { written: [], missing: [] };
   fs.mkdirSync(dir, { recursive: true });
   for (const domain of wanted) {

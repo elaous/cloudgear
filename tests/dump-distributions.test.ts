@@ -54,6 +54,22 @@ describe("dumping distributions", () => {
     expect(result.written.map((f) => path.basename(f))).toEqual(["api.example.com.json", "www.example.com.json"]);
   });
 
+  test("lookup is case-insensitive, finds later pages, skips items without aliases and writes each distribution once", async () => {
+    const multi = { ...distribution, Id: "E2", Aliases: { Items: ["a.example.com", "b.example.com"] } };
+    const out = target();
+    const pages = [{ DistributionList: { Items: [{ ...distribution, Id: "E9", Aliases: undefined }], IsTruncated: true, NextMarker: "m" } }, { DistributionList: { Items: [multi] } }];
+    const result = await dumpDistributions(client(pages), ["A.Example.com", "b.example.com"], out);
+    expect(result.written.map((f) => path.basename(f))).toEqual(["a.example.com.json"]);
+    expect(result.missing).toEqual([]);
+  });
+
+  test("an odd domain name cannot leave the directory", async () => {
+    const out = target();
+    const result = await dumpDistributions(client([{ DistributionList: { Items: [{ ...distribution, Aliases: { Items: ["../x", "*.example.com"] } }] } }]), ["../x", "*.example.com"], out);
+    expect(result.written.length).toBe(1);
+    expect(result.written.every((f) => path.dirname(f) === out)).toBe(true);
+  });
+
   test("redaction leaves a config without custom headers alone", () => {
     expect(redactDistributionConfig({ Origins: { Items: [{ Id: "a" }] } })).toEqual({ Origins: { Items: [{ Id: "a" }] } });
   });

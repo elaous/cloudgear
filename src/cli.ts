@@ -53,7 +53,7 @@ Options:
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
   --tag <key=value>  Extra tag on created resources, repeatable (apply only)
-  --dir <dir>        Where dump-distributions writes (default: .cloudgear/distributions)
+  --dir <dir>        Where dump-distributions writes, relative to the current directory (default: .cloudgear/distributions)
   --domain <domain>  Which CDN to invalidate when the app has several
   --write-policies <dir>  Also write the IAM policies of imported functions' roles there as JSON (import only)
   --arn <arn>        Import exactly this certificate, distribution, function, rule or bucket (import only)
@@ -217,14 +217,18 @@ async function main() {
       return;
     }
     case "dump-distributions": {
-      const config = readConfig(configPath);
-      const domains = args.length ? args : [...config.cdn.map((c) => c.domain), ...(config.api?.via === "cloudfront" ? [config.api.domain] : [])];
-      if (!values.all && !domains.length) throw new Error("Name the domains to dump, or pass --all; the config has no CDN");
-      const dir = values.dir ? path.resolve(values.dir) : path.join(workDir, "distributions");
+      if (values.all && args.length) throw new Error("cloudgear dump-distributions --all takes no domain");
+      let domains = args;
+      if (!values.all && !args.length) {
+        const config = readConfig(configPath);
+        domains = [...config.cdn.map((c) => c.domain), ...(config.api?.via === "cloudfront" ? [config.api.domain] : [])];
+        if (!domains.length) throw new Error("Name the domains to dump, or pass --all; the config has no CDN");
+      }
+      const dir = path.resolve(values.dir ?? path.join(workDir, "distributions"));
       const dumped = await dumpDistributions(new CloudFrontClient({ region: "us-east-1" }), values.all ? "all" : domains, dir);
       for (const file of dumped.written) console.log(`cloudgear: wrote ${path.relative(process.cwd(), file)}`);
       for (const domain of dumped.missing) console.warn(`warning: no distribution answers to ${domain}`);
-      if (!dumped.written.length) throw new Error("No distribution was written");
+      if (!dumped.written.length || dumped.missing.length) throw new Error(dumped.written.length ? "Some domains have no distribution" : "No distribution was written");
       return;
     }
     case "invalidate": {

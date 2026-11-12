@@ -1444,18 +1444,23 @@ function sameOptions(a: Record<string, string> | undefined, b: Record<string, st
   return JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
 }
 
-// `webAcl: true` (keep the distribution's own) or a WAFv2 ARN is the typed form of options.web_acl.
+// `webAcl` and `priceClass` are the typed forms of options.web_acl and options.price_class.
 function readCdnOptions(optionsArg: Node | undefined, at: string): Record<string, string> | undefined {
-  const options = readOptionsMap(optionsArg, "options", at);
+  let options = readOptionsMap(optionsArg, "options", at);
   if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) return options;
-  const prop = optionsArg.getProperties().find((p) => propName(p) === "webAcl");
-  if (!prop) return options;
-  if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: webAcl must be true or a string literal`);
-  const value = prop.getInitializer();
-  const text = value?.getKind() === SyntaxKind.TrueKeyword ? "true" : value && (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) ? value.getLiteralValue() : undefined;
-  if (text === undefined) throw new Error(`${at}: webAcl must be true or a string literal, got: ${value?.getText()}`);
-  if (options?.web_acl !== undefined) throw new Error(`${at}: give webAcl or options.web_acl, not both`);
-  return { ...options, web_acl: text };
+  const typed: [field: string, option: string, allowTrue: boolean][] = [["webAcl", "web_acl", true], ["priceClass", "price_class", false]];
+  for (const [field, option, allowTrue] of typed) {
+    const prop = optionsArg.getProperties().find((p) => propName(p) === field);
+    if (!prop) continue;
+    const expected = allowTrue ? "true or a string literal" : "a string literal";
+    if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: ${field} must be ${expected}`);
+    const value = prop.getInitializer();
+    const text = allowTrue && value?.getKind() === SyntaxKind.TrueKeyword ? "true" : value && (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) ? value.getLiteralValue() : undefined;
+    if (text === undefined) throw new Error(`${at}: ${field} must be ${expected}, got: ${value?.getText()}`);
+    if (options?.[option] !== undefined) throw new Error(`${at}: give ${field} or options.${option}, not both`);
+    options = { ...options, [option]: text };
+  }
+  return options;
 }
 
 function readOptionsMap(options: Node | undefined, name: string, at: string): Record<string, string> | undefined {

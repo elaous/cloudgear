@@ -771,7 +771,7 @@ new CDN("aws", cert, { bucket, options: { price_class: "PriceClass_100" } });
 | --- | --- |
 | `@aws.S3` | `versioning` (`true`, `false`) |
 | `@aws.Lambda` | `tracing` (`Active`, `PassThrough`), `ephemeral_storage_mb` (512 to 10240), `env.<NAME>` |
-| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`), `default_root_object`, `web_acl` (`true` to keep the distribution's own, or a WAFv2 web ACL ARN in `us-east-1`) |
+| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`; also the typed `priceClass: "PriceClass_100"` on the `CDN`), `default_root_object`, `web_acl` (`true` to keep the distribution's own, or a WAFv2 web ACL ARN in `us-east-1`) |
 | `@aws.Certificate` | `key_algorithm` (`RSA_2048`, `EC_prime256v1`, `EC_secp384r1`) |
 
 A function's options are the router's `functionOptions` overridden by its

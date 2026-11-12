@@ -1369,7 +1369,7 @@ cloudgear import --all                             # everything planned that alr
 - **Read the warnings.** `apply` rebuilds an imported distribution's config from
   yours, so `import` lists what it would drop: a web ACL, access logging,
   custom error responses, a geo restriction, path behaviors and origins that are
-  not in the config, a non-default price class. An imported function's code is
+  not in the config, a non-default price class, a default root object other than `index.html` (a CDN that serves a bucket; keep an empty one with `options: { default_root_object: "" }`). An imported function's code is
   replaced by the bundle, its handler becomes `index.handler`, and its
   environment variables that are not in the config are removed. `import` only
   warns; look at `cloudgear plan` and your console before `apply`. A Route 53

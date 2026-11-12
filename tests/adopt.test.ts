@@ -305,6 +305,27 @@ describe("what an import records and warns about", () => {
     for (const part of [/web ACL/, /access logging/, /2 custom error/, /geo restriction/, /3 path behavior/, /2 origin/, /price class/]) expect(notes).toMatch(part);
   });
 
+  test("a default root object that differs from the config's is warned about, and the warning goes away once it matches", async () => {
+    const aws = fakeAws({
+      ListDistributionsCommand: () => ({ DistributionList: { Items: [{ Id: "E1", ARN: "arn", DomainName: "d1.cloudfront.net", Status: "Deployed", Aliases: { Items: ["www.example.com"] } }] } }),
+      GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: { DefaultRootObject: "" } }),
+    });
+    const cdnConfig = (options?: Record<string, string>) =>
+      baseConfig({
+        resource: [{ name: "web", type: "@aws.S3", physical_name: "my-web", dry: false, source: "a.ts:1" }],
+        function: [],
+        certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }],
+        cdn: [{ provider: "aws", domain: "www.example.com", bucket: "web", path: "", ...(options ? { options } : {}) }],
+      });
+    const only = (a: { type: string }) => a.type === "@aws.CloudFront";
+    const first = emptyState();
+    const warned = await adoptEntries(plan(cdnConfig(), first), first, aws.drivers, only as never);
+    expect(warned.notes.join("\n")).toContain('its default root object is empty; apply will set "index.html" unless the config sets options: { default_root_object: "" }');
+    const second = emptyState();
+    const quiet = await adoptEntries(plan(cdnConfig({ default_root_object: "" }), second), second, aws.drivers, only as never);
+    expect(quiet.notes.join("\n")).not.toMatch(/default root object/);
+  });
+
   test("the web ACL warning names the option that keeps it, and goes away once the CDN keeps it", async () => {
     const acl = "arn:aws:wafv2:us-east-1:111122223333:global/webacl/mine/b576f740-7bb3-4e5f-849b-af9d3c2b0c27";
     const aws = fakeAws({

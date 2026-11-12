@@ -33,6 +33,7 @@ describe("provider options in source", () => {
     const edge = analyzeApp(fixture("edge.ts"));
     expect(edge.certificates[0]!.options).toEqual({ key_algorithm: "EC_prime256v1" });
     expect(edge.cdns[0]!.options).toEqual({ price_class: "PriceClass_100", default_root_object: "home.html", web_acl: "true" });
+    expect(analyzeApp(fixture("router-web-acl.ts")).api?.options).toEqual({ web_acl: "arn:aws:wafv2:us-east-1:111122223333:global/webacl/mine/b576f740-7bb3-4e5f-849b-af9d3c2b0c27" });
   });
 
   test.each([
@@ -40,6 +41,8 @@ describe("provider options in source", () => {
     ["route-conflict.ts", /the routes of "f" give it different options/],
     ["route-partial.ts", /the routes of "f" give it different options/],
     ["proto-key.ts", /key "__proto__" must start with a letter/],
+    ["web-acl-both.ts", /give webAcl or options\.web_acl, not both/],
+    ["web-acl-variable.ts", /webAcl must be true or a string literal, got: acl/],
     ["store-conflict.ts", /BlobStore "data" is also declared at .* with a different provider, region, options or directives/],
   ])("rejects %s", (file, error) => {
     expect(() => analyzeApp(fixture(file))).toThrow(error);

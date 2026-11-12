@@ -1342,12 +1342,12 @@ cloudgear import --all                             # everything planned that alr
   again; remove it from `.cloudgear/state.json` and import it again to pick them
   up. The default behavior's origin is still replaced.
 - An existing distribution's web ACL (the `CreatedByCloudFront-...` one the console
-  adds, or your own) is kept with `options: { web_acl: true }` on the CDN, for
-  example `new CDN("aws", cert, { bucket, options: { web_acl: true } })`; the
-  options of the CDN that serves the router take it too. `apply` then leaves
+  adds, or your own) is kept with `webAcl: true` on the CDN, for
+  example `new CDN("aws", cert, { bucket, webAcl: true })`; the CDN that serves
+  the router takes it too (`options: { web_acl: true }` means the same). `apply` then leaves
   whatever ACL the distribution has (a WAFv2 ACL or a WAF Classic one) in place,
   and `import` says which one it keeps. To name one instead, give its WAFv2 web ACL
-  ARN in `us-east-1` (the `aws` partition only): `web_acl: "arn:aws:wafv2:..."`;
+  ARN in `us-east-1` (the `aws` partition only): `webAcl: "arn:aws:wafv2:..."`;
   that ACL is attached on create as well as on update. Without the option `apply`
   detaches the ACL, and removing the option detaches it too. `true` on a new
   distribution attaches nothing. cloudgear does not create or change web ACLs; the

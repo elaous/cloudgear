@@ -393,7 +393,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
     const notes: string[] = [];
     if (config.WebACLId && spec.options?.web_acl !== "true" && spec.options?.web_acl !== config.WebACLId) {
-      notes.push(`its web ACL (${config.WebACLId}) will be detached unless the config sets the web_acl option of this CDN to keep it: options: { web_acl: true }`);
+      notes.push(`its web ACL (${config.WebACLId}) will be detached unless the config sets webAcl: true on this CDN to keep it`);
     }
     if (config.WebACLId && spec.options?.web_acl === "true") notes.push(`its web ACL (${config.WebACLId}) is kept`);
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");

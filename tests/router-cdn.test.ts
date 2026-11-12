@@ -144,7 +144,7 @@ describe("applying a CDN that serves the router", () => {
       ["/items/*", "cloudgear-fn-app-item", ["GET", "HEAD"]],
       ["/items", "cloudgear-fn-app-items", all],
     ]);
-    expect(config.CacheBehaviors.Items.every((b: any) => b.ViewerProtocolPolicy === "https-only" && b.Compress === undefined)).toBe(true);
+    expect(config.CacheBehaviors.Items.every((b: any) => b.ViewerProtocolPolicy === "redirect-to-https" && b.Compress === true)).toBe(true);
     expect(config.DefaultCacheBehavior).toMatchObject({ TargetOriginId: "cloudgear-fn-app-item", CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" });
     expect(config.DefaultCacheBehavior.FunctionAssociations).toBeUndefined();
 

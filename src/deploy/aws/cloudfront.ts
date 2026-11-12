@@ -407,7 +407,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const attached = attachedOf(config, spec);
     const keptBehaviors = attached.reduce((sum, item) => sum + item.behavior.length, 0);
     const droppedBehaviors = (config.CacheBehaviors?.Quantity ?? 0) - keptBehaviors;
-    const droppedOrigins = (config.Origins?.Quantity ?? 0) - attached.length;
+    const droppedOrigins = ((config.Origins?.Items ?? []) as Record<string, any>[]).filter((o) => !attached.some((a) => a.id === o.Id) && !isSiteOrigin(o, spec)).length;
     if (attached.length) notes.push(`its ${attached.length} other origin(s) (${attached.map((item) => item.id).join(", ")}) and ${keptBehaviors} path behavior(s) are kept and written to the config as attached origins`);
     if (droppedBehaviors > 0) notes.push(`its ${droppedBehaviors} path behavior(s) will be replaced by the ones from the config`);
     if (droppedOrigins > 0) notes.push(`its ${droppedOrigins} origin(s) will be replaced by the ones from the config`);
@@ -489,18 +489,21 @@ export function allowedMethods(methods: string[]): string[] {
 
 const OWN_ORIGIN = /^(cloudgear-site|cloudgear-fn-)/;
 
-// Origins reached by path behaviors cloudgear does not build, with those behaviors.
+// The origin cloudgear builds for the bucket; the console names it the same way.
+const isSiteOrigin = (origin: Record<string, any>, spec: CdnComparable): boolean => !!spec.bucket && String(origin.DomainName ?? "").startsWith(`${spec.bucket}.s3.`);
+
+// Every origin cloudgear does not build, with the path behaviors that reach it.
 export function attachedOf(config: Record<string, any>, spec: CdnComparable): AttachedOriginSpec[] {
   const ownPatterns = new Set((spec.behaviors ?? []).map((b) => b.pattern));
-  const origins = new Map<string, Record<string, any>>((config.Origins?.Items ?? []).map((o: Record<string, any>) => [o.Id, o]));
   const kept = new Map<string, AttachedOriginSpec>();
+  for (const origin of (config.Origins?.Items ?? []) as Record<string, any>[]) {
+    if (OWN_ORIGIN.test(origin.Id) || isSiteOrigin(origin, spec)) continue;
+    kept.set(origin.Id, { id: origin.Id, origin: JSON.stringify(origin), behavior: [] });
+  }
   ((config.CacheBehaviors?.Items ?? []) as Record<string, any>[]).forEach((behavior, index) => {
-    const target = behavior.TargetOriginId as string;
-    const origin = origins.get(target);
-    if (!origin || OWN_ORIGIN.test(target) || ownPatterns.has(behavior.PathPattern)) return;
-    const item = kept.get(target) ?? { id: target, origin: JSON.stringify(origin), behavior: [] };
+    const item = kept.get(behavior.TargetOriginId);
+    if (!item || ownPatterns.has(behavior.PathPattern)) return;
     item.behavior.push({ path_pattern: behavior.PathPattern, behavior: JSON.stringify(behavior), position: index });
-    kept.set(target, item);
   });
   return [...kept.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -545,7 +548,8 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
   const toFunction = {
     CachePolicyId: CACHING_DISABLED,
     OriginRequestPolicyId: ALL_VIEWER_EXCEPT_HOST,
-    ViewerProtocolPolicy: "https-only",
+    ViewerProtocolPolicy: "redirect-to-https",
+    Compress: true,
   };
   const behaviors = (spec.behaviors ?? []).map((behavior) => ({
     PathPattern: behavior.pattern,

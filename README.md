@@ -1332,8 +1332,8 @@ cloudgear import --all                             # everything planned that alr
   except a function's IAM role when cloudgear did not create it (an imported
   function may use a shared one); the inline policy cloudgear adds to that
   role is removed.
-- Other origins of an imported distribution (those reached by path behaviors
-  cloudgear does not build) are kept without anything in the TypeScript setup.
+- Every other origin of an imported distribution (all but the bucket's own and
+  cloudgear's, with the path behaviors that reach them, if any) is kept without anything in the TypeScript setup.
   `import` writes them into `cloudgear.prototxt` as `attached` blocks of that
   CDN (CloudFront's own JSON for each origin and for the path behaviors that
   reach it), and `generate` carries them over when it rewrites the file. They are
@@ -1342,7 +1342,9 @@ cloudgear import --all                             # everything planned that alr
   with `cloudgear-site` or `cloudgear-fn-`. Delete an `attached` block to drop
   that origin. A distribution that was imported before this existed is not read
   again; remove it from `.cloudgear/state.json` and import it again to pick them
-  up. The default behavior's origin is still replaced.
+  up. The default behavior itself is still rebuilt, so an origin only it used is
+  kept but unused. Behaviors that send requests to functions redirect `http` to
+  `https` and set `Compress`, as the console does.
 - An existing distribution's web ACL (the `CreatedByCloudFront-...` one the console
   adds, or your own) is kept with `webAcl: true` on the CDN, for
   example `new CDN("aws", cert, { bucket, webAcl: true })`; the CDN that serves

@@ -413,6 +413,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       const wanted = spec.options?.default_root_object ?? "index.html";
       if (live !== wanted) notes.push(`its default root object is ${live ? `"${live}"` : "empty"}; apply will set ${wanted ? `"${wanted}"` : "it empty"} unless the config sets options: { default_root_object: "${live}" } on this CDN`);
     }
+    if (!spec.bucket && config.DefaultRootObject) notes.push(`its default root object ("${config.DefaultRootObject}") will be removed; a router distribution has none`);
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
     if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
     if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");

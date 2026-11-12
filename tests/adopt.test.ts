@@ -985,12 +985,18 @@ describe("an imported distribution that already matches the config", () => {
     const options = { default_root_object: "", web_acl: "true", price_class: "PriceClass_100" };
     const { aws, state } = await importAll(options, live());
     expect(cloudfront(plan(config(options), state))).toBe("update");
-    const applying = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: live() }) });
+    const bare = live();
+    delete (bare as { PriceClass?: string }).PriceClass;
+    delete (bare as { Logging?: unknown }).Logging;
+    const applying = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: bare }) });
     await apply(plan(config(options), state), state, applying.drivers, { save: () => {} });
     expect(applying.of("CreateOriginAccessControlCommand")).toEqual([]);
     const sent = applying.of("UpdateDistributionCommand").at(-1).DistributionConfig;
     expect(sent.Origins.Items[0].OriginAccessControlId).toBe("CONSOLE-OAC");
     expect(sent.PriceClass).toBe("PriceClass_100");
+    expect(sent.Logging).toEqual({ Enabled: false, IncludeCookies: false, Bucket: "", Prefix: "" });
+    expect(sent.Restrictions.GeoRestriction.RestrictionType).toBe("none");
+    expect(sent.CustomErrorResponses).toEqual({ Quantity: 0 });
     expect(aws.of("UpdateDistributionCommand")).toEqual([]);
   });
 
@@ -1032,6 +1038,21 @@ describe("an imported distribution that already matches the config", () => {
     expect(Object.values(state.entries).some((e) => e.type === "@aws.CloudFront")).toBe(false);
     expect(gone.of("DeleteOriginAccessControlCommand")).toEqual([]);
     expect(imported.of("CreateOriginAccessControlCommand")).toEqual([]);
+  });
+
+  test("a router distribution's root object is warned about", async () => {
+    const router = baseConfig({
+      resource: [],
+      function: [fn({ permission: [], env: [] })],
+      certificate: [{ provider: "aws", domain: "www.example.com", dns: dnsSpec, usage: "cdn" }],
+      api: { provider: "aws", domain: "www.example.com", via: "cloudfront" },
+    });
+    const distribution = { ...live(), DefaultRootObject: "home.html" };
+    delete (distribution as { PriceClass?: string }).PriceClass;
+    const imported = fakeAws(clients(distribution));
+    const state = emptyState();
+    const result = await adoptEntries(plan(router, state), state, imported.drivers, (a) => a.type === "@aws.CloudFront");
+    expect(result.notes.join("\n")).toContain('its default root object ("home.html") will be removed');
   });
 
   test("a distribution with other origins is not treated as matching", async () => {

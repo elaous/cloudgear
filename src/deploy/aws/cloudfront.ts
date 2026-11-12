@@ -25,7 +25,6 @@ import { DeleteBucketPolicyCommand, GetBucketPolicyCommand, PutBucketPolicyComma
 import type { DnsDriver } from "@cloudgear/dns";
 import type { AttachedOriginSpec, SecretRefSpec } from "../../config/schema";
 import { fitName } from "../../names";
-import { WEB_ACL_ARN } from "../../providers";
 import { expectArn } from "./arn";
 import { sameTarget } from "./certificate";
 import { PartialApplyError, type Driver, type DriverContext } from "../apply";
@@ -255,7 +254,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       routeFunctionArn = await publishRouteFunction(spec, outputs);
     }
 
-    const config = (reference: string, enabled = true) =>
+    const config = (reference: string, enabled = true, currentWebAcl?: string) =>
       buildDistributionConfig(spec, {
         certificateArn: certificate.outputs.arn!,
         region: spec.bucket_region || deps.region,
@@ -265,6 +264,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         routeFunctionArn,
         reference,
         enabled,
+        currentWebAcl,
       });
 
     if (!outputs.id) {
@@ -284,7 +284,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
       deps.log(`updating distribution ${outputs.id}`);
       const current = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: outputs.id }));
       await deps.cloudfront.send(
-        new UpdateDistributionCommand({ Id: outputs.id, IfMatch: current.ETag, DistributionConfig: config(current.DistributionConfig.CallerReference) }),
+        new UpdateDistributionCommand({ Id: outputs.id, IfMatch: current.ETag, DistributionConfig: config(current.DistributionConfig.CallerReference, true, current.DistributionConfig.WebACLId) }),
       );
     }
 
@@ -392,13 +392,10 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const got = await deps.cloudfront.send(new GetDistributionConfigCommand({ Id: id }));
     const config = (got.DistributionConfig ?? {}) as Record<string, any>;
     const notes: string[] = [];
-    if (config.WebACLId && spec.options?.web_acl !== config.WebACLId) {
-      notes.push(
-        WEB_ACL_ARN.test(config.WebACLId)
-          ? `its web ACL (${config.WebACLId}) will be detached unless the config sets the web_acl option of this CDN to it: options: { web_acl: "${config.WebACLId}" }`
-          : `its web ACL (${config.WebACLId}) will be detached; it is not a WAFv2 web ACL ARN (a WAF Classic ACL, for example), which the web_acl option cannot keep`,
-      );
+    if (config.WebACLId && spec.options?.web_acl !== "true" && spec.options?.web_acl !== config.WebACLId) {
+      notes.push(`its web ACL (${config.WebACLId}) will be detached unless the config sets the web_acl option of this CDN to keep it: options: { web_acl: true }`);
     }
+    if (config.WebACLId && spec.options?.web_acl === "true") notes.push(`its web ACL (${config.WebACLId}) is kept`);
     if (config.Logging?.Enabled) notes.push("its access logging will be turned off");
     if (config.CustomErrorResponses?.Quantity) notes.push(`its ${config.CustomErrorResponses.Quantity} custom error response(s) will be removed`);
     if (config.Restrictions?.GeoRestriction?.RestrictionType && config.Restrictions.GeoRestriction.RestrictionType !== "none") notes.push("its geo restriction will be removed");
@@ -474,6 +471,8 @@ export interface DistributionInputs {
   routeFunctionArn?: string;
   reference: string;
   enabled: boolean;
+  // The web ACL the distribution has now; kept when the web_acl option is true.
+  currentWebAcl?: string;
 }
 
 // CloudFront allows just three method sets per behavior.
@@ -499,6 +498,12 @@ export function attachedOf(config: Record<string, any>, spec: CdnComparable): At
     kept.set(target, item);
   });
   return [...kept.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function webAclOf(spec: CdnComparable, input: DistributionInputs): { WebACLId?: string } {
+  const wanted = spec.options?.web_acl;
+  const id = wanted === "true" ? input.currentWebAcl : wanted;
+  return id ? { WebACLId: id } : {};
 }
 
 export function buildDistributionConfig(spec: CdnComparable, input: DistributionInputs): DistributionConfig {
@@ -574,7 +579,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     Aliases: { Quantity: 1, Items: [spec.domain] },
     ...(spec.bucket ? { DefaultRootObject: spec.options?.default_root_object ?? "index.html" } : {}),
     ...(spec.options?.price_class ? { PriceClass: spec.options.price_class } : {}),
-    ...(spec.options?.web_acl ? { WebACLId: spec.options.web_acl } : {}),
+    ...webAclOf(spec, input),
     HttpVersion: "http2and3",
     IsIPV6Enabled: true,
     Origins: { Quantity: origins.length, Items: origins },

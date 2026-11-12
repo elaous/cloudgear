@@ -209,7 +209,7 @@ describe("applying options on AWS", () => {
     expect(buildDistributionConfig(spec, input)).toMatchObject({ PriceClass: "PriceClass_100", DefaultRootObject: "home.html" });
     const plain = buildDistributionConfig({ ...spec, options: undefined }, input);
     expect(plain.DefaultRootObject).toBe("index.html");
-    expect(plain.PriceClass).toBeUndefined();
+    expect(plain.PriceClass).toBe("PriceClass_All");
   });
 
   test("a certificate is requested with its key algorithm and cannot change it later", async () => {

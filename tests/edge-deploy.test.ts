@@ -619,6 +619,17 @@ describe("CloudFront configuration", () => {
     expect(config.CacheBehaviors).toEqual({ Quantity: 0, Items: [] });
   });
 
+  test("the defaults UpdateDistribution insists on are always sent, and the price class option wins", () => {
+    const base: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "" };
+    const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true };
+    const config = buildDistributionConfig(base, input);
+    expect(config.PriceClass).toBe("PriceClass_All");
+    expect(config.Logging).toEqual({ Enabled: false, IncludeCookies: false, Bucket: "", Prefix: "" });
+    expect(config.Restrictions).toEqual({ GeoRestriction: { RestrictionType: "none", Quantity: 0 } });
+    expect(config.CustomErrorResponses).toEqual({ Quantity: 0 });
+    expect(buildDistributionConfig({ ...base, options: { price_class: "PriceClass_100" } }, input).PriceClass).toBe("PriceClass_100");
+  });
+
   test("a web ACL given as an option is attached, and none is set when it is not", () => {
     const base: CdnComparable = { domain: DOMAIN, dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "" };
     const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true };

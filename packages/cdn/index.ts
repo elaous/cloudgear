@@ -52,6 +52,9 @@ export class Cert {
   }
 }
 
+// Where CloudFront serves from: 100 is North America and Europe, 200 adds Asia, Middle East and Africa, All every location.
+export type PriceClass = "PriceClass_100" | "PriceClass_200" | "PriceClass_All";
+
 export interface CdnOptions {
   // Exactly one of `bucket` and `router`.
   bucket?: BlobStore;
@@ -62,6 +65,8 @@ export interface CdnOptions {
   methodRouting?: "function";
   // `true` keeps the web ACL the distribution has; or a WAFv2 web ACL ARN in us-east-1. Literal only.
   webAcl?: true | string;
+  // Literal only; the same as options.price_class.
+  priceClass?: PriceClass;
   options?: ProviderOptions;
   driver?: CdnDriver;
 }

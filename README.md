@@ -1334,12 +1334,15 @@ cloudgear import --all                             # everything planned that alr
   function may use a shared one); the inline policy cloudgear adds to that
   role is removed.
 - `import` compares an imported bucket distribution with what `apply` would build
-  (aliases, certificate, the bucket origin, default behavior, root object, price
-  class, web ACL, logging, custom errors, geo restriction; not the comment or the HTTP
-  version). If they match, it is recorded as up to date and `plan` shows no change; the
-  access control the console made for the bucket origin is reused instead of a new
-  one. Otherwise it plans as an update, which `apply` runs in place. A distribution
-  with other origins, and the router's, are always updates.
+  (aliases, certificate, origins, behaviors and their policies, root object, price
+  class, web ACL, logging, custom errors, geo restriction, IPv6; not the comment or
+  the HTTP version). If they match, it is recorded as up to date and `plan` shows no
+  change; the access control the console made for the bucket origin is reused instead
+  of a new one, and `destroy` leaves it in place. Otherwise it plans as an update, which
+  `apply` runs in place. It is matched only when its certificate is already in state
+  (import `--all`, or the certificate first), the bucket origin uses an access control,
+  and it has no other origins; the router's distribution is always an update. A match
+  does not check the DNS record or the bucket policy; the next change does.
 - Every other origin of an imported distribution (all but the bucket's own and
   cloudgear's, with the path behaviors that reach them, if any) is kept without anything in the TypeScript setup.
   `import` writes them into `cloudgear.prototxt` as `attached` blocks of that

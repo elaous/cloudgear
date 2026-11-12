@@ -377,7 +377,8 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
         if (record && sameTarget(record.values[0], current.outputs.domain_name)) await dns.remove(domain, "CNAME");
       }
       if (current.outputs.id) await removeDistribution(current.outputs.id);
-      for (const oac of [current.outputs.oac_s3, current.outputs.oac_lambda]) {
+      // An access control cloudgear found, rather than made, may serve other distributions.
+      for (const oac of [current.outputs.oac_s3_adopted ? undefined : current.outputs.oac_s3, current.outputs.oac_lambda]) {
         if (oac) {
           await ignoreMissing(deps.cloudfront, new DeleteOriginAccessControlCommand({ Id: oac, IfMatch: await etagOfOac(oac) }), "NoSuchOriginAccessControl");
         }
@@ -395,12 +396,12 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
     const notes: string[] = [];
     // The bucket's console-made access control is reused, and a distribution that already matches is left alone.
     const site = spec.bucket ? ((config.Origins?.Items ?? []) as Record<string, any>[]).find((o) => isSiteOrigin(o, spec)) : undefined;
-    const reuse = site?.OriginAccessControlId ? { oac_s3: String(site.OriginAccessControlId) } : undefined;
+    const reuse = site?.OriginAccessControlId ? { oac_s3: String(site.OriginAccessControlId), oac_s3_adopted: "true" } : undefined;
     const certificate = context.entry(stateKey({ type: "@aws.Certificate", name: spec.certificate_domain ?? spec.domain }))?.outputs.arn;
     if (site && reuse && certificate && !attachedOf(config, spec).length) {
       const built = buildDistributionConfig(spec, { certificateArn: certificate, region: spec.bucket_region || deps.region, oacS3: reuse.oac_s3, reference: "r", enabled: true, currentWebAcl: config.WebACLId });
       if (JSON.stringify(managedView(config, site.Id)) === JSON.stringify(managedView(built as Record<string, any>, "cloudgear-site"))) {
-        return { notes: ["it already matches the config; apply has nothing to change"], spec: entry.spec, outputs: reuse };
+        return { notes: ["it already matches the config; apply has nothing to change (its DNS record and bucket policy are not touched until something changes)"], spec: entry.spec, outputs: reuse };
       }
     }
     if (config.WebACLId && spec.options?.web_acl !== "true" && spec.options?.web_acl !== config.WebACLId) {
@@ -538,6 +539,12 @@ function managedView(config: Record<string, any>, siteId: string): unknown {
     compress: !!b?.Compress,
     functions: b?.FunctionAssociations?.Quantity ?? 0,
     lambdas: b?.LambdaFunctionAssociations?.Quantity ?? 0,
+    responseHeaders: b?.ResponseHeadersPolicyId ?? "",
+    signers: !!b?.TrustedSigners?.Enabled,
+    keyGroups: !!b?.TrustedKeyGroups?.Enabled,
+    smooth: !!b?.SmoothStreaming,
+    encryption: b?.FieldLevelEncryptionId ?? "",
+    realtimeLog: b?.RealtimeLogConfigArn ?? "",
   });
   return {
     aliases: sorted(config.Aliases?.Items),
@@ -546,8 +553,21 @@ function managedView(config: Record<string, any>, siteId: string): unknown {
     acl: config.WebACLId ?? "",
     ipv6: !!config.IsIPV6Enabled,
     enabled: config.Enabled !== false,
+    staging: !!config.Staging,
+    continuousDeployment: config.ContinuousDeploymentPolicyId ?? "",
+    originGroups: config.OriginGroups?.Quantity ?? 0,
     origins: ((config.Origins?.Items ?? []) as Record<string, any>[])
-      .map((o) => ({ id: o.Id === siteId ? "site" : o.Id, domain: o.DomainName, path: o.OriginPath ?? "", oac: o.OriginAccessControlId ?? "", s3: !!o.S3OriginConfig }))
+      .map((o) => ({
+        id: o.Id === siteId ? "site" : o.Id,
+        domain: o.DomainName,
+        path: o.OriginPath ?? "",
+        oac: o.OriginAccessControlId ?? "",
+        s3: !!o.S3OriginConfig,
+        headers: o.CustomHeaders?.Quantity ?? 0,
+        shield: !!o.OriginShield?.Enabled,
+        attempts: o.ConnectionAttempts ?? 3,
+        timeout: o.ConnectionTimeout ?? 10,
+      }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     default: behavior(config.DefaultCacheBehavior),
     behaviors: ((config.CacheBehaviors?.Items ?? []) as Record<string, any>[]).map(behavior),

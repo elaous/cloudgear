@@ -1001,6 +1001,39 @@ describe("an imported distribution that already matches the config", () => {
     expect(cloudfront(plan(config({ web_acl: "true" }), rooted.state))).toBe("update");
   });
 
+  test("settings the config cannot express make it an update, so apply's warnings still apply", async () => {
+    const options = { default_root_object: "", web_acl: "true" };
+    const withPolicy = live();
+    (withPolicy.DefaultCacheBehavior as Record<string, unknown>).ResponseHeadersPolicyId = "security-headers";
+    const policy = await importAll(options, withPolicy);
+    expect(cloudfront(plan(config(options), policy.state))).toBe("update");
+    const private_ = live();
+    (private_.DefaultCacheBehavior as Record<string, unknown>).TrustedKeyGroups = { Enabled: true, Quantity: 1, Items: ["kg"] };
+    const keyed = await importAll(options, private_);
+    expect(cloudfront(plan(config(options), keyed.state))).toBe("update");
+    const shielded = live();
+    (shielded.Origins as { Items: Record<string, unknown>[] }).Items[0]!.OriginShield = { Enabled: true, OriginShieldRegion: "us-east-1" };
+    const shield = await importAll(options, shielded);
+    expect(cloudfront(plan(config(options), shield.state))).toBe("update");
+  });
+
+  test("without its certificate in state it is not matched, and an access control it found is not deleted on destroy", async () => {
+    const options = { default_root_object: "", web_acl: "true" };
+    const aws = fakeAws(clients(live()));
+    const alone = emptyState();
+    await adoptEntries(plan(config(options), alone), alone, aws.drivers, (a) => a.type === "@aws.CloudFront");
+    expect(cloudfront(plan(config(options), alone))).toBe("update");
+    const { state, aws: imported } = await importAll(options, live());
+    const gone = await (async () => {
+      const destroying = fakeAws({ GetDistributionConfigCommand: () => { throw Object.assign(new Error("gone"), { name: "NoSuchDistribution" }); } });
+      await apply(plan({ ...config(options), resource: [], cdn: [], certificate: [] }, state), state, destroying.drivers, { save: () => {} });
+      return destroying;
+    })();
+    expect(Object.values(state.entries).some((e) => e.type === "@aws.CloudFront")).toBe(false);
+    expect(gone.of("DeleteOriginAccessControlCommand")).toEqual([]);
+    expect(imported.of("CreateOriginAccessControlCommand")).toEqual([]);
+  });
+
   test("a distribution with other origins is not treated as matching", async () => {
     const options = { default_root_object: "", web_acl: "true" };
     const extra = { Id: "legacy", DomainName: "legacy.example.org" };

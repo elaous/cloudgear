@@ -627,6 +627,16 @@ describe("CloudFront configuration", () => {
     expect(config.Logging).toEqual({ Enabled: false, IncludeCookies: false, Bucket: "", Prefix: "" });
     expect(config.Restrictions).toEqual({ GeoRestriction: { RestrictionType: "none", Quantity: 0 } });
     expect(config.CustomErrorResponses).toEqual({ Quantity: 0 });
+    expect(config.OriginGroups).toEqual({ Quantity: 0 });
+    expect(config.DefaultRootObject).toBe("index.html");
+    // Every member a console-made distribution returns, so UpdateDistribution has nothing to call missing.
+    for (const key of ["Aliases", "DefaultRootObject", "OriginGroups", "CacheBehaviors", "CustomErrorResponses", "Logging", "PriceClass", "Restrictions", "WebACLId", "HttpVersion", "IsIPV6Enabled", "Origins", "DefaultCacheBehavior", "ViewerCertificate", "Comment", "Enabled", "CallerReference"]) {
+      expect(config).toHaveProperty(key);
+    }
+    expect(config.Origins!.Items![0]).toMatchObject({ CustomHeaders: { Quantity: 0 }, OriginShield: { Enabled: false }, ConnectionAttempts: 3, ConnectionTimeout: 10 });
+    expect(config.DefaultCacheBehavior).toMatchObject({ TrustedSigners: { Enabled: false, Quantity: 0 }, TrustedKeyGroups: { Enabled: false, Quantity: 0 }, LambdaFunctionAssociations: { Quantity: 0 }, FunctionAssociations: { Quantity: 0 }, SmoothStreaming: false, FieldLevelEncryptionId: "" });
+    const router: CdnComparable = { ...base, bucket: "", behaviors: [] };
+    expect(buildDistributionConfig(router, input).DefaultRootObject).toBe("");
     expect(buildDistributionConfig({ ...base, options: { price_class: "PriceClass_100" } }, input).PriceClass).toBe("PriceClass_100");
   });
 
@@ -635,7 +645,7 @@ describe("CloudFront configuration", () => {
     const input = { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true };
     const acl = "arn:aws:wafv2:us-east-1:111122223333:global/webacl/mine/b576f740-7bb3-4e5f-849b-af9d3c2b0c27";
     expect(buildDistributionConfig({ ...base, options: { web_acl: acl } }, input).WebACLId).toBe(acl);
-    expect(buildDistributionConfig(base, input).WebACLId).toBeUndefined();
+    expect(buildDistributionConfig(base, input).WebACLId).toBe("");
   });
 
   test("invalidateDistribution sends the paths and returns the id", async () => {
@@ -861,7 +871,7 @@ describe("a web ACL on a distribution", () => {
     expect(removing).toMatchObject({ op: "update", changes: ["spec"] });
     const removed = fakeAws();
     await apply(plan(withAcl(false), state), state, removed.drivers, { save: () => {} });
-    expect(removed.of("UpdateDistributionCommand").at(-1).DistributionConfig.WebACLId).toBeUndefined();
+    expect(removed.of("UpdateDistributionCommand").at(-1).DistributionConfig.WebACLId).toBe("");
   });
 
   test("a new distribution is created with the ACL attached", async () => {
@@ -873,7 +883,7 @@ describe("a web ACL on a distribution", () => {
     const keep = cdnConfig({ cdn: [{ ...cdnConfig().cdn[0]!, options: { web_acl: "true" } }] });
     const state = emptyState();
     const created = await applyAll(keep, state);
-    expect(created.of("CreateDistributionCommand")[0].DistributionConfig.WebACLId).toBeUndefined();
+    expect(created.of("CreateDistributionCommand")[0].DistributionConfig.WebACLId).toBe("");
     for (const [current, price_class] of [[acl, "PriceClass_100"], ["a1b2c3d4-0000-1111-2222-333344445555", "PriceClass_200"]] as const) {
       const changed = cdnConfig({ cdn: [{ ...keep.cdn[0]!, options: { web_acl: "true", price_class } }] });
       const aws = fakeAws({ GetDistributionConfigCommand: () => ({ ETag: "e", DistributionConfig: { CallerReference: "ref", WebACLId: current } }) });

@@ -131,7 +131,7 @@ describe("applying a CDN that serves the router", () => {
       { Name: `cloudgear-${DOMAIN}-lambda`, OriginAccessControlOriginType: "lambda", SigningBehavior: "always", SigningProtocol: "sigv4" },
     ]);
     const config = aws.of("CreateDistributionCommand")[0].DistributionConfig;
-    expect(config.DefaultRootObject).toBeUndefined();
+    expect(config.DefaultRootObject).toBe("");
     expect(config.Origins.Items.map((o: any) => o.Id)).toEqual(["cloudgear-fn-app-item", "cloudgear-fn-app-items"]);
     expect(config.Origins.Items[0]).toMatchObject({
       DomainName: "app-item.lambda-url.eu-west-1.on.aws",
@@ -148,7 +148,7 @@ describe("applying a CDN that serves the router", () => {
     expect(config.CacheBehaviors.Items.every((b: any) => b.Compress === true)).toBe(true);
     expect(config.DefaultCacheBehavior.ViewerProtocolPolicy).toBe("https-only");
     expect(config.DefaultCacheBehavior).toMatchObject({ TargetOriginId: "cloudgear-fn-app-item", CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" });
-    expect(config.DefaultCacheBehavior.FunctionAssociations).toBeUndefined();
+    expect(config.DefaultCacheBehavior.FunctionAssociations).toEqual({ Quantity: 0 });
 
     expect(aws.names()).not.toContain("PutBucketPolicyCommand");
     expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ id: "E1", oac_lambda: "oac-lambda", status: "Deployed" });

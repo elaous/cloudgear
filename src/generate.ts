@@ -111,10 +111,6 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     }
   }
   const functions: FunctionSpec[] = [];
-  for (const file of model.generated) {
-    fs.mkdirSync(path.dirname(file.file), { recursive: true });
-    fs.writeFileSync(file.file, file.text);
-  }
   for (const fn of model.functions) {
     if (model.provider !== "aws" && (fn.include.length || fn.passRequest || fn.responseKind)) {
       throw new Error(`${fn.file}: include, request and response are not supported for provider "${model.provider}" yet`);

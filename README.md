@@ -213,37 +213,6 @@ export default async function (request, response) {
   gets a synthetic `POST https://schedule.invalid/` request whose body is the
   schedule input.
 
-### One function for many scripts: `ParamRouter`
-
-A `ParamRouter` mounts several scripts as one function. `generate` writes a root script, `.cloudgear/dispatch/<name>.ts`,
-that picks the script by method and path and loads it on first use, so the scripts stay as they are (a default export
-`(req, res)`):
-
-```ts
-router.url("*", "/", new ParamRouter({
-  "GET /api/items":      { script: "./api/items.ts" },
-  "POST /api/track":     { script: "./api/track.ts", env: trackEnv },
-  "GET /v/{slug}":       { script: "./api/v/[slug].ts", include: "./dist/index.html" },
-}, { name: "api" }), { request: true, response: VercelResponse, env: publicEnv });
-```
-
-- The method `"*"` means a ParamRouter, and the path is its mount point; each key is `"METHOD /path"` (`GET` when
-  the method is left out) below it. The options object takes the same `request`, `response`, `env`, `include` and
-  `policies` as a route. `request: true` is required, and everything MUST be a literal.
-- The whole mount is one function (named by the `name` option, `router` if left out): its role, secrets, timeout and
-  memory are shared, and `env`, `include` and `policies` are the union of the mount's and every entry's. Routes you
-  declare with `.url(method, path, ...)` stay their own functions.
-- The environment scan follows each script's literal `import()`, so the function lists the variables every script
-  reads, and `apply` checks them as for any function.
-- A request that matches no key is answered 404 by the router before it reaches a script, and on AWS a `HEAD` request
-  goes to the `GET` entry. In local mode `listen()` serves the same keys as separate routes.
-- What the scripts use counts for the function: its variables, secrets, `BlobStore` access and published events are
-  traced through each script's default export, and a script receives the context as its last argument. An entry
-  takes only `script`, `env`, `include` and `policies`; the mount takes no `name`, `schedule` or `on`, and two
-  ParamRouters MUST have different `name`s.
-- The CDN still gets a cache behavior for each key until the CDN learns about mounts; a mount that should reach
-  the function as the default behavior is not built yet.
-
 ### Runtime: `FunctionRouter`
 
 `new FunctionRouter(provider, options)` takes `authenticated: "iam" | "none"`

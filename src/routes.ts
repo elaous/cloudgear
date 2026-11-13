@@ -18,6 +18,10 @@ export interface Behavior {
   function: string;
 }
 
+const ANY = "*";
+
+const accepts = (methods: string[], method: string) => methods.includes(ANY) || methods.includes(method);
+
 const PARAM = /\{[A-Za-z_$][\w$]*\}/g;
 
 export function routeShape(path: string): string {
@@ -68,7 +72,7 @@ export function conflictingGroups(routes: EdgeRoute[]): RouteGroup[] {
     for (const specific of groups) {
       if (!covers(general.shape, specific.shape)) continue;
       const sameFunction = general.functions.length === 1 && specific.functions.length === 1 && general.functions[0] === specific.functions[0];
-      if (sameFunction || general.methods.every((method) => specific.methods.includes(method))) continue;
+      if (sameFunction || general.methods.every((method) => accepts(specific.methods, method))) continue;
       conflicts.push({
         shape: general.shape,
         pattern: `${general.pattern} and ${specific.pattern}`,

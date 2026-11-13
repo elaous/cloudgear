@@ -2,6 +2,8 @@ import { VercelRequest, VercelResponse, type VercelRequestQuery } from "./vercel
 
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
+export const ANY_METHOD = "*";
+export type RouteMethod = Method | typeof ANY_METHOD;
 
 export type Provider = "aws" | "gcp" | "azure";
 
@@ -42,7 +44,7 @@ export interface RequestContext {
 
 export interface RouteSpec {
   name?: string;
-  method: Method;
+  method: RouteMethod;
   path: string;
 }
 
@@ -78,16 +80,13 @@ export function assertMethod(method: string): Method {
   return upper as Method;
 }
 
-// "POST /api/track", or "/api/track" for GET.
-export function parseRouteKey(key: string): { method: Method; path: string } {
-  const match = /^(?:([A-Za-z]+)\s+)?(\/\S*)$/.exec(key.trim());
-  if (!match) throw new Error(`Route key "${key}" must be "METHOD /path" or "/path"`);
-  return { method: assertMethod(match[1] ?? "GET"), path: match[2]! };
-}
-
-// A route's path below a mount point; mounted at "/" it is the path itself.
-export function mountedPath(mount: string, path: string): string {
-  return `${mount.replace(/\/+$/, "")}${path}` || "/";
+export function assertRouteMethod(method: string): RouteMethod {
+  if (method === ANY_METHOD) return ANY_METHOD;
+  try {
+    return assertMethod(method);
+  } catch {
+    throw new Error(`Unsupported HTTP method "${method}", expected one of ${METHODS.join(", ")} or "${ANY_METHOD}"`);
+  }
 }
 
 export const PARAM = /\{([A-Za-z_$][\w$]*)\}/g;

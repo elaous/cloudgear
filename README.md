@@ -213,37 +213,6 @@ export default async function (request, response) {
   gets a synthetic `POST https://schedule.invalid/` request whose body is the
   schedule input.
 
-### One function for many scripts: `ParamRouter`
-
-A `ParamRouter` mounts several scripts as one function. `generate` writes a root script, `.cloudgear/dispatch/<name>.ts`,
-that picks the script by method and path and loads it on first use, so the scripts stay as they are (a default export
-`(req, res)`):
-
-```ts
-router.url("*", "/", new ParamRouter({
-  "GET /api/items":      { script: "./api/items.ts" },
-  "POST /api/track":     { script: "./api/track.ts", env: trackEnv },
-  "GET /v/{slug}":       { script: "./api/v/[slug].ts", include: "./dist/index.html" },
-}, { name: "api" }), { request: true, response: VercelResponse, env: publicEnv });
-```
-
-- The method `"*"` means a ParamRouter, and the path is its mount point; each key is `"METHOD /path"` (`GET` when
-  the method is left out) below it. The options object takes the same `request`, `response`, `env`, `include` and
-  `policies` as a route. `request: true` is required, and everything MUST be a literal.
-- The whole mount is one function (named by the `name` option, `router` if left out): its role, secrets, timeout and
-  memory are shared, and `env`, `include` and `policies` are the union of the mount's and every entry's. Routes you
-  declare with `.url(method, path, ...)` stay their own functions.
-- The environment scan follows each script's literal `import()`, so the function lists the variables every script
-  reads, and `apply` checks them as for any function.
-- A request that matches no key is answered 404 by the router before it reaches a script, and on AWS a `HEAD` request
-  goes to the `GET` entry. In local mode `listen()` serves the same keys as separate routes.
-- What the scripts use counts for the function: its variables, secrets, `BlobStore` access and published events are
-  traced through each script's default export, and a script receives the context as its last argument. An entry
-  takes only `script`, `env`, `include` and `policies`; the mount takes no `name`, `schedule` or `on`, and two
-  ParamRouters MUST have different `name`s.
-- The CDN still gets a cache behavior for each key until the CDN learns about mounts; a mount that should reach
-  the function as the default behavior is not built yet.
-
 ### Runtime: `FunctionRouter`
 
 `new FunctionRouter(provider, options)` takes `authenticated: "iam" | "none"`
@@ -260,6 +229,15 @@ nickname. Without one the name is the function's name (`fn.name`), or
 `"METHOD /path"` for anonymous functions. Names MUST be unique per router, so
 a function mounted on two routes needs `{ name }` on at least one of them.
 
+The method is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` or `"*"`: a `"*"` route, such as
+`.url("*", "/", "./api/index.ts", { request: true, response: VercelResponse })`, answers every HTTP method on its path,
+exactly that path (it does not match sub-paths), and the function reads the real method from its request. When a
+specific-method route and a `"*"` route share a path, the specific method MUST win whatever the registration order, so
+`"* /x"` and `"GET /x"` coexist, while `"* /x"` twice is a duplicate. On API Gateway a `"*"` route is `ANY /path`. For different overlapping path patterns
+(`"* /a/{id}"` and `"GET /a/new"`), local mode follows registration order while CloudFront and API Gateway prefer the
+most literal path, so register the more specific routes first. A `HEAD` request goes to a `"*"` route when the path has
+no `HEAD` route, and the Lambda handler then answers it with the headers and status but no body.
+
 `router.listen(port)` serves the routes with `Bun.serve` (`port` defaults to
 `$PORT`, else 3000; `router.fetch` is exposed to mount elsewhere) and returns each route's URL by name. `urls()`
 returns the same map later, and `stop()` shuts the server down. In remote mode
@@ -269,7 +247,7 @@ local mode they are this server's. Remote mode without deployed endpoints
 throws. Path params stay as `{placeholders}`.
 
 `router.fetch(name, { method, headers, body, query, params })` calls a route by name at its `urls()` address and returns the
-`Response`. `method` defaults to the route's own; an object or array `body` is sent as JSON; `query` is a record, a string or
+`Response`. `method` defaults to the route's own (`GET` for a `"*"` route); an object or array `body` is sent as JSON; `query` is a record, a string or
 `URLSearchParams`; `params` fills the `{placeholders}`. `POST`, `PUT` and `PATCH` carry `x-amz-content-sha256`, the SHA-256 of the body,
 which CloudFront origin access control requires. Redirects are returned, not followed, and calls are not SigV4-signed, so
 an `"iam"` function URL still answers 403. `router.fetch(request)` still serves a `Request`, as before.
@@ -278,8 +256,8 @@ an `"iam"` function URL still answers 403. `router.fetch(request)` still serves 
 a path with an optional query string, such as `"/items/42?x=1"`. The router owns the host, so an absolute URL
 (`https://...`, `//host/...`, or any `URL` object) MUST NOT be passed and throws. The path is matched against the registered
 routes in registration order, like the server does; no match, a malformed percent-encoding, or a `init.method` that no route
-with that path has all throw. Without `init.method` the method is the matched route's; when the path has routes for several
-methods the call throws and asks for `init.method`. `init` is a standard `RequestInit`. A string that does not start with `/`
+with that path has all throw. Without `init.method` the method is the matched route's (`GET` for a `"*"` route); when the path has routes for several
+methods the call throws and asks for `init.method`, and a path with a `"*"` route accepts any `init.method`. `init` is a standard `RequestInit`. A string that does not start with `/`
 is a route name (the form above). `router.fetch(request, server)` ignores everything after the `Request`, so `Bun.serve({ fetch: router.fetch })` works.
 
 Where the call goes:
@@ -493,7 +471,8 @@ each with its own `Cert`.
 | | API Gateway (`cert`) | CDN (`router`) |
 | --- | --- | --- |
 | Price | about $1 per million requests | within CloudFront's request pricing and free tier |
-| Same path, different methods, different functions | supported | refused unless `methodRouting: "function"` |
+| Same path, different methods, different functions (`"*"` counts as a method of its own) | supported | refused unless `methodRouting: "function"` |
+| `"*"` route | `ANY /path` | behavior allows `GET`, `HEAD`, `OPTIONS`, `PUT`, `POST`, `PATCH` and `DELETE` |
 | Routes | up to 300 | about 25 distinct paths by default (a quota) |
 | `POST` and `PUT` from clients | plain requests | MUST send `x-amz-content-sha256`, the SHA-256 hex digest of the body; `router.fetch` adds it for client calls |
 | `Authorization` header | passed through | replaced by CloudFront's signature; `jwtAuth` MUST read another header |
@@ -527,7 +506,7 @@ path is a behavior (one or two per route). The plan itself is chosen in the Clou
 
 `apply` then publishes a CloudFront Function that picks the function by method
 and path on every request (a `HEAD` request goes to the `GET` route unless the
-path has a `HEAD` route) and answers 404 for anything else. CloudFront charges
+path has a `HEAD` or a `"*"` route, and a `"*"` route yields to a specific method on the same path) and answers 404 for anything else. CloudFront charges
 for its invocations (about $0.10 per million after 2 million free a month; check
 current pricing) and every request pays a little latency. The function is created whenever
 `methodRouting: "function"` is set, so every request to the distribution is one invocation. When

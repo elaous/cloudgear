@@ -496,7 +496,7 @@ export interface DistributionInputs {
 // CloudFront allows just three method sets per behavior.
 export function allowedMethods(methods: string[]): string[] {
   const set = new Set(methods);
-  if ([...set].some((m) => !["GET", "HEAD", "OPTIONS"].includes(m))) return ALL_METHODS;
+  if (set.has("*") || [...set].some((m) => !["GET", "HEAD", "OPTIONS"].includes(m))) return ALL_METHODS;
   return set.has("OPTIONS") ? ["GET", "HEAD", "OPTIONS"] : ["GET", "HEAD"];
 }
 

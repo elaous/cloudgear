@@ -1,6 +1,7 @@
 import { debug, errorSummary, timed } from "@cloudgear/debug";
 import type { Authenticator } from "../auth";
 import {
+  ANY_METHOD,
   INVOKE_CONTENT_TYPE,
   buildInput,
   compilePath,
@@ -221,15 +222,15 @@ function resolveInput(
 }
 
 function paramsFor(routes: (RouteSpec & { matcher: ReturnType<typeof compilePath> })[], method: string, pathname: string): Record<string, string> | undefined {
-  const find = (wanted: string) => {
+  const find = (accepted: string) => {
     for (const route of routes) {
-      if (route.method !== wanted) continue;
+      if (route.method !== accepted) continue;
       const params = matchPath(route.matcher, pathname);
       if (params) return params;
     }
     return undefined;
   };
-  return find(method) ?? (method === "HEAD" ? find("GET") : undefined);
+  return find(method) ?? find(ANY_METHOD) ?? (method === "HEAD" ? find("GET") : undefined);
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): HttpResult {

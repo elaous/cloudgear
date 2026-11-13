@@ -1,15 +1,20 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { BlobStore } from "@cloudgear/blob";
-import { CDN, Cert } from "@cloudgear/cdn";
+import { CDN, Cert, type CdnRouter, type RouteFetchInit } from "@cloudgear/cdn";
 import { DNS } from "@cloudgear/dns";
-import { FunctionRouter } from "@cloudgear/functions";
+import { FunctionRouter, type FetchOpts } from "@cloudgear/functions";
 import { MemoryCdnDriver } from "../packages/cdn/drivers/memory-cdn";
 
 const sha = (data: string) => createHash("sha256").update(data).digest("hex");
 const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const HELLO_SHA = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 const DISTRIBUTION = "https://d111.cloudfront.net";
+
+// Compile-time: FunctionRouter and FetchOpts stay assignable to the CDN's structural types.
+const _routerFitsCdn: Required<CdnRouter> = new FunctionRouter("aws");
+const _optsFitCdn: RouteFetchInit = {} as FetchOpts;
+void [_routerFitsCdn, _optsFitCdn];
 
 interface Call {
   url: string;
@@ -136,12 +141,85 @@ describe("cdn.fetch", () => {
       expect(calls).toEqual([]);
     });
 
+    test("a router without fetchVia is refused before url() is asked", async () => {
+      const cdn = deployed(() => ({ router: { provider: "aws" } }), null);
+      await expect(cdn.fetch("/items")).rejects.toThrow("router has no fetchVia; pass a FunctionRouter");
+      expect(calls).toEqual([]);
+    });
+
+    test("init.redirect overrides the manual default", async () => {
+      await routerCdn().fetch("/items/1", { redirect: "follow" });
+      expect(calls[0]!.init.redirect).toBe("follow");
+    });
+
+    test("binary and FormData bodies are hashed as sent", async () => {
+      const cdn = routerCdn();
+      const bytes = new Uint8Array([0, 255, 1, 128]);
+      await cdn.fetch("/things/1", { method: "PUT", body: bytes });
+      const form = new FormData();
+      form.append("a", "1");
+      await cdn.fetch("/things/2", { method: "PUT", body: form });
+      const sent = (call: Call) => createHash("sha256").update(call.init.body as Uint8Array).digest("hex");
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBe(createHash("sha256").update(bytes).digest("hex"));
+      expect(calls[1]!.headers.get("x-amz-content-sha256")).toBe(sent(calls[1]!));
+      expect(calls[1]!.headers.get("content-type")).toStartWith("multipart/form-data; boundary=");
+    });
+
+    test("a stream body is hashed as sent", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("hel"));
+          controller.enqueue(new TextEncoder().encode("lo"));
+          controller.close();
+        },
+      });
+      await routerCdn().fetch("/items", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBe(HELLO_SHA);
+    });
+
     test("router.fetch is not affected by a CDN fetch", async () => {
       const served = router();
       const cdn = deployed(() => ({ router: served }));
       await cdn.fetch("/items/1");
       const res = await served.fetch(new Request("http://app/items/1"));
       expect(res.status).toBe(200);
+    });
+  });
+
+  describe("endpoints file", () => {
+    const withEndpoints = async (api: object | undefined) => {
+      const file = `${process.env.TMPDIR ?? "/tmp"}/cloudgear-cdn-fetch-${crypto.randomUUID()}.json`;
+      await Bun.write(file, JSON.stringify({ provider: "aws", routes: { "GET /items": "https://fn.example/", "GET /items/{id}": "https://fn.example/" }, auth: "none", ...(api ? { api } : {}) }));
+      process.env.CLOUDGEAR_ENDPOINTS_FILE = file;
+      const served = new FunctionRouter("aws", { endpointsFile: file }).url("GET", "/items", () => ({}), { name: "list" }).url("GET", "/items/{id}", () => ({}), { name: "get" });
+      const driver = new MemoryCdnDriver(new Map());
+      return { served, cdn: new CDN("aws", new Cert("aws", new DNS("aws", "api.example.com")), { router: served, driver }) };
+    };
+    const hosts = () => calls.map((c) => new URL(c.url).host);
+
+    for (const [label, api] of [
+      ["via cloudfront", { domain: "api.example.com", url: DISTRIBUTION, via: "cloudfront" }],
+      ["an older file with a distribution URL", { domain: "api.example.com", url: DISTRIBUTION }],
+    ] as const) {
+      test(`${label}: url(), cdn.fetch and router.fetch agree without the provider`, async () => {
+        const { served, cdn } = await withEndpoints(api);
+        expect(await cdn.url()).toBe("https://api.example.com");
+        await cdn.fetch("list");
+        await cdn.fetch("/items/1");
+        await served.fetch("list");
+        expect(hosts()).toEqual(["api.example.com", "api.example.com", "api.example.com"]);
+        expect(calls[0]!.url).toBe("https://api.example.com/items");
+      });
+    }
+
+    test("an API Gateway entry for the same domain is not a CDN", async () => {
+      const { cdn } = await withEndpoints({ domain: "api.example.com", url: "https://abc.execute-api.us-east-1.amazonaws.com" });
+      await expect(cdn.url()).rejects.toThrow("is not deployed");
+    });
+
+    test("another domain's api entry is ignored", async () => {
+      const { cdn } = await withEndpoints({ domain: "other.example.com", url: DISTRIBUTION, via: "cloudfront" });
+      await expect(cdn.url()).rejects.toThrow("is not deployed");
     });
   });
 
@@ -182,12 +260,33 @@ describe("cdn.fetch", () => {
       expect(calls).toEqual([]);
     });
 
+    test("control characters cannot hide a dot segment", async () => {
+      const cdn = bucketCdn();
+      await expect(cdn.fetch("/a/.\n./../x")).rejects.toThrow("leaves the CDN's root");
+      await expect(cdn.fetch("/.\t./x")).rejects.toThrow("leaves the CDN's root");
+      await cdn.fetch("/a/b/.\r./x");
+      expect(calls[0]!.url).toBe(`${DISTRIBUTION}/a/x`);
+    });
+
+    test("encoded slashes and ..; stay literal", async () => {
+      const cdn = bucketCdn();
+      await cdn.fetch("/a%2f..%2fx");
+      await cdn.fetch("/..;/x");
+      await cdn.fetch("/a/..%2f..%2fx");
+      expect(calls.map((c) => c.url)).toEqual([`${DISTRIBUTION}/a%2f..%2fx`, `${DISTRIBUTION}/..;/x`, `${DISTRIBUTION}/a/..%2f..%2fx`]);
+    });
+
     test("absolute URLs are rejected", async () => {
       const cdn = bucketCdn();
       for (const input of ["https://evil.example/x", "//evil.example/x", "\\\\evil.example\\x"]) {
         await expect(cdn.fetch(input)).rejects.toThrow("the CDN owns the host");
       }
       expect(calls).toEqual([]);
+    });
+
+    test("init.redirect overrides the manual default", async () => {
+      await bucketCdn().fetch("/index.html", { redirect: "follow" });
+      expect(calls[0]!.init.redirect).toBe("follow");
     });
 
     test("url() throws until the CDN is deployed", async () => {

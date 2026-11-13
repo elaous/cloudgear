@@ -63,7 +63,7 @@ export interface RouteFetchInit {
 // Satisfied by FunctionRouter from @cloudgear/functions.
 export interface CdnRouter {
   readonly provider: string;
-  fetchVia(base: string, input: string, init?: any): Promise<Response>;
+  fetchVia?(base: string, input: string, init?: RequestInit | RouteFetchInit): Promise<Response>;
 }
 
 // Where CloudFront serves from: 100 is North America and Europe, 200 adds Asia, Middle East and Africa, All every location.
@@ -134,11 +134,13 @@ export class CDN {
     return info.url;
   }
 
-  // A route name or path for a router CDN, an object path for a bucket CDN.
+  // Route name or path; object path for a bucket.
   async fetch(input: string, init?: RequestInit | RouteFetchInit): Promise<Response> {
-    const base = (await this.url()).replace(/\/+$/, "");
-    if (this.options.router) return this.options.router.fetchVia(base, input, init);
-    return this.fetchObject(base, input, init as RequestInit | undefined);
+    const { router } = this.options;
+    if (router && typeof router.fetchVia !== "function") throw new Error("The CDN's router has no fetchVia; pass a FunctionRouter");
+    const base = await this.url();
+    if (router) return router.fetchVia!(base, input, init);
+    return this.fetchObject(trimTrailingSlashes(base), input, init as RequestInit | undefined);
   }
 
   private async fetchObject(base: string, input: string, init: RequestInit = {}): Promise<Response> {
@@ -167,14 +169,21 @@ const ABSOLUTE_INPUT = /^(?:[a-z][a-z\d+.-]*:\/\/|\/\/|\\\\)/i;
 const OBJECT_ORIGIN = "http://cdn.invalid";
 const PARENT_SEGMENT = /^(?:\.|%2e){2}$/i;
 
-function objectPath(input: string): string {
-  const message = `fetch takes an object path, got "${input}"; the CDN owns the host`;
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end--;
+  return value.slice(0, end);
+}
+
+function objectPath(given: string): string {
+  const input = given.replace(/[\t\r\n]/g, "");
+  const message = `fetch takes an object path, got "${given}"; the CDN owns the host`;
   if (ABSOLUTE_INPUT.test(input)) throw new Error(message);
   const rooted = input.startsWith("/") ? input : `/${input}`;
   let depth = 0;
   for (const segment of rooted.split(/[?#]/, 1)[0]!.split(/[/\\]/)) {
     if (PARENT_SEGMENT.test(segment)) {
-      if (--depth < 0) throw new Error(`"${input}" leaves the CDN's root`);
+      if (--depth < 0) throw new Error(`"${given}" leaves the CDN's root`);
     } else if (segment && !/^(?:\.|%2e)$/i.test(segment)) depth++;
   }
   const parsed = new URL(rooted, OBJECT_ORIGIN);
@@ -187,12 +196,24 @@ function readDeployedCdn(domain: string): string | undefined {
   const file = process.env.CLOUDGEAR_ENDPOINTS_FILE ?? findUp(process.cwd(), ".cloudgear/endpoints.json");
   if (!file || !fs.existsSync(file)) return undefined;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { cdn?: { domain?: string; url?: string }; cdns?: Record<string, { url?: string }> };
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { cdn?: { domain?: string; url?: string }; cdns?: Record<string, { url?: string }>; api?: { domain?: string; url?: string; via?: string } };
     const own = parsed.cdns?.[domain];
     if (own?.url) return own.url;
-    return parsed.cdn?.domain === domain && parsed.cdn.url ? parsed.cdn.url : undefined;
+    if (parsed.cdn?.domain === domain && parsed.cdn.url) return parsed.cdn.url;
+    return servesRouter(parsed.api, domain) ? `https://${domain}` : undefined;
   } catch {
     return undefined;
+  }
+}
+
+// Same test as the router's: `via`, or a distribution URL for older files.
+function servesRouter(api: { domain?: string; url?: string; via?: string } | undefined, domain: string): boolean {
+  if (!api?.domain || normalizeHostname(api.domain) !== domain) return false;
+  if (api.via === "cloudfront") return true;
+  try {
+    return !!api.url && /\.cloudfront\.net$/i.test(new URL(api.url).hostname);
+  } catch {
+    return false;
   }
 }
 

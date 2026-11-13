@@ -211,7 +211,7 @@ export class FunctionRouter {
   }) as RouterFetch;
 
   fetchVia(base: string, input: string, init?: FetchOpts | RequestInit): Promise<Response> {
-    return this.fetchClient(input, init, base.replace(/\/+$/, ""));
+    return this.fetchClient(input, init, trimTrailingSlashes(base));
   }
 
   private fetchClient(target: string | URL, second: FetchOpts | RequestInit | undefined, cdnBase?: string): Promise<Response> {
@@ -222,7 +222,11 @@ export class FunctionRouter {
     throw new TypeError("fetch takes a Request, a path or a route name");
   }
 
-  urlFrom(name: string, params: Record<string, string | number> = {}, cdnBase?: string): URL {
+  urlFrom(name: string, params: Record<string, string | number> = {}): URL {
+    return this.routeUrl(name, params);
+  }
+
+  private routeUrl(name: string, params: Record<string, string | number>, cdnBase?: string): URL {
     const route = this.routes.find((r) => r.name === name);
     if (!route) throw new Error(`No route named "${name}"; known routes: ${this.routes.map((r) => r.name).join(", ") || "none"}`);
     const template = cdnBase === undefined ? this.urls()[name] : `${cdnBase}${route.path}`;
@@ -240,7 +244,7 @@ export class FunctionRouter {
   }
 
   private async fetchRoute(name: string, opts: FetchOpts = {}, cdnBase?: string): Promise<Response> {
-    const url = this.urlFrom(name, opts.params, cdnBase);
+    const url = this.routeUrl(name, opts.params ?? {}, cdnBase);
     const routeMethod = this.routes.find((r) => r.name === name)!.method;
     const method = assertMethod((opts.method ?? (routeMethod === ANY_METHOD ? "GET" : routeMethod)).toUpperCase());
     if (opts.query !== undefined) {
@@ -559,6 +563,12 @@ export async function request(
     signed: !!init.sign,
     bytes: body.length,
   });
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end--;
+  return value.slice(0, end);
 }
 
 function addCdnDigest(headers: Headers, method: string, payload: Uint8Array | string): void {

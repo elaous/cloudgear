@@ -566,14 +566,24 @@ Rules the analyzer enforces:
   the entry for its own domain that `apply` writes into `.cloudgear/endpoints.json`
   (`cdn`, or `cdns` by domain once the app has several) and
   otherwise asks the provider (`CloudFront` by alias), and throws until the
-  CDN is deployed. `await cdn.fetch(input, init)` is the global `fetch` aimed
-  at the CDN: it resolves `input` against `cdn.url()` and returns the
-  `Response`, with redirects returned, not followed, and no SigV4 signing. For a router CDN `input` is a
-  route name or a path, with the same rules and errors as `router.fetch`; the method comes from
-  the route (`GET` for a `"*"` route) unless `init.method` says otherwise, and `POST`, `PUT`, `PATCH` and any request with a body get
-  `x-amz-content-sha256` unless the caller set it. For a bucket CDN `input` is the object path
-  (`"/index.html"` or `"index.html"`); only `GET` (the default) and `HEAD` are allowed, a body is refused,
-  an absolute URL or a `..` that climbs above the root throws, and no digest is added. Register drivers with `registerCertDriver()` and
+  CDN is deployed. For a CDN that serves the router, the entry is `api` and
+  `url()` returns `https://<cdn.domain>`, the host `router.fetch` calls, with no
+  provider call.
+- `await cdn.fetch(input, init)` is the global `fetch` aimed at the CDN: it
+  resolves `input` against `cdn.url()` and returns the `Response`. Calls are
+  not SigV4-signed, and redirects are returned, not followed, unless
+  `init.redirect` says otherwise.
+  - Router CDN: `input` is a route name or a path, with the same rules and
+    errors as `router.fetch` (the router MUST be a `FunctionRouter`). The method
+    comes from the route (`GET` for a `"*"` route) unless `init.method` says
+    otherwise. `POST`, `PUT`, `PATCH` and any request with a body get
+    `x-amz-content-sha256` unless the caller set it, so callers need not send
+    the digest.
+  - Bucket CDN: `input` is the object path (`"/index.html"` or `"index.html"`).
+    Only `GET` (the default) and `HEAD` are allowed and a body is refused. An
+    absolute URL, or a `..` that climbs above the root, throws. No digest is
+    added.
+- Register drivers with `registerCertDriver()` and
   `registerCdnDriver()`, or use `CLOUDGEAR_CERT_DRIVER=memory` and
   `CLOUDGEAR_CDN_DRIVER=memory`. `status()`, `url()` and `fetch()` are for the app that
   deploys or serves from the router (a local process or Vercel). Inside a

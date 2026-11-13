@@ -7,7 +7,9 @@ import {
   INVOKE_CONTENT_TYPE,
   ROUTE_HEADER,
   PARAM,
+  ANY_METHOD,
   assertMethod,
+  assertRouteMethod,
   buildInput,
   compilePath,
   invoke,
@@ -22,6 +24,7 @@ import {
   type ResponseKind,
   type RequestContext,
   type Method,
+  type RouteMethod,
   type PathParams,
   type Provider,
 } from "./http";
@@ -61,7 +64,7 @@ export interface RouteOptions {
 export type FetchBody = string | Uint8Array | ArrayBuffer | URLSearchParams | Record<string, unknown> | unknown[];
 
 export interface FetchOpts {
-  // Defaults to the route's own method.
+  // Defaults to the route's own method, GET for a "*" route.
   method?: Method | Lowercase<Method>;
   headers?: Record<string, string> | Headers;
   // Objects and arrays are sent as JSON.
@@ -121,7 +124,7 @@ export interface FunctionRouterOptions {
 }
 
 interface CompiledRoute {
-  method: Method;
+  method: RouteMethod;
   path: string;
   key: string;
   name: string;
@@ -166,21 +169,21 @@ export class FunctionRouter {
     }
   }
 
-  url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
+  url<P extends string>(method: RouteMethod | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
   url<P extends string>(
-    method: Method | Lowercase<Method>,
+    method: RouteMethod | Lowercase<Method>,
     path: P,
     fn: (...args: any[]) => unknown,
     options: RouteOptions & ({ request: true } | { response: typeof response | typeof VercelResponse }),
   ): this;
   url<P extends string, I extends { readonly [K in PathParams<P>]: unknown }, O>(
-    method: Method | Lowercase<Method>,
+    method: RouteMethod | Lowercase<Method>,
     path: P,
     fn: Handler<I, O>,
     options?: RouteOptions,
   ): this;
-  url(method: Method | Lowercase<Method>, path: string, handler: ((...args: any[]) => unknown) | string, options: RouteOptions = {}): this {
-    const route = { method: assertMethod(method), path };
+  url(method: RouteMethod | Lowercase<Method>, path: string, handler: ((...args: any[]) => unknown) | string, options: RouteOptions = {}): this {
+    const route = { method: assertRouteMethod(method), path };
     const key = routeKey(route);
     if (this.routes.some((r) => r.key === key)) throw new Error(`Route "${key}" is already registered`);
     const script = typeof handler === "string" ? scriptPath(handler) : undefined;
@@ -230,7 +233,8 @@ export class FunctionRouter {
 
   private async fetchRoute(name: string, opts: FetchOpts = {}): Promise<Response> {
     const url = this.urlFrom(name, opts.params);
-    const method = assertMethod((opts.method ?? this.routes.find((r) => r.name === name)!.method).toUpperCase());
+    const routeMethod = this.routes.find((r) => r.name === name)!.method;
+    const method = assertMethod((opts.method ?? (routeMethod === ANY_METHOD ? "GET" : routeMethod)).toUpperCase());
     if (opts.query !== undefined) {
       const query = opts.query instanceof URLSearchParams || typeof opts.query === "string" ? new URLSearchParams(opts.query) : new URLSearchParams(Object.entries(opts.query).map(([k, v]): [string, string] => [k, String(v)]));
       for (const [key, value] of query) url.searchParams.append(key, value);
@@ -305,11 +309,13 @@ export class FunctionRouter {
     if (!matches.length) throw new Error(`No route matches "${pathname}"`);
     const methods = [...new Set(matches.map((r) => r.method))];
     if (requested === undefined) {
-      if (methods.length > 1) throw new Error(`"${pathname}" matches routes for ${methods.join(", ")}; pass init.method`);
-      return { route: matches[0]!, method: matches[0]!.method };
+      const defaults = [...new Set(methods.map((m) => (m === ANY_METHOD ? "GET" : m)))];
+      if (defaults.length > 1) throw new Error(`"${pathname}" matches routes for ${methods.join(", ")}; pass init.method`);
+      const method = defaults[0] as Method;
+      return { route: matches.find((r) => this.acceptsMethod(r, method))!, method };
     }
     const method = assertMethod(requested.toUpperCase());
-    const route = matches.find((r) => r.method === method);
+    const route = matches.find((r) => this.acceptsMethod(r, method));
     if (!route) throw new Error(`Method ${method} is not allowed for "${pathname}"; allowed: ${methods.join(", ")}`);
     return { route, method };
   }
@@ -347,7 +353,7 @@ export class FunctionRouter {
       }
       if (!params) continue;
       pathMatched = true;
-      if (route.method !== req.method) continue;
+      if (!this.acceptsMethod(route, req.method)) continue;
       debug("router", `matched ${route.key}`, { name: route.name, public: route.public, params: Object.keys(params) });
       let context: RequestContext = {};
       if (this.options.authenticate && !route.public) {
@@ -378,6 +384,12 @@ export class FunctionRouter {
     debug("router", pathMatched ? `method not allowed for ${req.method}` : `no route for ${req.method} ${url.pathname}`);
     return Response.json({ error: "Not found" }, { status: pathMatched ? 405 : 404 });
   };
+
+  private acceptsMethod(route: CompiledRoute, method: string): boolean {
+    if (route.method === method) return true;
+    if (route.method !== ANY_METHOD) return false;
+    return !this.routes.some((other) => other.method === method && other.matcher.regex.source === route.matcher.regex.source);
+  }
 
   listen(port: number = Number(process.env.PORT ?? 3000)): Record<string, string> {
     // Importing the router in Lambda does not serve.

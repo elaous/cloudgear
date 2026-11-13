@@ -2,6 +2,8 @@ import { VercelRequest, VercelResponse, type VercelRequestQuery } from "./vercel
 
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
+export const ANY_METHOD = "*";
+export type RouteMethod = Method | typeof ANY_METHOD;
 
 export type Provider = "aws" | "gcp" | "azure";
 
@@ -42,7 +44,7 @@ export interface RequestContext {
 
 export interface RouteSpec {
   name?: string;
-  method: Method;
+  method: RouteMethod;
   path: string;
 }
 
@@ -76,6 +78,15 @@ export function assertMethod(method: string): Method {
     throw new Error(`Unsupported HTTP method "${method}", expected one of ${METHODS.join(", ")}`);
   }
   return upper as Method;
+}
+
+export function assertRouteMethod(method: string): RouteMethod {
+  if (method === ANY_METHOD) return ANY_METHOD;
+  try {
+    return assertMethod(method);
+  } catch {
+    throw new Error(`Unsupported HTTP method "${method}", expected one of ${METHODS.join(", ")} or "${ANY_METHOD}"`);
+  }
 }
 
 export const PARAM = /\{([A-Za-z_$][\w$]*)\}/g;

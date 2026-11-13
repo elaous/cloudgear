@@ -17,7 +17,7 @@ import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/ev
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
-import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
+import { ANY_METHOD, METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
 
 export interface AnalyzedResource {
@@ -669,7 +669,7 @@ export function analyzeApp(entryPath: string): AppModel {
   for (const call of addCalls) {
     const [methodArg, pathArg, fnArg] = call.getArguments();
     const method = stringLiteral(methodArg, `${where(call)}: route method`).toUpperCase();
-    if (!(METHODS as readonly string[]).includes(method)) throw new Error(`${where(call)}: unsupported HTTP method "${method}"`);
+    if (!isRouteMethod(method)) throw new Error(`${where(call)}: unsupported HTTP method "${method}", expected one of ${METHODS.join(", ")} or "${ANY_METHOD}"`);
     const routePath = stringLiteral(pathArg, `${where(call)}: route path`);
     if (!fnArg) throw new Error(`${where(call)}: missing function argument`);
 
@@ -693,7 +693,7 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), responseKindOf);
     const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request);
-    if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
+    if (publicRoutes.has(`${method} ${routePath}`)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
     const extras = JSON.stringify([routeOptions.include.map((f) => f.rel), routeOptions.request, routeOptions.response]);
@@ -1102,7 +1102,7 @@ export function analyzeApp(entryPath: string): AppModel {
       if (behaviors > 25 || origins > 25) {
         warnings.push(`${at}: ${behaviors} behaviors and ${origins} origins; a CloudFront distribution allows 25 of each by default, so request a quota increase`);
       }
-      const bodied = new Set(routes.map((r) => r.method).filter((m) => m === "POST" || m === "PUT"));
+      const bodied = new Set(routes.flatMap((r) => (r.method === ANY_METHOD ? ["POST", "PUT"] : [r.method])).filter((m) => m === "POST" || m === "PUT"));
       if (bodied.size) {
         warnings.push(`${at}: ${[...bodied].sort().join(" and ")} requests through the CDN MUST carry an x-amz-content-sha256 header holding the SHA-256 hex digest of the body (origin access control for Lambda requires it)`);
       }
@@ -1753,11 +1753,13 @@ function resolveRoutePath(spec: string, callerFile: string): string {
   return path.join(projectRootOf(callerFile), spec.replace(/^\/+/, ""));
 }
 
+const isRouteMethod = (method: string) => method === ANY_METHOD || (METHODS as readonly string[]).includes(method);
+
 function scriptOf(call: CallExpression): string | undefined {
   const callee = call.getExpression();
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== "url") return undefined;
   const [method, , script] = call.getArguments();
-  if (!(method && Node.isStringLiteral(method) && (METHODS as readonly string[]).includes(method.getLiteralText().toUpperCase()))) return undefined;
+  if (!(method && Node.isStringLiteral(method) && isRouteMethod(method.getLiteralText().toUpperCase()))) return undefined;
   if (!script || !(Node.isStringLiteral(script) || Node.isNoSubstitutionTemplateLiteral(script))) return undefined;
   return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
 }

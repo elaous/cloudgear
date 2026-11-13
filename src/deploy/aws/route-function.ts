@@ -17,7 +17,8 @@ function pathRegex(shape: string): string {
 
 export function routeFunctionCode(routes: MethodRoute[]): string {
   const literal = (path: string) => routeShape(path).replace(/\{\}/g, "").length;
-  const ordered = [...routes].sort((a, b) => literal(b.path) - literal(a.path) || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+  const specificFirst = (a: MethodRoute, b: MethodRoute) => Number(a.method === "*") - Number(b.method === "*");
+  const ordered = [...routes].sort((a, b) => literal(b.path) - literal(a.path) || routeShape(a.path).localeCompare(routeShape(b.path)) || specificFirst(a, b) || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
   const table = ordered.map((route) => ({ method: route.method, regex: pathRegex(routeShape(route.path)), origin: originIdOf(route.function) }));
   return `import cf from 'cloudfront';
 
@@ -27,7 +28,7 @@ var ROUTES = ${JSON.stringify(table)}.map(function (route) {
 
 function find(method, uri) {
   for (var i = 0; i < ROUTES.length; i++) {
-    if (ROUTES[i].method === method && ROUTES[i].regex.test(uri)) return ROUTES[i];
+    if ((ROUTES[i].method === method || ROUTES[i].method === '*') && ROUTES[i].regex.test(uri)) return ROUTES[i];
   }
   return null;
 }

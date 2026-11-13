@@ -366,7 +366,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         dns_zone: certificate!.dns.zone,
         ...(certificate!.dns.token ? { dns_token: certificate!.dns.token } : {}),
         routes: routed
-          .flatMap((fn) => fn.route.map((route) => ({ key: `${route.method} ${route.path}`, function: fn.physical_name })))
+          .flatMap((fn) => fn.route.map((route) => ({ key: `${route.method === "*" ? "ANY" : route.method} ${route.path}`, function: fn.physical_name })))
           .sort((a, b) => a.key.localeCompare(b.key)),
       } satisfies ApiComparable,
       source: api,

@@ -1096,10 +1096,8 @@ export function analyzeApp(entryPath: string): AppModel {
           ].join("\n"),
         );
       }
-      if (methodRouting === "function" && !conflicts.length) {
-        warnings.push(`${at}: methodRouting is set but no path reaches several functions; no CloudFront Function will be created`);
-      }
-      const behaviors = methodRouting === "function" && conflicts.length ? 0 : behaviorsFor(routes).length;
+      const routedByFunction = methodRouting === "function";
+      const behaviors = routedByFunction ? 0 : behaviorsFor(routes).length;
       const origins = new Set(routes.map((r) => r.function)).size;
       if (behaviors > 25 || origins > 25) {
         warnings.push(`${at}: ${behaviors} behaviors and ${origins} origins; a CloudFront distribution allows 25 of each by default, so request a quota increase`);
@@ -1114,7 +1112,7 @@ export function analyzeApp(entryPath: string): AppModel {
         domain: routerHost,
         ...(routerHost !== cert.domain ? { certificate: cert.domain } : {}),
         via: "cloudfront",
-        ...(methodRouting === "function" && conflicts.length ? { method_routing: true } : {}),
+        ...(routedByFunction ? { method_routing: true } : {}),
         options: readCdnOptions(optionsArg, `${at}: CDN`),
       };
     }

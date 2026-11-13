@@ -79,6 +79,3 @@ export function conflictingGroups(routes: EdgeRoute[]): RouteGroup[] {
   }
   return conflicts;
 }
-
-// CloudFront's Free plan allows this many cache behaviors besides the default one (not confirmed for the default).
-export const FREE_PLAN_BEHAVIORS = 5;

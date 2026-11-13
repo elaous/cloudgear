@@ -218,6 +218,13 @@ describe("analyzeApp", () => {
         expect(analyzeApp(fixture("edge/cdn-router-method-routing.ts")).api).toMatchObject({ via: "cloudfront", method_routing: true });
       });
 
+      test("freePlan routes with a CloudFront Function when the paths would need more than 5 behaviors", () => {
+        const model = analyzeApp(fixture("edge/cdn-router-free-plan.ts"));
+        expect(model.api).toMatchObject({ via: "cloudfront", method_routing: true, options: { free_plan: "true" } });
+        expect(model.warnings.join("\n")).toMatch(/freePlan allows 5 cache behaviors and these routes need 6, so one CloudFront Function routes them/);
+        expect(analyzeApp(fixture("edge/cdn-router-many-routes.ts")).api?.method_routing).toBeUndefined();
+      });
+
       test("methodRouting without a conflict is ignored with a warning", () => {
         const model = analyzeApp(fixture("edge/cdn-router-unneeded-method-routing.ts"));
         expect(model.api!.method_routing).toBeUndefined();

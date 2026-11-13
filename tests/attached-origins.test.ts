@@ -125,6 +125,18 @@ describe("attached origins", () => {
     expect(() => decodeConfig(encodeConfig(withCdn([{ ...attached[0]!, origin: "not json" }])))).toThrow(/not a JSON object/);
   });
 
+  test("on the Free plan, own and attached behaviors together are limited to 5", () => {
+    const many = (count: number) => [{ id: "legacy-api", origin: JSON.stringify(origin), behavior: Array.from({ length: count }, (_, i) => ({ path_pattern: `/p${i}/*`, behavior: JSON.stringify({ ...behavior, PathPattern: `/p${i}/*` }) })) }];
+    const free = (count: number) => {
+      const config = withCdn(many(count));
+      config.cdn[0]!.options = { free_plan: "true" };
+      return config;
+    };
+    expect(() => plan(free(5), emptyState())).not.toThrow();
+    expect(() => plan(free(6), emptyState())).toThrow(/the Free plan allows 5 cache behaviors, but this distribution has 6 \(0 from the config, 6 attached\)/);
+    expect(() => plan(withCdn(many(6)), emptyState())).not.toThrow();
+  });
+
   test("the plan carries them, and refuses ids and patterns that clash", () => {
     const attached = [{ id: "legacy-api", origin: JSON.stringify(origin), behavior: [{ path_pattern: "/legacy/*", behavior: JSON.stringify(behavior) }] }];
     const cdn = plan(withCdn(attached), emptyState()).find((a) => a.type === "@aws.CloudFront")!;

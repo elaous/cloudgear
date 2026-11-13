@@ -52,13 +52,27 @@ export class Cert {
   }
 }
 
+export interface RouteFetchInit {
+  method?: string;
+  headers?: Record<string, string> | Headers;
+  body?: unknown;
+  query?: Record<string, string | number | boolean> | URLSearchParams | string;
+  params?: Record<string, string | number>;
+}
+
+// Satisfied by FunctionRouter from @cloudgear/functions.
+export interface CdnRouter {
+  readonly provider: string;
+  fetchVia(base: string, input: string, init?: any): Promise<Response>;
+}
+
 // Where CloudFront serves from: 100 is North America and Europe, 200 adds Asia, Middle East and Africa, All every location.
 export type PriceClass = "PriceClass_100" | "PriceClass_200" | "PriceClass_All";
 
 export interface CdnOptions {
   // Exactly one of `bucket` and `router`.
   bucket?: BlobStore;
-  router?: { readonly provider: string };
+  router?: CdnRouter;
   // Hostname on a wildcard Cert; literal only.
   domain?: string;
   // Runs a CloudFront Function per request; literal only.
@@ -120,6 +134,22 @@ export class CDN {
     return info.url;
   }
 
+  // A route name or path for a router CDN, an object path for a bucket CDN.
+  async fetch(input: string, init?: RequestInit | RouteFetchInit): Promise<Response> {
+    const base = (await this.url()).replace(/\/+$/, "");
+    if (this.options.router) return this.options.router.fetchVia(base, input, init);
+    return this.fetchObject(base, input, init as RequestInit | undefined);
+  }
+
+  private async fetchObject(base: string, input: string, init: RequestInit = {}): Promise<Response> {
+    const method = (init.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") throw new Error(`A CDN serving a bucket is read-only: ${method} is not allowed, use GET or HEAD`);
+    if (init.body !== undefined && init.body !== null) throw new Error(`A ${method} request cannot have a body`);
+    const target = objectPath(input);
+    debug("cdn", `fetch ${method} ${this.domain}`);
+    return fetch(`${base}${target}`, { redirect: "manual", ...init, method });
+  }
+
   async status(): Promise<CdnInfo> {
     return timed("cdn", `status ${this.domain}`, async () => (await this.driver()).describe(this.domain));
   }
@@ -131,6 +161,25 @@ export class CDN {
     });
     return this.driverPromise;
   }
+}
+
+const ABSOLUTE_INPUT = /^(?:[a-z][a-z\d+.-]*:\/\/|\/\/|\\\\)/i;
+const OBJECT_ORIGIN = "http://cdn.invalid";
+const PARENT_SEGMENT = /^(?:\.|%2e){2}$/i;
+
+function objectPath(input: string): string {
+  const message = `fetch takes an object path, got "${input}"; the CDN owns the host`;
+  if (ABSOLUTE_INPUT.test(input)) throw new Error(message);
+  const rooted = input.startsWith("/") ? input : `/${input}`;
+  let depth = 0;
+  for (const segment of rooted.split(/[?#]/, 1)[0]!.split(/[/\\]/)) {
+    if (PARENT_SEGMENT.test(segment)) {
+      if (--depth < 0) throw new Error(`"${input}" leaves the CDN's root`);
+    } else if (segment && !/^(?:\.|%2e)$/i.test(segment)) depth++;
+  }
+  const parsed = new URL(rooted, OBJECT_ORIGIN);
+  if (parsed.origin !== OBJECT_ORIGIN) throw new Error(message);
+  return `${parsed.pathname}${parsed.search}`;
 }
 
 // Stops at the nearest package.json, like the router's endpoints lookup.

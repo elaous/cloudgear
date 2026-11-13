@@ -474,7 +474,7 @@ each with its own `Cert`.
 | Same path, different methods, different functions (`"*"` counts as a method of its own) | supported | refused unless `methodRouting: "function"` |
 | `"*"` route | `ANY /path` | behavior allows `GET`, `HEAD`, `OPTIONS`, `PUT`, `POST`, `PATCH` and `DELETE` |
 | Routes | up to 300 | about 25 distinct paths by default (a quota) |
-| `POST` and `PUT` from clients | plain requests | MUST send `x-amz-content-sha256`, the SHA-256 hex digest of the body; `router.fetch` adds it for client calls |
+| `POST` and `PUT` from clients | plain requests | MUST send `x-amz-content-sha256`, the SHA-256 hex digest of the body; `router.fetch` and `cdn.fetch` add it, so callers using them need not |
 | `Authorization` header | passed through | replaced by CloudFront's signature; `jwtAuth` MUST read another header |
 | Site and API on one domain | no | no; the CDN serves one or the other |
 | Deploy time | seconds | minutes per distribution update |
@@ -566,9 +566,16 @@ Rules the analyzer enforces:
   the entry for its own domain that `apply` writes into `.cloudgear/endpoints.json`
   (`cdn`, or `cdns` by domain once the app has several) and
   otherwise asks the provider (`CloudFront` by alias), and throws until the
-  CDN is deployed. Register drivers with `registerCertDriver()` and
+  CDN is deployed. `await cdn.fetch(input, init)` is the global `fetch` aimed
+  at the CDN: it resolves `input` against `cdn.url()` and returns the
+  `Response`, with redirects returned, not followed, and no SigV4 signing. For a router CDN `input` is a
+  route name or a path, with the same rules and errors as `router.fetch`; the method comes from
+  the route (`GET` for a `"*"` route) unless `init.method` says otherwise, and `POST`, `PUT`, `PATCH` and any request with a body get
+  `x-amz-content-sha256` unless the caller set it. For a bucket CDN `input` is the object path
+  (`"/index.html"` or `"index.html"`); only `GET` (the default) and `HEAD` are allowed, a body is refused,
+  an absolute URL or a `..` that climbs above the root throws, and no digest is added. Register drivers with `registerCertDriver()` and
   `registerCdnDriver()`, or use `CLOUDGEAR_CERT_DRIVER=memory` and
-  `CLOUDGEAR_CDN_DRIVER=memory`. `status()` and `url()` are for the app that
+  `CLOUDGEAR_CDN_DRIVER=memory`. `status()`, `url()` and `fetch()` are for the app that
   deploys or serves from the router (a local process or Vercel). Inside a
   Lambda there is no endpoints file and its role cannot list distributions, so
   pass the URL in as configuration there.

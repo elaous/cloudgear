@@ -1307,6 +1307,160 @@ elsewhere; the CDN then reads it from that region. Both options MUST be string
 literals, since `cloudgear generate` reads them. A bucket cannot move between
 regions: changing `region` on an existing bucket fails the apply.
 
+## Remote state
+
+By default state is the local file `.cloudgear/state.json`. To share it between
+machines or CI, keep it in S3 with `--state` or the `CLOUDGEAR_STATE`
+environment variable (the flag wins):
+
+```sh
+cloudgear apply --state s3://state.example.com/my-app/
+CLOUDGEAR_STATE='s3://state.example.com/my-app?region=us-east-1' cloudgear plan
+```
+
+The location is `s3://<bucket>/<prefix>`. The trailing slash is optional, the
+prefix MAY be empty, bucket names MAY contain dots, and `..` is rejected. The
+bucket's region is the `?region=` parameter, else `$AWS_REGION`, else
+`$AWS_DEFAULT_REGION`, else the AWS SDK's own resolution; credentials come from
+the standard AWS chain. Without `--state` and `CLOUDGEAR_STATE`, nothing about
+state changes.
+
+### The bucket
+
+cloudgear does not create the state bucket; you MUST create it first. It
+SHOULD have versioning enabled (so a bad write can be rolled back), default
+encryption, and Block Public Access on. A later release adds a command that
+checks these settings. The credentials need:
+
+| Permission | On |
+| --- | --- |
+| `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` | `arn:aws:s3:::<bucket>/<prefix>*` |
+| `s3:ListBucket` | `arn:aws:s3:::<bucket>` |
+
+`s3:ListBucket` lets a missing object answer "not found" instead of "access
+denied". cloudgear sends no encryption header, so the bucket's default
+encryption applies. When that is SSE-KMS, the credentials also need
+`kms:Decrypt` and `kms:GenerateDataKey` on the key. The client follows region
+redirects, so a wrong `?region=` still works.
+
+### What is stored
+
+`<prefix>` is the path of the location with a trailing slash (empty for a
+bucket root), so `s3://state.example.com/my-app/` stores `my-app/state.json`.
+
+| Key | Content |
+| --- | --- |
+| `<prefix>state.json` | the state, the same JSON as the local file |
+| `<prefix>endpoints.json` | what `apply` writes to `.cloudgear/endpoints.json`, uploaded after every `apply` and `destroy` |
+| `<prefix>state.lock` | the lock, present only while a command runs |
+
+The remote is the source of truth: it is never read from the local copy. After
+each successful remote read or write, `.cloudgear/state.json` is rewritten as a
+cache for local tooling, and `.cloudgear/state.remote.json` records which
+location it came from and a sha256 of what was written. This also happens for
+the read-only commands (`plan`, `check-dns`, `invalidate`), which therefore
+rewrite the cache and the marker.
+
+While the marker exists, running without `--state` in that directory is refused
+(`this directory uses remote state at ...`) so local state cannot diverge from
+the remote by accident. Delete the marker to go back to local state.
+
+A cache that no longer matches the recorded sha256, or that came from another
+location, is never replaced silently: cloudgear keeps a copy next to it as
+`state.json.pre-remote-<timestamp>` (earlier copies are never overwritten). The
+same copy is made before a cache that was mirrored from a remote state that has
+since been deleted is replaced.
+
+### Concurrent writes
+
+`apply` saves after every step. Each save is conditional on the object's ETag
+from the last read or write (`If-Match`, or `If-None-Match: *` when there was no
+state yet), so a write based on stale state fails with `state changed remotely
+since it was read` and never overwrites another run's changes. A write that
+reached the bucket although its answer was lost is recognised (the stored state
+equals what was sent) and not reported as a conflict. A state deleted remotely
+since it was read fails with `state was deleted remotely since it was read`.
+
+If a save fails during `apply` or `destroy`, resources created or deleted by the
+steps before it are missing from the remote state. cloudgear then writes the
+in-memory state to `.cloudgear/state.json.unsaved.<timestamp>` (a second failure
+never overwrites the first) and the error says what to do: inspect that file,
+store it with
+
+```sh
+cloudgear state push --force --from .cloudgear/state.json.unsaved.<timestamp> --state s3://state.example.com/my-app/
+```
+
+and MUST NOT run `apply` again before that. A successful push removes the file.
+While such a file exists, `apply`, `destroy` and `import` refuse to run unless
+`--ignore-unsaved` is passed. For `import`, which changes only state, running
+the command again is enough.
+
+### Locking
+
+`apply`, `destroy`, `import` and `state push` take a lock before they read
+state and release it when they finish or fail. `plan`, `check-dns`,
+`invalidate`, `state pull` and `state show` are read-only and take no lock. The
+lock is `<prefix>state.lock`, created with `If-None-Match: *`, holding a random
+id, `user@host`, the command, the start time and the pid. A second run fails
+with:
+
+```
+state is locked by ana@laptop since 2026-01-01T10:00:00.000Z (command apply); if that run is dead, run cloudgear state unlock --force
+```
+
+Release deletes the lock only when its id is still the one this run wrote, and
+gives up after 10 seconds, aborting the request. A release that finds the lock
+already removed or taken over by another run says so and leaves it alone. A
+release that fails prints `lock not released` and
+the way out, and never hides the error that ended the run. Locks are never
+broken automatically.
+
+The first `SIGINT` or `SIGTERM` makes `apply` finish and save the step in
+progress, then stop and release the lock; at the confirmation prompt it cancels.
+A second signal exits at once and leaves the lock in place. If a run was killed
+without releasing (`SIGKILL`, a lost machine), check that it is gone, then
+remove the lock:
+
+```sh
+cloudgear state unlock --state s3://state.example.com/my-app/          # prints the holder, refuses
+cloudgear state unlock --state s3://state.example.com/my-app/ --force  # removes the lock
+```
+
+`unlock --force` deletes only the lock it read; if another run took the lock in
+between, it fails instead.
+
+### Migrating local state
+
+When the remote has no state and a local `.cloudgear/state.json` with entries
+exists, `plan` warns, and `apply`, `destroy` and `import` refuse, because they
+would plan to create everything again. Upload the local state once:
+
+```sh
+cloudgear state push --state s3://state.example.com/my-app/
+```
+
+`--allow-empty-remote` overrides the refusal. The same applies when the remote
+state was deleted after this directory mirrored it.
+
+`push` takes the lock, checks the file's project and provider against the
+config, uploads `state.json` (and `endpoints.json` when present), and refuses
+when the remote already holds state unless `--force` is given. `--from <file>`
+pushes another file. When a local file differs from the remote on the first
+remote read, cloudgear warns, keeps the local copy as
+`.cloudgear/state.json.pre-remote-<timestamp>`, and never changes the remote.
+
+### `cloudgear state`
+
+| Command | Does |
+| --- | --- |
+| `state pull` | downloads `state.json` and `endpoints.json` into `.cloudgear/` |
+| `state push [--force] [--from <file>]` | uploads the local state (or the file), under the lock |
+| `state unlock --force` | removes the lock after printing who held it |
+| `state show` | prints the location, entry count, version (ETag) and lock holder; no state content |
+
+All of them need `--state` or `CLOUDGEAR_STATE`.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1556,6 +1710,8 @@ Where each moving part lives, since several are called across packages:
 | `debug`, `timed`, `redact` | `packages/debug/index.ts` | every package and `src/` |
 | `encodeConfig` / `decodeConfig`, prototxt codec | `src/config/` | `generate`, `plan`, `apply` |
 | `plan`, `apply`, `endpointsFrom` | `src/deploy/` | `src/cli.ts` |
+| `StateStore`, `LocalStateStore`, `holdLock` | `src/deploy/state-store.ts` | `src/cli.ts` |
+| `S3StateStore`, `parseS3Location` (remote state, lock) | `src/deploy/state-s3.ts` | `createStateStore`; `src/statecmd.ts` (`cloudgear state`) |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |

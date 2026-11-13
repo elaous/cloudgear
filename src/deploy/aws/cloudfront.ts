@@ -594,7 +594,18 @@ const ZERO_BEHAVIOR = {
   FunctionAssociations: { Quantity: 0 },
   SmoothStreaming: false,
   FieldLevelEncryptionId: "",
+  GrpcConfig: { Enabled: false },
 };
+
+// An origin imported before CloudFront returned every member still gets them on update.
+function withOriginDefaults(origin: Record<string, any>): Record<string, any> {
+  return {
+    ...ZERO_ORIGIN,
+    ...origin,
+    ...(origin.S3OriginConfig ? { S3OriginConfig: { OriginReadTimeout: 30, ...origin.S3OriginConfig } } : {}),
+    ...(origin.CustomOriginConfig ? { CustomOriginConfig: { OriginReadTimeout: 30, OriginKeepaliveTimeout: 5, IpAddressType: "ipv4", ...origin.CustomOriginConfig } } : {}),
+  };
+}
 
 export function buildDistributionConfig(spec: CdnComparable, input: DistributionInputs): DistributionConfig {
   const methodList = (items: string[]) => ({ Quantity: items.length, Items: items });
@@ -607,7 +618,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
           Id: siteId,
           DomainName: `${spec.bucket}.s3.${input.region}.amazonaws.com`,
           OriginPath: originPath,
-          S3OriginConfig: { OriginAccessIdentity: "" },
+          S3OriginConfig: { OriginAccessIdentity: "", OriginReadTimeout: 30 },
           OriginAccessControlId: input.oacS3,
           ...ZERO_ORIGIN,
         },
@@ -617,16 +628,20 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
   const functionOrigins = [...originMap.values()].map((origin) => ({
     Id: originIdOf(origin.physical),
     DomainName: origin.host,
+    OriginPath: "",
     CustomOriginConfig: {
       HTTPPort: 80,
       HTTPSPort: 443,
       OriginProtocolPolicy: "https-only",
       OriginSslProtocols: { Quantity: 1, Items: ["TLSv1.2"] },
+      OriginReadTimeout: 30,
+      OriginKeepaliveTimeout: 5,
+      IpAddressType: "ipv4",
     },
     OriginAccessControlId: input.oacLambda,
     ...ZERO_ORIGIN,
   }));
-  const attachedOrigins = (spec.attached ?? []).map((item) => JSON.parse(item.origin));
+  const attachedOrigins = (spec.attached ?? []).map((item) => withOriginDefaults(JSON.parse(item.origin)));
   const origins = [...siteOrigins, ...functionOrigins, ...attachedOrigins];
 
   const toFunction = {
@@ -647,7 +662,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
   const attachedBehaviors = (spec.attached ?? [])
     .flatMap((item) => item.behavior)
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-    .map((b) => JSON.parse(b.behavior));
+    .map((b) => ({ ...ZERO_BEHAVIOR, ...JSON.parse(b.behavior) }));
   behaviors.push(...attachedBehaviors);
 
   const defaultBehavior = spec.bucket

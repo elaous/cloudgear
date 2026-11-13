@@ -101,7 +101,17 @@ describe("attached origins", () => {
     expect(built.Origins!.Items!.map((o) => o.Id)).toEqual(["cloudgear-site", "legacy-api"]);
     expect(built.Origins!.Quantity).toBe(2);
     expect(built.CacheBehaviors!.Quantity).toBe(1);
-    expect(built.CacheBehaviors!.Items).toEqual([behavior] as never);
+    expect(built.CacheBehaviors!.Items![0]).toMatchObject(behavior as never);
+  });
+
+  test("an attached origin and behavior imported before CloudFront returned every member are completed", () => {
+    const old = { Id: "legacy-api", DomainName: "legacy.example.org", CustomOriginConfig: { HTTPPort: 80, HTTPSPort: 443, OriginProtocolPolicy: "https-only", OriginReadTimeout: 60 } };
+    const bare = { PathPattern: "/legacy/*", TargetOriginId: "legacy-api", ViewerProtocolPolicy: "https-only", FunctionAssociations: { Quantity: 1, Items: [{ EventType: "viewer-request", FunctionARN: "arn:fn" }] } };
+    const attached = [{ id: "legacy-api", origin: JSON.stringify(old), behavior: [{ path_pattern: "/legacy/*", behavior: JSON.stringify(bare) }] }];
+    const spec: CdnComparable = { domain: "www.example.com", dns_provider: "gandi", dns_zone: "example.com", bucket: "site", bucket_region: "", path: "", attached };
+    const built = buildDistributionConfig(spec, { certificateArn: "arn", region: "us-east-1", oacS3: "oac", reference: "ref", enabled: true });
+    expect(built.Origins!.Items![1]).toMatchObject({ CustomHeaders: { Quantity: 0 }, OriginShield: { Enabled: false }, ConnectionAttempts: 3, ConnectionTimeout: 10, CustomOriginConfig: { OriginReadTimeout: 60, OriginKeepaliveTimeout: 5, IpAddressType: "ipv4" } });
+    expect(built.CacheBehaviors!.Items![0]).toMatchObject({ TrustedSigners: { Enabled: false, Quantity: 0 }, GrpcConfig: { Enabled: false }, SmoothStreaming: false, FunctionAssociations: { Quantity: 1 } });
   });
 
   test("the config file round-trips them and rejects JSON that disagrees with its id", () => {

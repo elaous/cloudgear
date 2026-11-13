@@ -8,6 +8,8 @@ import {
   ROUTE_HEADER,
   PARAM,
   assertMethod,
+  mountedPath,
+  parseRouteKey,
   buildInput,
   compilePath,
   invoke,
@@ -74,6 +76,23 @@ export interface FetchOpts {
 export interface RouterFetch {
   (req: Request): Promise<Response>;
   (name: string, opts?: FetchOpts): Promise<Response>;
+}
+
+// One script mounted by a ParamRouter; env, include and policies are merged into the mount's function.
+export interface ParamRoute {
+  script: string;
+  env?: EnvOption | EnvOption[];
+  include?: string | string[];
+  policies?: PolicyOption | PolicyOption[];
+}
+
+// Keys are "METHOD /path" or "/path" (GET). Mounted with `.url("*", "/", new ParamRouter({...}), options)`: one
+// function whose generated root script loads the matching script. Literal only; read by generate.
+export class ParamRouter {
+  constructor(
+    readonly routes: Record<string, ParamRoute>,
+    readonly options: { name?: string } = {},
+  ) {}
 }
 
 export interface EndpointsFile {
@@ -157,6 +176,7 @@ export class FunctionRouter {
     }
   }
 
+  url(method: "*", path: string, router: ParamRouter, options?: RouteOptions): this;
   url<P extends string>(method: Method | Lowercase<Method>, path: P, script: string, options?: RouteOptions): this;
   url<P extends string>(
     method: Method | Lowercase<Method>,
@@ -170,7 +190,28 @@ export class FunctionRouter {
     fn: Handler<I, O>,
     options?: RouteOptions,
   ): this;
-  url(method: Method | Lowercase<Method>, path: string, handler: ((...args: any[]) => unknown) | string, options: RouteOptions = {}): this {
+  url(method: Method | Lowercase<Method> | "*", path: string, handler: ((...args: any[]) => unknown) | string | ParamRouter, options: RouteOptions = {}): this {
+    if (handler instanceof ParamRouter) {
+      if (method !== "*") throw new Error('A ParamRouter is mounted with the method "*"');
+      for (const key of ["name", "schedule", "on"] as const) {
+        if (options[key] !== undefined) throw new Error(`"${key}" cannot be set on a ParamRouter mount`);
+      }
+      const list = <T>(value: T | T[] | undefined): T[] => (value === undefined ? [] : Array.isArray(value) ? value : [value]);
+      for (const [key, entry] of Object.entries(handler.routes)) {
+        const route = parseRouteKey(key);
+        const env = [...list(options.env), ...list(entry.env)];
+        const policies = [...list(options.policies), ...list(entry.policies)];
+        this.url(route.method, mountedPath(path, route.path), entry.script, {
+          ...options,
+          name: undefined,
+          ...(entry.include !== undefined ? { include: entry.include } : {}),
+          ...(env.length ? { env } : {}),
+          ...(policies.length ? { policies } : {}),
+        });
+      }
+      return this;
+    }
+    if (method === "*") throw new Error('The method "*" is only for a ParamRouter');
     const route = { method: assertMethod(method), path };
     const key = routeKey(route);
     if (this.routes.some((r) => r.key === key)) throw new Error(`Route "${key}" is already registered`);

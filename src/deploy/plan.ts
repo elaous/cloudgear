@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { wildcardCovers } from "@cloudgear/dns";
 import { toEventBridgeCron } from "@cloudgear/functions";
 import { capability, providerOfType, validateConfigOptions } from "../providers";
-import { behaviorsFor, conflictingGroups, routeShape } from "../routes";
+import { behaviorsFor, conflictingGroups, FREE_PLAN_BEHAVIORS, routeShape } from "../routes";
 import { stateKey, type State, type StateEntry } from "./state";
 
 export type Op = "create" | "update" | "replace" | "delete" | "forget" | "noop" | "dry";
@@ -52,12 +52,10 @@ export interface EventRuleComparable {
 
 const globMatches = (glob: string, text: string): boolean => new RegExp(`^${glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\?/g, ".")).join(".*")}$`).test(text);
 
-const FREE_PLAN_BEHAVIORS = 5;
-
-function assertFreePlan(domain: string, options: Record<string, string> | undefined, own: number, attached: AttachedOriginSpec[] | undefined): void {
+function assertFreePlan(domain: string, options: Record<string, string> | undefined, own: number, attached: AttachedOriginSpec[] | undefined, router = false): void {
   if (options?.free_plan !== "true") return;
   const count = own + (attached ?? []).reduce((sum, item) => sum + item.behavior.length, 0);
-  if (count > FREE_PLAN_BEHAVIORS) throw new Error(`cloudgear config: ${domain}: the Free plan allows ${FREE_PLAN_BEHAVIORS} cache behaviors, but this distribution has ${count} (${own} from the config, ${count - own} attached)`);
+  if (count > FREE_PLAN_BEHAVIORS) throw new Error(`cloudgear config: ${domain}: the Free plan allows ${FREE_PLAN_BEHAVIORS} cache behaviors, but this distribution has ${count} (${own} from the config, ${count - own} attached)${router ? '; set methodRouting: "function" on the CDN to route with a CloudFront Function instead of path behaviors' : ''}`);
 }
 
 const OWN_ORIGIN = /^(cloudgear-site|cloudgear-fn-)/;
@@ -350,7 +348,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
                 .sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
             }
           : { behaviors: behaviorsFor(routes) }),
-        ...(assertFreePlan(api.domain, api.options, api.method_routing ? 0 : behaviorsFor(routes).length, api.attached), {}),
+        ...(assertFreePlan(api.domain, api.options, api.method_routing ? 0 : behaviorsFor(routes).length, api.attached, !api.method_routing), {}),
         ...attachedSpec(api.attached, api.domain, api.method_routing ? [] : behaviorsFor(routes).map((b) => b.pattern)),
       } satisfies CdnComparable,
       source: api,

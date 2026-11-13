@@ -18,7 +18,7 @@ import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
-import { behaviorsFor, conflictingGroups } from "../routes";
+import { behaviorsFor, conflictingGroups, FREE_PLAN_BEHAVIORS } from "../routes";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -1104,7 +1104,7 @@ export function analyzeApp(entryPath: string): AppModel {
         warnings.push(`${at}: methodRouting is set but no path reaches several functions; no CloudFront Function will be created`);
       }
       if (overFreePlan) {
-        warnings.push(`${at}: freePlan allows ${FREE_PLAN_BEHAVIORS} cache behaviors and these routes need ${behaviorsFor(routes).length}, so one CloudFront Function routes them instead of path behaviors`);
+        warnings.push(`${at}: freePlan allows ${FREE_PLAN_BEHAVIORS} cache behaviors and these routes need ${behaviorsFor(routes).length}, so one CloudFront Function routes them instead of path behaviors${conflicts.length ? `, which also tells apart the ${conflicts.length} path(s) several functions share by method` : ""}`);
       }
       const routedByFunction = functionRouting && (conflicts.length > 0 || overFreePlan);
       const behaviors = routedByFunction ? 0 : behaviorsFor(routes).length;
@@ -1453,8 +1453,6 @@ function sameOptions(a: Record<string, string> | undefined, b: Record<string, st
 }
 
 // `webAcl`, `priceClass` and `freePlan` are the typed forms of options.web_acl, options.price_class and options.free_plan.
-const FREE_PLAN_BEHAVIORS = 5;
-
 function readCdnOptions(optionsArg: Node | undefined, at: string): Record<string, string> | undefined {
   let options = readOptionsMap(optionsArg, "options", at);
   if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) return options;

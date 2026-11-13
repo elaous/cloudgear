@@ -225,6 +225,14 @@ describe("analyzeApp", () => {
         expect(analyzeApp(fixture("edge/cdn-router-many-routes.ts")).api?.method_routing).toBeUndefined();
       });
 
+      test("freePlan keeps path behaviors at exactly 5, and resolves conflicts by function routing past that", () => {
+        expect(analyzeApp(fixture("edge/cdn-router-free-plan-five.ts")).api).toMatchObject({ options: { free_plan: "true" } });
+        expect(analyzeApp(fixture("edge/cdn-router-free-plan-five.ts")).api?.method_routing).toBeUndefined();
+        const conflict = analyzeApp(fixture("edge/cdn-router-free-plan-conflict.ts"));
+        expect(conflict.api).toMatchObject({ method_routing: true });
+        expect(conflict.warnings.join("\n")).toMatch(/which also tells apart the 1 path\(s\) several functions share by method/);
+      });
+
       test("methodRouting without a conflict is ignored with a warning", () => {
         const model = analyzeApp(fixture("edge/cdn-router-unneeded-method-routing.ts"));
         expect(model.api!.method_routing).toBeUndefined();

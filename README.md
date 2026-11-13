@@ -1359,7 +1359,9 @@ cloudgear import --all                             # everything planned that alr
   set it. `freePlan: true` on the `CDN` tells cloudgear the distribution is on it. A router CDN whose
   routes would need more than 5 behaviors is then routed by one CloudFront Function, as with
   `methodRouting: "function"` (with a warning saying so), and any config whose behaviors, own and attached,
-  are still over 5 is refused when planned. Other Free-plan limits are not checked; AWS reports them.
+  are still over 5 is refused when planned. The default behavior is not counted, as in CloudFront's own quota
+  for additional behaviors; this is not confirmed for the Free plan. Other Free-plan limits are not checked;
+  AWS reports them.
 - Every other origin of an imported distribution (all but the bucket's own and
   cloudgear's, with the path behaviors that reach them, if any) is kept without anything in the TypeScript setup.
   `import` writes them into `cloudgear.prototxt` as `attached` blocks of that

@@ -693,7 +693,7 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), responseKindOf);
     const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request);
-    if (publicRoutes.has(`${method} ${routePath}`)) {
+    if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
     const extras = JSON.stringify([routeOptions.include.map((f) => f.rel), routeOptions.request, routeOptions.response]);

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, setDefaultTimeout } from
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FunctionRouter, VercelResponse } from "@cloudgear/functions";
+import { FunctionRouter, VercelResponse, response } from "@cloudgear/functions";
 import { createHandler } from "../packages/functions/drivers/aws";
 import { analyzeApp } from "../src/analyze/app";
 import { endpointsFrom } from "../src/deploy/apply";
@@ -101,6 +101,27 @@ describe("a * route in local mode", () => {
     expect(() => new FunctionRouter("aws").url("FOO" as "GET", "/x", async () => ({}))).toThrow(/Unsupported HTTP method "FOO", expected one of .* or "\*"/);
   });
 
+  test.each([
+    ["any-first", ["*", "GET"]],
+    ["get-first", ["GET", "*"]],
+  ] as const)("overlapping path patterns follow registration order (%s)", async (_label, order) => {
+    const router = new FunctionRouter("aws", { mode: "local" });
+    for (const method of order) {
+      if (method === "*") router.url("*", "/a/{id}", async () => ({ via: "any" }), { name: "any" });
+      else router.url("GET", "/a/new", async () => ({ via: "get" }), { name: "get" });
+    }
+    const via = async () => ((await (await router.fetch(new Request("http://localhost/a/new"))).json()) as { via: string }).via;
+    expect(await via()).toBe(order[0] === "*" ? "any" : "get");
+  });
+
+  test("HEAD goes to the * route, not the GET route, when both share a path", async () => {
+    const router = new FunctionRouter("aws", { mode: "local" })
+      .url("GET", "/x", async () => response({}, { headers: { "x-via": "get" } }), { name: "get" })
+      .url("*", "/x", async () => response({}, { headers: { "x-via": "any" } }), { name: "any" });
+    const res = await router.fetch(new Request("http://localhost/x", { method: "HEAD" }));
+    expect(res.headers.get("x-via")).toBe("any");
+  });
+
   test("a script handles any method and sees the real one", async () => {
     const router = new FunctionRouter("aws", { mode: "local" }).url("*", "/", "./fixtures/router/anymethod/api/index.ts", { request: true, response: VercelResponse });
     const res = await router.fetch(new Request("http://localhost/?a=1", { method: "PUT" }));
@@ -196,6 +217,23 @@ describe("the Lambda handler with * routes", () => {
     for (const method of ["GET", "POST", "HEAD", "DELETE"]) expect((await handler(event(method))).statusCode).toBe(200);
     expect(seen).toEqual(["GET", "POST", "HEAD", "DELETE"]);
     expect((await handler(event("GET", "/other"))).statusCode).toBe(404);
+  });
+
+  test("HEAD on a * route answers with an empty body, and the * route answers it when GET shares the path", async () => {
+    const handler = createHandler(async (input: { a?: string; b?: string }) => input, [{ method: "GET", path: "/x/{a}" }, { method: "*", path: "/x/{b}" }], {});
+    const get = await handler(event("GET", "/x/1"));
+    expect(JSON.parse(get.body)).toEqual({ a: "1" });
+    const head = await handler(event("HEAD", "/x/1"));
+    expect(head.statusCode).toBe(200);
+    expect(head.headers["content-type"]).toContain("application/json");
+    expect(head.body).toBe("");
+    const post = await handler(event("POST", "/x/1"));
+    expect(JSON.parse(post.body)).toEqual({ b: "1" });
+  });
+
+  test("an explicit HEAD route keeps its own body", async () => {
+    const handler = createHandler(async () => ({ ok: true }), [{ method: "HEAD", path: "/x" }, { method: "*", path: "/x" }], {});
+    expect((await handler(event("HEAD"))).body).toBe('{"ok":true}');
   });
 });
 

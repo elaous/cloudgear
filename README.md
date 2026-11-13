@@ -233,7 +233,10 @@ The method is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS` or `"*"
 `.url("*", "/", "./api/index.ts", { request: true, response: VercelResponse })`, answers every HTTP method on its path,
 exactly that path (it does not match sub-paths), and the function reads the real method from its request. When a
 specific-method route and a `"*"` route share a path, the specific method MUST win whatever the registration order, so
-`"* /x"` and `"GET /x"` coexist, while `"* /x"` twice is a duplicate. On API Gateway a `"*"` route is `ANY /path`.
+`"* /x"` and `"GET /x"` coexist, while `"* /x"` twice is a duplicate. On API Gateway a `"*"` route is `ANY /path`. For different overlapping path patterns
+(`"* /a/{id}"` and `"GET /a/new"`), local mode follows registration order while CloudFront and API Gateway prefer the
+most literal path, so register the more specific routes first. A `HEAD` request goes to a `"*"` route when the path has
+no `HEAD` route, and the Lambda handler then answers it with the headers and status but no body.
 
 `router.listen(port)` serves the routes with `Bun.serve` (`port` defaults to
 `$PORT`, else 3000; `router.fetch` is exposed to mount elsewhere) and returns each route's URL by name. `urls()`

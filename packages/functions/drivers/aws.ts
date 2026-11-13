@@ -212,7 +212,7 @@ function resolveInput(
   const method = event.requestContext.http.method.toUpperCase();
   const params = paramsFor(routes, method, event.rawPath);
   if (!params) return undefined;
-  const headOnly = method === "HEAD" && !routes.some((route) => (route.method === "HEAD" || route.method === ANY_METHOD) && matchPath(route.matcher, event.rawPath));
+  const headOnly = method === "HEAD" && !routes.some((route) => route.method === "HEAD" && matchPath(route.matcher, event.rawPath));
   return {
     input: buildInput(parseBody(text, contentType), new URLSearchParams(event.rawQueryString ?? ""), params),
     context: {},

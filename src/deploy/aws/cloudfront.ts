@@ -597,6 +597,16 @@ const ZERO_BEHAVIOR = {
   GrpcConfig: { Enabled: false },
 };
 
+// An origin imported before CloudFront returned every member still gets them on update.
+function withOriginDefaults(origin: Record<string, any>): Record<string, any> {
+  return {
+    ...ZERO_ORIGIN,
+    ...origin,
+    ...(origin.S3OriginConfig ? { S3OriginConfig: { OriginReadTimeout: 30, ...origin.S3OriginConfig } } : {}),
+    ...(origin.CustomOriginConfig ? { CustomOriginConfig: { OriginReadTimeout: 30, OriginKeepaliveTimeout: 5, IpAddressType: "ipv4", ...origin.CustomOriginConfig } } : {}),
+  };
+}
+
 export function buildDistributionConfig(spec: CdnComparable, input: DistributionInputs): DistributionConfig {
   const methodList = (items: string[]) => ({ Quantity: items.length, Items: items });
   const siteId = "cloudgear-site";
@@ -631,7 +641,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     OriginAccessControlId: input.oacLambda,
     ...ZERO_ORIGIN,
   }));
-  const attachedOrigins = (spec.attached ?? []).map((item) => JSON.parse(item.origin));
+  const attachedOrigins = (spec.attached ?? []).map((item) => withOriginDefaults(JSON.parse(item.origin)));
   const origins = [...siteOrigins, ...functionOrigins, ...attachedOrigins];
 
   const toFunction = {
@@ -652,7 +662,7 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
   const attachedBehaviors = (spec.attached ?? [])
     .flatMap((item) => item.behavior)
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-    .map((b) => JSON.parse(b.behavior));
+    .map((b) => ({ ...ZERO_BEHAVIOR, ...JSON.parse(b.behavior) }));
   behaviors.push(...attachedBehaviors);
 
   const defaultBehavior = spec.bucket

@@ -4,6 +4,8 @@ import readline from "node:readline";
 import { debug } from "@cloudgear/debug";
 import { loadState, saveState, serializeState, writeFileAtomic, type State } from "./state";
 
+export type Release = (signal?: AbortSignal) => Promise<void>;
+
 export interface LockRequest {
   command: string;
 }
@@ -11,7 +13,7 @@ export interface LockRequest {
 export interface StateStore {
   load(project: string, provider: string): Promise<{ state: State; version?: string }>;
   save(state: State): Promise<void>;
-  lock(request: LockRequest): Promise<() => Promise<void>>;
+  lock(request: LockRequest): Promise<Release>;
   saveEndpoints(json: string | undefined): Promise<void>;
   describe(): string;
   readonly unpushedLocalEntries?: number;
@@ -20,7 +22,7 @@ export interface StateStore {
 export const MARKER_FILE = "state.remote.json";
 
 export interface RemoteMarker {
-  location: string;
+  location?: string;
   etag?: string;
   sha256?: string;
 }
@@ -31,7 +33,7 @@ export function readRemoteMarker(directory: string): RemoteMarker | undefined {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8")) as RemoteMarker;
   } catch {
-    return { location: "an unknown location" };
+    return {};
   }
 }
 
@@ -41,9 +43,13 @@ export class LocalStateStore implements StateStore {
   private assertNotRemote(): void {
     const directory = path.dirname(this.file);
     const marker = readRemoteMarker(directory);
-    if (marker) {
-      throw new Error(`this directory uses remote state at ${marker.location}; pass --state ${marker.location} or delete ${path.join(directory, MARKER_FILE)}`);
-    }
+    if (!marker) return;
+    const file = path.join(directory, MARKER_FILE);
+    throw new Error(
+      marker.location
+        ? `this directory uses remote state at ${marker.location}; pass --state ${marker.location} or delete ${file}`
+        : `this directory uses remote state, but ${file} cannot be read; pass --state with its location or delete the file`,
+    );
   }
 
   async load(project: string, provider: string) {
@@ -91,13 +97,43 @@ export function assertNoUnpushedLocalState(store: StateStore, allowEmptyRemote: 
   );
 }
 
-// Keeps what a failed save would have stored, so created resources are not lost.
-export function preserveOnFailure(store: StateStore, unsavedFile: string): (state: State) => Promise<void> {
+export const UNSAVED_PREFIX = "state.json.unsaved";
+
+export function findUnsavedStates(directory: string): string[] {
+  try {
+    return fs
+      .readdirSync(directory)
+      .filter((name) => name.startsWith(`${UNSAVED_PREFIX}.`) && !name.endsWith(".tmp"))
+      .sort()
+      .map((name) => path.join(directory, name));
+  } catch {
+    return [];
+  }
+}
+
+export function assertNoUnsavedState(directory: string, ignore: boolean): void {
+  const [first] = findUnsavedStates(directory);
+  if (!first || ignore) return;
+  const shown = path.relative(process.cwd(), first) || first;
+  throw new Error(
+    `${shown} holds state that was never stored. Run \`cloudgear state push --force --from ${shown}\` (it is removed once pushed), or pass --ignore-unsaved to go on without it`,
+  );
+}
+
+function uniqueUnsavedFile(directory: string): string {
+  const stamp = new Date().toISOString().replace(/[-:.]/g, "");
+  let target = path.join(directory, `${UNSAVED_PREFIX}.${stamp}`);
+  for (let n = 1; fs.existsSync(target); n++) target = path.join(directory, `${UNSAVED_PREFIX}.${stamp}-${n}`);
+  return target;
+}
+
+export function preserveOnFailure(store: StateStore, directory: string): (state: State) => Promise<void> {
   return async (state) => {
     try {
       await store.save(state);
     } catch (err) {
       if (store instanceof LocalStateStore) throw err;
+      const unsavedFile = uniqueUnsavedFile(directory);
       const shown = path.relative(process.cwd(), unsavedFile) || unsavedFile;
       let kept = true;
       try {
@@ -130,12 +166,16 @@ export interface HoldLockOptions {
 
 const STALE_HINT = "run `cloudgear state unlock --force` after checking that no run is active";
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function releaseWithin(release: Release, ms: number): Promise<void> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`timed out after ${ms} ms`));
+    }, ms);
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([release(controller.signal), timeout]).finally(() => clearTimeout(timer));
 }
 
 export async function holdLock(store: StateStore, request: LockRequest, options: HoldLockOptions = {}): Promise<LockHandle> {
@@ -143,9 +183,9 @@ export async function holdLock(store: StateStore, request: LockRequest, options:
   const exit = options.exit ?? ((code: number) => process.exit(code));
   const controller = new AbortController();
   if (store instanceof LocalStateStore) {
-    return { release: async () => {}, signal: controller.signal, interrupt: () => {} };
+    return { release: async () => {}, signal: controller.signal, interrupt: () => exit(130) };
   }
-  let held: (() => Promise<void>) | undefined;
+  let held: Release | undefined;
   let interrupts = 0;
   const interrupt = () => {
     interrupts++;
@@ -172,7 +212,7 @@ export async function holdLock(store: StateStore, request: LockRequest, options:
   let released: Promise<void> | undefined;
   const release = () => {
     detach();
-    released ??= withTimeout(held!(), options.releaseTimeoutMs ?? 10_000).catch((err) =>
+    released ??= releaseWithin(held!, options.releaseTimeoutMs ?? 10_000).catch((err) =>
       warn(`lock not released (${err instanceof Error ? err.message : err}); ${STALE_HINT}`),
     );
     return released;
@@ -185,10 +225,16 @@ export async function holdLock(store: StateStore, request: LockRequest, options:
 }
 
 // Resolves false on anything but yes, and when interrupted.
-export function ask(question: string, lock?: Pick<LockHandle, "signal" | "interrupt">): Promise<boolean> {
+export interface AskStreams {
+  input: NodeJS.ReadableStream;
+  output: NodeJS.WritableStream;
+  terminal?: boolean;
+}
+
+export function ask(question: string, lock?: Pick<LockHandle, "signal" | "interrupt">, streams?: AskStreams): Promise<boolean> {
   if (lock?.signal.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const rl = readline.createInterface(streams ?? { input: process.stdin, output: process.stdout });
     const onAbort = () => finish("");
     const finish = (answer: string) => {
       lock?.signal.removeEventListener("abort", onAbort);

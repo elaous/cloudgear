@@ -21,7 +21,7 @@ interface Input {
   ContentType?: string;
 }
 
-type Call = { command: string; input: Input };
+type Call = { command: string; input: Input; signal?: AbortSignal };
 
 export class FakeS3 {
   readonly objects = new Map<string, StoredObject>();
@@ -29,10 +29,10 @@ export class FakeS3 {
   // Fails matching calls before they touch objects.
   failWhen?: (call: Call) => Error | undefined;
 
-  async send(command: unknown): Promise<unknown> {
+  async send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
     const { input } = command as { input: Input };
     const name = (command as object).constructor.name;
-    const call = { command: name, input };
+    const call = { command: name, input, signal: options?.abortSignal };
     this.calls.push(call);
     const failure = this.failWhen?.(call);
     if (failure) throw failure;

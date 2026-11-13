@@ -5,7 +5,7 @@ import path from "node:path";
 import type { GetObjectCommandOutput, PutObjectCommandOutput } from "@aws-sdk/client-s3";
 import { debug } from "@cloudgear/debug";
 import { parseState, serializeState, writeFileAtomic, type State } from "./state";
-import { readRemoteMarker, MARKER_FILE, type LockRequest, type StateStore } from "./state-store";
+import { readRemoteMarker, MARKER_FILE, type LockRequest, type Release, type StateStore } from "./state-store";
 
 export interface S3Location {
   bucket: string;
@@ -22,7 +22,7 @@ export interface LockInfo {
 }
 
 export interface S3Sender {
-  send(command: unknown): Promise<unknown>;
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
 export interface S3StateStoreOptions {
@@ -84,7 +84,6 @@ export function describeLock(info: LockInfo | undefined): string {
   return info ? `${info.holder} since ${info.since} (command ${info.command})` : "an unknown holder";
 }
 
-
 interface Condition {
   ifMatch?: string;
   ifNoneMatch?: string;
@@ -101,6 +100,7 @@ export class S3StateStore implements StateStore {
   private etag?: string;
   private firstLoad = true;
   private backedUp?: string;
+  private remoteMissing = false;
 
   constructor(
     readonly location: S3Location,
@@ -160,7 +160,7 @@ export class S3StateStore implements StateStore {
     await this.put(this.endpointsKey, json, {});
   }
 
-  async lock(request: LockRequest): Promise<() => Promise<void>> {
+  async lock(request: LockRequest): Promise<Release> {
     const info: LockInfo = {
       id: randomUUID(),
       holder: this.options.holder ?? defaultHolder(),
@@ -180,23 +180,34 @@ export class S3StateStore implements StateStore {
     }
     debug("state", "lock taken", { key: this.lockKey, id: info.id });
     let released = false;
-    return async () => {
+    return async (signal) => {
       if (released) return;
       released = true;
-      const held = await this.readLock();
-      if (!held || held.info?.id !== info.id) return;
+      const held = await this.readLock(signal);
+      const warn = this.warnFn();
+      if (!held) {
+        warn(`the lock at ${this.describe()}state.lock was already removed before this run released it`);
+        return;
+      }
+      if (held.info?.id !== info.id) {
+        warn(`the lock at ${this.describe()}state.lock is now held by ${describeLock(held.info)}; it was left alone`);
+        return;
+      }
       try {
-        await this.remove(this.lockKey, { ifMatch: held.etag });
+        await this.remove(this.lockKey, { ifMatch: held.etag }, signal);
       } catch (err) {
-        if (isPreconditionFailed(err) || isNotFound(err)) return;
+        if (isPreconditionFailed(err) || isNotFound(err)) {
+          warn(`the lock at ${this.describe()}state.lock changed while it was being released; it was left alone`);
+          return;
+        }
         throw err;
       }
       debug("state", "lock released", { key: this.lockKey, id: info.id });
     };
   }
 
-  async readLock(): Promise<{ info: LockInfo | undefined; etag: string } | undefined> {
-    const object = await this.get(this.lockKey);
+  async readLock(signal?: AbortSignal): Promise<{ info: LockInfo | undefined; etag: string } | undefined> {
+    const object = await this.get(this.lockKey, signal);
     if (!object) return undefined;
     let info: LockInfo | undefined;
     try {
@@ -265,10 +276,10 @@ export class S3StateStore implements StateStore {
     return res.ETag;
   }
 
-  private async get(key: string): Promise<{ text: string; etag: string } | undefined> {
+  private async get(key: string, signal?: AbortSignal): Promise<{ text: string; etag: string } | undefined> {
     const sdk = await this.loadSdk();
     try {
-      const res = (await (await this.getClient()).send(new sdk.GetObjectCommand({ Bucket: this.location.bucket, Key: key }))) as GetObjectCommandOutput;
+      const res = (await (await this.getClient()).send(new sdk.GetObjectCommand({ Bucket: this.location.bucket, Key: key }), { abortSignal: signal })) as GetObjectCommandOutput;
       if (!res.Body || !res.ETag) throw new Error(`The bucket returned no body or ETag for ${key}`);
       return { text: await res.Body.transformToString(), etag: res.ETag };
     } catch (err) {
@@ -277,9 +288,9 @@ export class S3StateStore implements StateStore {
     }
   }
 
-  private async remove(key: string, condition: Condition): Promise<void> {
+  private async remove(key: string, condition: Condition, signal?: AbortSignal): Promise<void> {
     const sdk = await this.loadSdk();
-    await (await this.getClient()).send(new sdk.DeleteObjectCommand({ Bucket: this.location.bucket, Key: key, IfMatch: condition.ifMatch }));
+    await (await this.getClient()).send(new sdk.DeleteObjectCommand({ Bucket: this.location.bucket, Key: key, IfMatch: condition.ifMatch }), { abortSignal: signal });
   }
 
   private loadSdk() {
@@ -306,6 +317,10 @@ export class S3StateStore implements StateStore {
       `Access denied to s3://${this.location.bucket}/${key}: the credentials need s3:GetObject, s3:PutObject and s3:DeleteObject on the prefix, and s3:ListBucket on the bucket (plus kms:Decrypt and kms:GenerateDataKey when the bucket encrypts with a KMS key)`,
       { cause: err },
     );
+  }
+
+  private warnFn(): (message: string) => void {
+    return this.options.warn ?? ((message: string) => console.warn(`warning: ${message}`));
   }
 
   private readLocal(file: string): string | undefined {
@@ -339,12 +354,13 @@ export class S3StateStore implements StateStore {
   }
 
   private checkLocalCopy(remoteText: string | undefined): void {
+    this.remoteMissing = remoteText === undefined;
     if (!this.firstLoad) return;
     this.firstLoad = false;
     const file = this.options.cachePath;
     const local = file ? this.readLocal(file) : undefined;
     if (!file || local === undefined) return;
-    const warn = this.options.warn ?? ((message: string) => console.warn(`warning: ${message}`));
+    const warn = this.warnFn();
     const name = path.relative(process.cwd(), file) || file;
     const intact = this.cacheIntact(file, local);
     if (remoteText === undefined) {
@@ -381,7 +397,8 @@ export class S3StateStore implements StateStore {
     if (!file) return;
     try {
       const local = this.readLocal(file);
-      if (local !== undefined && !this.cacheIntact(file, local) && !this.sameState(local, text)) this.backupLocal(file, local);
+      if (local !== undefined && (!this.cacheIntact(file, local) || this.remoteMissing) && !this.sameState(local, text)) this.backupLocal(file, local);
+      this.remoteMissing = false;
       writeFileAtomic(file, text);
       writeFileAtomic(path.join(path.dirname(file), MARKER_FILE), `${JSON.stringify({ location: this.describe(), etag, sha256: sha256(text) }, null, 2)}\n`);
     } catch (err) {

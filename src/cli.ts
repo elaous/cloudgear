@@ -11,7 +11,7 @@ import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { stateKey, type State } from "./deploy/state";
-import { ask, assertNoUnpushedLocalState, createStateStore, holdLock, preserveOnFailure, stateLocation, type LockHandle, type StateStore } from "./deploy/state-store";
+import { ask, assertNoUnpushedLocalState, assertNoUnsavedState, createStateStore, holdLock, preserveOnFailure, stateLocation, type LockHandle, type StateStore } from "./deploy/state-store";
 import { stateCommand } from "./statecmd";
 import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
@@ -59,6 +59,7 @@ Options:
                      then .cloudgear/state.json); apply, destroy, import and state push take a lock
   --force            Overwrite existing remote state (state push), remove the lock (state unlock)
   --from <file>      Push this state file instead of .cloudgear/state.json (state push)
+  --ignore-unsaved   Go on although .cloudgear/state.json.unsaved.* files hold state that was never stored
   --allow-empty-remote  Apply, destroy or import against an empty remote although a local state has entries
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
@@ -110,6 +111,7 @@ const CLI_OPTIONS = {
   state: { type: "string" },
   from: { type: "string" },
   "allow-empty-remote": { type: "boolean", default: false },
+  "ignore-unsaved": { type: "boolean", default: false },
   force: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
 } as const;
@@ -211,6 +213,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const store = await getStore();
       const { state } = await store.load(config.project, config.provider);
       assertNoUnpushedLocalState(store, values["allow-empty-remote"]!);
+      assertNoUnsavedState(workDir, values["ignore-unsaved"]!);
       const target =
         command === "destroy"
           ? { ...config, resource: [], function: [], certificate: [], cdn: [], api: undefined }
@@ -239,7 +242,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         }
         try {
           await apply(actions, state, await drivers(actions, config, configPath, values.region, deployTags(config, configPath, values)), {
-            save: preserveOnFailure(store, path.join(workDir, "state.json.unsaved")),
+            save: preserveOnFailure(store, workDir),
             shouldStop: () => !!lock?.signal.aborted,
             log: (message) => console.log(`cloudgear: ${message}`),
           });
@@ -324,6 +327,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const store = await getStore();
       const { state } = await store.load(config.project, config.provider);
       assertNoUnpushedLocalState(store, values["allow-empty-remote"]!);
+      assertNoUnsavedState(workDir, values["ignore-unsaved"]!);
       const [first, second, third] = args;
       const policyDir = values["write-policies"];
       if (policyDir !== undefined && !policyDir.trim()) throw new Error("--write-policies needs a directory");

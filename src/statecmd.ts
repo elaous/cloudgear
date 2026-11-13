@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseState, type State } from "./deploy/state";
 import { describeLock, S3StateStore } from "./deploy/state-s3";
-import type { StateStore } from "./deploy/state-store";
+import { UNSAVED_PREFIX, type StateStore } from "./deploy/state-store";
 
 export interface StateCommandOptions {
   force: boolean;
@@ -54,6 +54,10 @@ export async function stateCommand(sub: string | undefined, store: StateStore, o
       if (fs.existsSync(endpointsFile)) {
         await remote.saveEndpoints(fs.readFileSync(endpointsFile, "utf8"));
         console.log("cloudgear: pushed endpoints.json");
+      }
+      if (options.from && path.resolve(path.dirname(options.from)) === path.resolve(options.workDir) && path.basename(options.from).startsWith(`${UNSAVED_PREFIX}.`)) {
+        fs.rmSync(options.from, { force: true });
+        console.log(`cloudgear: removed ${relative(options.from)}`);
       }
       return;
     }

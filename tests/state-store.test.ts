@@ -6,7 +6,7 @@ import { apply } from "../src/deploy/apply";
 import { plan } from "../src/deploy/plan";
 import { serializeState, type State } from "../src/deploy/state";
 import { parseS3Location, S3StateStore, STATE_CHANGED, type LockInfo } from "../src/deploy/state-s3";
-import { createStateStore, holdLock, LocalStateStore, preserveOnFailure, stateLocation } from "../src/deploy/state-store";
+import { createStateStore, holdLock, LocalStateStore, findUnsavedStates, preserveOnFailure, stateLocation } from "../src/deploy/state-store";
 import { stateCommand } from "../src/statecmd";
 import { FakeS3, s3Error } from "./fake-s3";
 import { baseConfig, emptyState, fakeAws } from "./helpers";
@@ -471,28 +471,29 @@ describe("apply with a store", () => {
     const { state } = await store.load("app", "aws");
     let puts = 0;
     s3.failWhen = (call) => (call.command === "PutObjectCommand" && ++puts === 2 ? s3Error("ExpiredToken", 400) : undefined);
-    const unsaved = path.join(dir, "state.json.unsaved");
-    const err = await apply(plan(baseConfig(), state), state, fakeAws().drivers, { save: preserveOnFailure(store, unsaved) }).catch((e: Error) => e);
+    const err = await apply(plan(baseConfig(), state), state, fakeAws().drivers, { save: preserveOnFailure(store, dir) }).catch((e: Error) => e);
+    const [unsaved] = findUnsavedStates(dir);
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/ExpiredToken/);
-    expect((err as Error).message).toMatch(/state push --force --from \S*state\.json\.unsaved/);
+    expect((err as Error).message).toMatch(/state push --force --from \S*state\.json\.unsaved\.\S+/);
     expect((err as Error).message).toMatch(/Do NOT run apply again/);
     const remote = JSON.parse(s3.body(BUCKET, "tranquilo-app/state.json")!) as State;
     expect(Object.keys(remote.entries)).toEqual(["@aws.S3.data"]);
-    const kept = JSON.parse(fs.readFileSync(unsaved, "utf8")) as State;
+    const kept = JSON.parse(fs.readFileSync(unsaved!, "utf8")) as State;
     expect(Object.keys(kept.entries)).toEqual(["@aws.S3.data", "@aws.Lambda.foo"]);
-    expect(fs.existsSync(`${unsaved}.tmp`)).toBe(false);
+    expect(findUnsavedStates(dir)).toHaveLength(1);
   });
 
   test("the kept state can be pushed with --force --from", async () => {
     const store = new S3StateStore(location, { client: s3, cachePath: path.join(dir, "state.json") });
     await store.load("app", "aws");
     await store.save(emptyState());
-    const unsaved = path.join(dir, "state.json.unsaved");
+    const unsaved = path.join(dir, "state.json.unsaved.20261113T000000Z");
     fs.writeFileSync(unsaved, serializeState(stateWith("created")));
     const fresh = new S3StateStore(location, { client: s3, cachePath: path.join(dir, "state.json"), warn: () => {} });
     await stateCommand("push", fresh, { force: true, workDir: dir, statePath: path.join(dir, "state.json"), from: unsaved, project: "app", provider: "aws" });
     expect(JSON.parse(s3.body(BUCKET, "tranquilo-app/state.json")!)).toEqual(stateWith("created"));
+    expect(fs.existsSync(unsaved)).toBe(false);
   });
 });
 

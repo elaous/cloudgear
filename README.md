@@ -1367,7 +1367,9 @@ the remote by accident. Delete the marker to go back to local state.
 
 A cache that no longer matches the recorded sha256, or that came from another
 location, is never replaced silently: cloudgear keeps a copy next to it as
-`state.json.pre-remote-<timestamp>` (earlier copies are never overwritten).
+`state.json.pre-remote-<timestamp>` (earlier copies are never overwritten). The
+same copy is made before a cache that was mirrored from a remote state that has
+since been deleted is replaced.
 
 ### Concurrent writes
 
@@ -1381,15 +1383,18 @@ since it was read fails with `state was deleted remotely since it was read`.
 
 If a save fails during `apply` or `destroy`, resources created or deleted by the
 steps before it are missing from the remote state. cloudgear then writes the
-in-memory state to `.cloudgear/state.json.unsaved` and the error says what to
-do: inspect that file, store it with
+in-memory state to `.cloudgear/state.json.unsaved.<timestamp>` (a second failure
+never overwrites the first) and the error says what to do: inspect that file,
+store it with
 
 ```sh
-cloudgear state push --force --from .cloudgear/state.json.unsaved --state s3://state.example.com/my-app/
+cloudgear state push --force --from .cloudgear/state.json.unsaved.<timestamp> --state s3://state.example.com/my-app/
 ```
 
-and MUST NOT run `apply` again before that. For `import`, which changes only
-state, running the command again is enough.
+and MUST NOT run `apply` again before that. A successful push removes the file.
+While such a file exists, `apply`, `destroy` and `import` refuse to run unless
+`--ignore-unsaved` is passed. For `import`, which changes only state, running
+the command again is enough.
 
 ### Locking
 
@@ -1405,7 +1410,9 @@ state is locked by ana@laptop since 2026-01-01T10:00:00.000Z (command apply); if
 ```
 
 Release deletes the lock only when its id is still the one this run wrote, and
-gives up after 10 seconds. A release that fails prints `lock not released` and
+gives up after 10 seconds, aborting the request. A release that finds the lock
+already removed or taken over by another run says so and leaves it alone. A
+release that fails prints `lock not released` and
 the way out, and never hides the error that ended the run. Locks are never
 broken automatically.
 

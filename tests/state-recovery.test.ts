@@ -6,7 +6,8 @@ import { apply, ApplyInterrupted } from "../src/deploy/apply";
 import { plan } from "../src/deploy/plan";
 import { serializeState, type State } from "../src/deploy/state";
 import { parseS3Location, S3StateStore, STATE_CHANGED, STATE_DELETED, type LockInfo } from "../src/deploy/state-s3";
-import { assertNoUnpushedLocalState, holdLock, LocalStateStore, MARKER_FILE } from "../src/deploy/state-store";
+import { PassThrough } from "node:stream";
+import { ask, assertNoUnpushedLocalState, assertNoUnsavedState, findUnsavedStates, holdLock, LocalStateStore, MARKER_FILE, preserveOnFailure } from "../src/deploy/state-store";
 import { stateCommand } from "../src/statecmd";
 import { FakeS3, s3Error } from "./fake-s3";
 import { baseConfig, emptyState, fakeAws } from "./helpers";
@@ -25,7 +26,7 @@ function stateWith(...names: string[]): State {
 
 const backups = (file: string) => fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith(`${path.basename(file)}.pre-remote`));
 
-// The write lands but its answer is lost, then the SDK retries it.
+// Write lands, answer is lost, SDK retries.
 function loseFirstResponse(s3: FakeS3, matches: (key: string) => boolean) {
   const send = s3.send.bind(s3);
   let lost = false;
@@ -200,6 +201,36 @@ describe("remote state recovery", () => {
     });
   });
 
+  describe("interrupts with local state", () => {
+    test("the local handle's interrupt exits with 130", async () => {
+      const exits: number[] = [];
+      const lock = await holdLock(new LocalStateStore(cache()), { command: "apply" }, { exit: (code) => void exits.push(code) as never });
+      lock.interrupt();
+      expect(exits).toEqual([130]);
+    });
+
+    test("Ctrl-C at the prompt reaches the handle's interrupt", async () => {
+      const exits: number[] = [];
+      const lock = await holdLock(new LocalStateStore(cache()), { command: "apply" }, { exit: (code) => void exits.push(code) as never });
+      const input = new PassThrough();
+      const answer = ask("Do it? ", lock, { input, output: new PassThrough(), terminal: true });
+      input.write("\x03");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(exits).toEqual([130]);
+      input.end();
+      expect(await answer).toBe(false);
+    });
+
+    test("an aborted lock cancels the prompt", async () => {
+      const lock = await holdLock(open(), { command: "apply" }, { warn: () => {} });
+      const input = new PassThrough();
+      const answer = ask("Do it? ", lock, { input, output: new PassThrough() });
+      process.emit("SIGINT");
+      expect(await answer).toBe(false);
+      await lock.release();
+    });
+  });
+
   describe("forceUnlock", () => {
     test("is conditional on the lock it read", async () => {
       await open().lock({ command: "apply" });
@@ -327,5 +358,94 @@ describe("remote state recovery", () => {
       await expect(stateCommand("push", open(), { ...options, project: "other" })).rejects.toThrow(/belongs to project "app" \(aws\), config is "other" \(aws\)/);
       expect(s3.body(BUCKET, "app/state.json")).toBeUndefined();
     });
+  });
+
+  test("a cache mirrored from a deleted remote is backed up before the empty remote's first save", async () => {
+    const store = open();
+    await store.load("app", "aws");
+    await store.save(stateWith("precious"));
+    s3.objects.delete(`${BUCKET}/app/state.json`);
+    const later = open();
+    await later.load("app", "aws");
+    await later.save(stateWith("new"));
+    const kept = backups(cache()).map((name) => fs.readFileSync(path.join(path.dirname(cache()), name), "utf8"));
+    expect(kept).toHaveLength(1);
+    expect(JSON.parse(kept[0]!)).toEqual(stateWith("precious"));
+    expect(JSON.parse(fs.readFileSync(cache(), "utf8"))).toEqual(stateWith("new"));
+    await later.save(stateWith("new", "newer"));
+    expect(backups(cache())).toHaveLength(1);
+  });
+
+  describe("states that were never stored", () => {
+    const failingStore = () => {
+      const store = open();
+      s3.failWhen = (call) => (call.command === "PutObjectCommand" && call.input.Key === "app/state.json" ? s3Error("ExpiredToken", 400) : undefined);
+      return store;
+    };
+
+    test("each failure keeps its own file", async () => {
+      const store = failingStore();
+      await store.load("app", "aws");
+      const save = preserveOnFailure(store, dir);
+      await expect(save(stateWith("one"))).rejects.toThrow(/state push --force --from/);
+      await expect(save(stateWith("one", "two"))).rejects.toThrow(/state push --force --from/);
+      const files = findUnsavedStates(dir);
+      expect(files).toHaveLength(2);
+      expect(files.map((file) => Object.keys((JSON.parse(fs.readFileSync(file, "utf8")) as State).entries).length).sort()).toEqual([1, 2]);
+    });
+
+    test("apply, destroy and import are refused until they are pushed or ignored", async () => {
+      assertNoUnsavedState(dir, false);
+      fs.writeFileSync(path.join(dir, "state.json.unsaved.20261113T000000Z"), serializeState(stateWith("one")));
+      expect(() => assertNoUnsavedState(dir, false)).toThrow(/state\.json\.unsaved\.20261113T000000Z holds state that was never stored.*state push --force --from.*--ignore-unsaved/);
+      expect(() => assertNoUnsavedState(dir, true)).not.toThrow();
+    });
+
+    test("a successful push of the file removes it", async () => {
+      const file = path.join(dir, "state.json.unsaved.20261113T000000Z");
+      fs.writeFileSync(file, serializeState(stateWith("one")));
+      await stateCommand("push", open(path.join(dir, "state.json")), { force: true, workDir: dir, statePath: path.join(dir, "state.json"), from: file, project: "app", provider: "aws" });
+      expect(findUnsavedStates(dir)).toEqual([]);
+      assertNoUnsavedState(dir, false);
+    });
+  });
+
+  describe("releasing a lock", () => {
+    test("warns when the lock was already removed", async () => {
+      const release = await open().lock({ command: "apply" });
+      s3.objects.delete(`${BUCKET}/${lockKey}`);
+      await release();
+      expect(warnings[0]).toMatch(/already removed/);
+    });
+
+    test("warns when another run holds the lock now, and leaves it", async () => {
+      const release = await open().lock({ command: "apply" });
+      s3.put(BUCKET, lockKey, JSON.stringify({ id: "other", holder: "bob@ci", command: "destroy", since: "t", pid: 2 }));
+      await release();
+      expect(warnings[0]).toMatch(/now held by bob@ci.*left alone/);
+      expect(s3.body(BUCKET, lockKey)).toBeDefined();
+    });
+
+    test("a timed-out release aborts its request", async () => {
+      const lock = await holdLock(open(), { command: "apply" }, { warn: (m) => warnings.push(m), releaseTimeoutMs: 20 });
+      const send = s3.send.bind(s3);
+      let signal: AbortSignal | undefined;
+      s3.send = (command: unknown, options?: { abortSignal?: AbortSignal }) => {
+        if ((command as object).constructor.name !== "GetObjectCommand") return send(command, options);
+        signal = options?.abortSignal;
+        return new Promise(() => {});
+      };
+      await lock.release();
+      expect(warnings[0]).toMatch(/timed out/);
+      expect(signal?.aborted).toBe(true);
+    });
+  });
+
+  test("an unreadable marker is described without a made-up location", async () => {
+    fs.mkdirSync(path.dirname(cache()), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(cache()), MARKER_FILE), "not json");
+    const err = await new LocalStateStore(cache()).load("app", "aws").catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/uses remote state, but .*state\.remote\.json cannot be read; pass --state with its location or delete the file/);
+    expect((err as Error).message).not.toMatch(/unknown location/);
   });
 });

@@ -6,12 +6,17 @@ import { apply } from "../src/deploy/apply";
 import { plan } from "../src/deploy/plan";
 import { serializeState, type State } from "../src/deploy/state";
 import { parseS3Location, S3StateStore, STATE_CHANGED, type LockInfo } from "../src/deploy/state-s3";
-import { createStateStore, holdLock, LocalStateStore, stateLocation } from "../src/deploy/state-store";
+import { createStateStore, holdLock, LocalStateStore, preserveOnFailure, stateLocation } from "../src/deploy/state-store";
 import { stateCommand } from "../src/statecmd";
 import { FakeS3, s3Error } from "./fake-s3";
 import { baseConfig, emptyState, fakeAws } from "./helpers";
 
 const BUCKET = "state.tranquilo.art";
+const backups = (file: string) =>
+  fs
+    .readdirSync(path.dirname(file))
+    .filter((name) => name.startsWith(`${path.basename(file)}.pre-remote`))
+    .map((name) => path.join(path.dirname(file), name));
 const location = parseS3Location(`s3://${BUCKET}/tranquilo-app/`);
 
 function stateWith(name: string): State {
@@ -107,7 +112,8 @@ describe("S3StateStore", () => {
     await writer.save(stateWith("one"));
     expect(Object.keys(Object.fromEntries(s3.objects))).toEqual([`${BUCKET}/tranquilo-app/state.json`]);
     const put = s3.callsOf("PutObjectCommand")[0]!.input;
-    expect(put).toMatchObject({ Bucket: BUCKET, Key: "tranquilo-app/state.json", ContentType: "application/json", ServerSideEncryption: "AES256", IfNoneMatch: "*" });
+    expect(put).toMatchObject({ Bucket: BUCKET, Key: "tranquilo-app/state.json", ContentType: "application/json", IfNoneMatch: "*" });
+    expect(put).not.toHaveProperty("ServerSideEncryption");
     expect(put.IfMatch).toBeUndefined();
 
     const reader = open(s3, path.join(dir, "other", "state.json"));
@@ -196,7 +202,8 @@ describe("S3StateStore", () => {
     fs.writeFileSync(cache, serializeState(stateWith("stale")));
     const fresh = open();
     expect((await fresh.load("app", "aws")).state).toEqual(stateWith("remote"));
-    expect(warnings).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/differs from the remote state/);
     expect(JSON.parse(fs.readFileSync(cache, "utf8"))).toEqual(stateWith("remote"));
   });
 
@@ -213,7 +220,8 @@ describe("S3StateStore", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/differs from the remote state/);
     expect(warnings[0]).toMatch(/state push --force/);
-    expect(JSON.parse(fs.readFileSync(`${cache}.pre-remote`, "utf8"))).toEqual(stateWith("local"));
+    expect(backups(cache)).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(backups(cache)[0]!, "utf8"))).toEqual(stateWith("local"));
     expect(s3.body(BUCKET, "tranquilo-app/state.json")).toBe(before);
     expect(s3.callsOf("PutObjectCommand")).toHaveLength(0);
   });
@@ -234,7 +242,7 @@ describe("S3StateStore", () => {
     s3.put(BUCKET, "tranquilo-app/state.json", serializeState(stateWith("same")));
     await open().load("app", "aws");
     expect(warnings).toEqual([]);
-    expect(fs.existsSync(`${cache}.pre-remote`)).toBe(false);
+    expect(backups(cache)).toEqual([]);
   });
 
   describe("lock", () => {
@@ -243,7 +251,7 @@ describe("S3StateStore", () => {
     test("is taken with IfNoneMatch and describes the holder", async () => {
       const release = await open(s3, undefined, "ana@laptop").lock({ command: "apply --auto-approve" });
       const put = s3.callsOf("PutObjectCommand")[0]!.input;
-      expect(put).toMatchObject({ Key: lockKey, IfNoneMatch: "*", ServerSideEncryption: "AES256", ContentType: "application/json" });
+      expect(put).toMatchObject({ Key: lockKey, IfNoneMatch: "*", ContentType: "application/json" });
       const info = JSON.parse(s3.body(BUCKET, lockKey)!) as LockInfo;
       expect(info).toMatchObject({ holder: "ana@laptop", command: "apply --auto-approve", pid: process.pid });
       expect(info.id).toMatch(/^[0-9a-f-]{36}$/);
@@ -297,9 +305,9 @@ describe("S3StateStore", () => {
 
     test("holdLock releases the lock it took", async () => {
       const store = open();
-      const release = await holdLock(store, { command: "apply" });
+      const lock = await holdLock(store, { command: "apply" });
       expect(s3.body(BUCKET, lockKey)).toBeDefined();
-      await release();
+      await lock.release();
       expect(s3.body(BUCKET, lockKey)).toBeUndefined();
     });
   });
@@ -308,7 +316,7 @@ describe("S3StateStore", () => {
     test("are stored beside the state with the same encryption, and removed when empty", async () => {
       const store = open();
       await store.saveEndpoints('{"routes":{}}\n');
-      expect(s3.callsOf("PutObjectCommand")[0]!.input).toMatchObject({ Key: "tranquilo-app/endpoints.json", ServerSideEncryption: "AES256", ContentType: "application/json" });
+      expect(s3.callsOf("PutObjectCommand")[0]!.input).toMatchObject({ Key: "tranquilo-app/endpoints.json", ContentType: "application/json" });
       expect(await store.readEndpoints()).toBe('{"routes":{}}\n');
       await store.saveEndpoints(undefined);
       expect(await store.readEndpoints()).toBeUndefined();
@@ -325,7 +333,7 @@ describe("cloudgear state commands", () => {
   const workDir = () => path.join(dir, ".cloudgear");
   const statePath = () => path.join(workDir(), "state.json");
   const store = () => new S3StateStore(location, { client: s3, cachePath: statePath(), warn: () => {}, holder: "ana@laptop" });
-  const run = (sub: string | undefined, force = false) => stateCommand(sub, store(), { force, workDir: workDir(), statePath: statePath() });
+  const run = (sub: string | undefined, force = false, extra: { from?: string; project?: string } = {}) => stateCommand(sub, store(), { force, workDir: workDir(), statePath: statePath(), project: "app", provider: "aws", ...extra });
   const writeLocal = (state: State) => {
     fs.mkdirSync(workDir(), { recursive: true });
     fs.writeFileSync(statePath(), serializeState(state));
@@ -458,14 +466,33 @@ describe("apply with a store", () => {
     expect((await store.load("app", "aws")).state).toEqual(state);
   });
 
-  test("a rejected save stops apply and the previous remote state survives", async () => {
+  test("a rejected save stops apply, keeps the state aside and tells what to do", async () => {
     const store = new S3StateStore(location, { client: s3, cachePath: path.join(dir, "state.json") });
     const { state } = await store.load("app", "aws");
     let puts = 0;
-    s3.failWhen = (call) => (call.command === "PutObjectCommand" && ++puts === 2 ? s3Error("InternalError", 500) : undefined);
-    await expect(apply(plan(baseConfig(), state), state, fakeAws().drivers, { save: (s) => store.save(s) })).rejects.toThrow("InternalError");
+    s3.failWhen = (call) => (call.command === "PutObjectCommand" && ++puts === 2 ? s3Error("ExpiredToken", 400) : undefined);
+    const unsaved = path.join(dir, "state.json.unsaved");
+    const err = await apply(plan(baseConfig(), state), state, fakeAws().drivers, { save: preserveOnFailure(store, unsaved) }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/ExpiredToken/);
+    expect((err as Error).message).toMatch(/state push --force --from \S*state\.json\.unsaved/);
+    expect((err as Error).message).toMatch(/Do NOT run apply again/);
     const remote = JSON.parse(s3.body(BUCKET, "tranquilo-app/state.json")!) as State;
     expect(Object.keys(remote.entries)).toEqual(["@aws.S3.data"]);
+    const kept = JSON.parse(fs.readFileSync(unsaved, "utf8")) as State;
+    expect(Object.keys(kept.entries)).toEqual(["@aws.S3.data", "@aws.Lambda.foo"]);
+    expect(fs.existsSync(`${unsaved}.tmp`)).toBe(false);
+  });
+
+  test("the kept state can be pushed with --force --from", async () => {
+    const store = new S3StateStore(location, { client: s3, cachePath: path.join(dir, "state.json") });
+    await store.load("app", "aws");
+    await store.save(emptyState());
+    const unsaved = path.join(dir, "state.json.unsaved");
+    fs.writeFileSync(unsaved, serializeState(stateWith("created")));
+    const fresh = new S3StateStore(location, { client: s3, cachePath: path.join(dir, "state.json"), warn: () => {} });
+    await stateCommand("push", fresh, { force: true, workDir: dir, statePath: path.join(dir, "state.json"), from: unsaved, project: "app", provider: "aws" });
+    expect(JSON.parse(s3.body(BUCKET, "tranquilo-app/state.json")!)).toEqual(stateWith("created"));
   });
 });
 

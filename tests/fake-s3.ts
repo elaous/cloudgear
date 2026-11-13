@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 
+const etagOf = (body: string) => `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
+
 interface StoredObject {
   body: string;
   etag: string;
   contentType?: string;
-  sse?: string;
 }
 
 export function s3Error(name: string, status: number): Error {
@@ -18,7 +19,6 @@ interface Input {
   IfMatch?: string;
   IfNoneMatch?: string;
   ContentType?: string;
-  ServerSideEncryption?: string;
 }
 
 type Call = { command: string; input: Input };
@@ -50,8 +50,8 @@ export class FakeS3 {
       case "PutObjectCommand": {
         this.checkPreconditions(input, existing);
         const body = String(input.Body);
-        const etag = `"${createHash("md5").update(body).digest("hex")}"`;
-        this.objects.set(id, { body, etag, contentType: input.ContentType, sse: input.ServerSideEncryption });
+        const etag = etagOf(body);
+        this.objects.set(id, { body, etag, contentType: input.ContentType });
         return { ETag: etag };
       }
       case "DeleteObjectCommand": {
@@ -77,7 +77,7 @@ export class FakeS3 {
   }
 
   put(bucket: string, key: string, body: string): void {
-    this.objects.set(`${bucket}/${key}`, { body, etag: `"${createHash("md5").update(body).digest("hex")}"` });
+    this.objects.set(`${bucket}/${key}`, { body, etag: etagOf(body) });
   }
 
   callsOf(command: string): Call[] {

@@ -8,6 +8,9 @@ export interface StateCommandOptions {
   force: boolean;
   workDir: string;
   statePath: string;
+  from?: string;
+  project?: string;
+  provider?: string;
 }
 
 const USAGE = "Usage: cloudgear state pull | push [--force] | unlock --force | show";
@@ -36,10 +39,10 @@ export async function stateCommand(sub: string | undefined, store: StateStore, o
       return;
     }
     case "push": {
-      if (!fs.existsSync(options.statePath)) throw new Error(`${relative(options.statePath)} not found; there is no local state to push`);
-      const text = fs.readFileSync(options.statePath, "utf8");
-      const local = JSON.parse(text) as State;
-      parseState(text, relative(options.statePath), local.project, local.provider);
+      const source = options.from ?? options.statePath;
+      if (!fs.existsSync(source)) throw new Error(`${relative(source)} not found; there is no local state to push`);
+      const text = fs.readFileSync(source, "utf8");
+      const local = parseState(text, relative(source), options.project!, options.provider!);
       const existing = await remote.readRemote();
       if (existing && !options.force) {
         const entries = Object.keys((JSON.parse(existing.text) as State).entries ?? {}).length;

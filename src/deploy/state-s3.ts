@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { GetObjectCommandOutput, PutObjectCommandOutput } from "@aws-sdk/client-s3";
 import { debug } from "@cloudgear/debug";
 import { parseState, serializeState, writeFileAtomic, type State } from "./state";
-import type { LockRequest, StateStore } from "./state-store";
+import { readRemoteMarker, MARKER_FILE, type LockRequest, type StateStore } from "./state-store";
 
 export interface S3Location {
   bucket: string;
@@ -31,7 +32,8 @@ export interface S3StateStoreOptions {
   holder?: string;
 }
 
-export const STATE_CHANGED = "state changed remotely since it was read; run the command again";
+export const STATE_CHANGED = "state changed remotely since it was read";
+export const STATE_DELETED = "state was deleted remotely since it was read";
 
 const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 
@@ -67,7 +69,8 @@ const statusOf = (err: unknown) => (err as SdkError)?.$metadata?.httpStatusCode;
 const nameOf = (err: unknown) => (err as SdkError)?.name;
 const isPreconditionFailed = (err: unknown) => nameOf(err) === "PreconditionFailed" || statusOf(err) === 412;
 const isConflict = (err: unknown) => nameOf(err) === "ConditionalRequestConflict" || statusOf(err) === 409;
-const isNotFound = (err: unknown) => nameOf(err) === "NoSuchKey" || nameOf(err) === "NotFound" || statusOf(err) === 404;
+const isNotFound = (err: unknown) => nameOf(err) === "NoSuchKey" || nameOf(err) === "NotFound" || (statusOf(err) === 404 && nameOf(err) !== "NoSuchBucket");
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 function defaultHolder(): string {
   let user = process.env.USER ?? "unknown";
@@ -81,15 +84,23 @@ export function describeLock(info: LockInfo | undefined): string {
   return info ? `${info.holder} since ${info.since} (command ${info.command})` : "an unknown holder";
 }
 
+
+interface Condition {
+  ifMatch?: string;
+  ifNoneMatch?: string;
+}
+
 export class S3StateStore implements StateStore {
   readonly stateKey: string;
   readonly lockKey: string;
   readonly endpointsKey: string;
+  unpushedLocalEntries?: number;
   private sdk?: Promise<typeof import("@aws-sdk/client-s3")>;
   private client?: Promise<S3Sender>;
   private known = false;
   private etag?: string;
   private firstLoad = true;
+  private backedUp?: string;
 
   constructor(
     readonly location: S3Location,
@@ -111,11 +122,11 @@ export class S3StateStore implements StateStore {
   async load(project: string, provider: string): Promise<{ state: State; version?: string }> {
     const remote = await this.readRemote();
     if (!remote) {
-      this.warnOnDivergence(undefined);
+      this.checkLocalCopy(undefined);
       return { state: { version: 1, project, provider, entries: {} } };
     }
     const state = parseState(remote.text, `${this.describe()}state.json`, project, provider);
-    this.warnOnDivergence(remote.text);
+    this.checkLocalCopy(remote.text);
     this.mirror(remote.text, remote.etag);
     return { state, version: remote.etag };
   }
@@ -143,7 +154,7 @@ export class S3StateStore implements StateStore {
 
   async saveEndpoints(json: string | undefined): Promise<void> {
     if (json === undefined) {
-      await this.send("DeleteObjectCommand", { Bucket: this.location.bucket, Key: this.endpointsKey });
+      await this.remove(this.endpointsKey, {});
       return;
     }
     await this.put(this.endpointsKey, json, {});
@@ -158,12 +169,14 @@ export class S3StateStore implements StateStore {
       pid: process.pid,
     };
     try {
-      await this.put(this.lockKey, JSON.stringify(info), { IfNoneMatch: "*" });
+      await this.put(this.lockKey, JSON.stringify(info), { ifNoneMatch: "*" });
     } catch (err) {
       if (!isPreconditionFailed(err) && !isConflict(err)) throw this.withHint(err, this.lockKey);
       const held = await this.readLock();
       if (!held) throw new Error("The state lock changed while it was being taken; run the command again");
-      throw new Error(`state is locked by ${describeLock(held.info)}; if that run is dead, run cloudgear state unlock --force`);
+      if (held.info?.id !== info.id) {
+        throw new Error(`state is locked by ${describeLock(held.info)}; if that run is dead, run cloudgear state unlock --force`);
+      }
     }
     debug("state", "lock taken", { key: this.lockKey, id: info.id });
     let released = false;
@@ -173,7 +186,7 @@ export class S3StateStore implements StateStore {
       const held = await this.readLock();
       if (!held || held.info?.id !== info.id) return;
       try {
-        await this.send("DeleteObjectCommand", { Bucket: this.location.bucket, Key: this.lockKey, IfMatch: held.etag });
+        await this.remove(this.lockKey, { ifMatch: held.etag });
       } catch (err) {
         if (isPreconditionFailed(err) || isNotFound(err)) return;
         throw err;
@@ -195,7 +208,12 @@ export class S3StateStore implements StateStore {
   async forceUnlock(): Promise<LockInfo | undefined> {
     const held = await this.readLock();
     if (!held) return undefined;
-    await this.send("DeleteObjectCommand", { Bucket: this.location.bucket, Key: this.lockKey });
+    try {
+      await this.remove(this.lockKey, { ifMatch: held.etag });
+    } catch (err) {
+      if (isPreconditionFailed(err)) throw new Error("The lock changed while it was being removed; check who holds it with cloudgear state show");
+      if (!isNotFound(err)) throw err;
+    }
     debug("state", "lock removed", { key: this.lockKey });
     return held.info ?? ({ holder: "unknown", command: "unknown", since: "unknown", id: "", pid: 0 } satisfies LockInfo);
   }
@@ -203,10 +221,8 @@ export class S3StateStore implements StateStore {
   async pull(directory: string): Promise<{ state: boolean; endpoints: boolean }> {
     const remote = await this.readRemote();
     if (!remote) throw new Error(`No state at ${this.describe()}state.json`);
-    this.warnOnDivergence(remote.text);
-    this.backupIfDiffers(path.join(directory, "state.json"), remote.text);
-    writeFileAtomic(path.join(directory, "state.json"), remote.text);
-    this.writeMarker(directory, remote.etag);
+    this.checkLocalCopy(remote.text);
+    this.mirror(remote.text, remote.etag, directory);
     const endpoints = await this.readEndpoints();
     const endpointsFile = path.join(directory, "endpoints.json");
     if (endpoints === undefined) fs.rmSync(endpointsFile, { force: true });
@@ -215,40 +231,44 @@ export class S3StateStore implements StateStore {
   }
 
   private async putState(text: string): Promise<string> {
-    const condition = this.etag ? { IfMatch: this.etag } : { IfNoneMatch: "*" };
+    const condition: Condition = this.etag ? { ifMatch: this.etag } : { ifNoneMatch: "*" };
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.put(this.stateKey, text, condition);
       } catch (err) {
-        if (isPreconditionFailed(err)) throw new Error(STATE_CHANGED);
-        if (isConflict(err)) {
-          if (attempt === 0) continue;
+        const conflict = isConflict(err);
+        if (conflict && attempt === 0) continue;
+        if (isPreconditionFailed(err) || conflict) {
+          const current = await this.get(this.stateKey);
+          if (current?.text === text) return current.etag;
           throw new Error(STATE_CHANGED);
         }
+        if (isNotFound(err) && this.etag) throw new Error(STATE_DELETED);
         throw this.withHint(err, this.stateKey);
       }
     }
   }
 
-  private async put(key: string, text: string, condition: { IfMatch?: string; IfNoneMatch?: string }): Promise<string> {
-    const res = (await this.send("PutObjectCommand", {
-      Bucket: this.location.bucket,
-      Key: key,
-      Body: text,
-      ContentType: "application/json",
-      ServerSideEncryption: "AES256",
-      ...condition,
-    })) as { ETag?: string };
+  private async put(key: string, text: string, condition: Condition): Promise<string> {
+    const sdk = await this.loadSdk();
+    const res = (await (await this.getClient()).send(
+      new sdk.PutObjectCommand({
+        Bucket: this.location.bucket,
+        Key: key,
+        Body: text,
+        ContentType: "application/json",
+        IfMatch: condition.ifMatch,
+        IfNoneMatch: condition.ifNoneMatch,
+      }),
+    )) as PutObjectCommandOutput;
     if (!res.ETag) throw new Error(`The bucket returned no ETag for ${key}`);
     return res.ETag;
   }
 
   private async get(key: string): Promise<{ text: string; etag: string } | undefined> {
+    const sdk = await this.loadSdk();
     try {
-      const res = (await this.send("GetObjectCommand", { Bucket: this.location.bucket, Key: key })) as {
-        Body?: { transformToString(): Promise<string> };
-        ETag?: string;
-      };
+      const res = (await (await this.getClient()).send(new sdk.GetObjectCommand({ Bucket: this.location.bucket, Key: key }))) as GetObjectCommandOutput;
       if (!res.Body || !res.ETag) throw new Error(`The bucket returned no body or ETag for ${key}`);
       return { text: await res.Body.transformToString(), etag: res.ETag };
     } catch (err) {
@@ -257,10 +277,9 @@ export class S3StateStore implements StateStore {
     }
   }
 
-  private async send(command: string, input: Record<string, unknown>): Promise<unknown> {
+  private async remove(key: string, condition: Condition): Promise<void> {
     const sdk = await this.loadSdk();
-    const Command = (sdk as unknown as Record<string, new (input: Record<string, unknown>) => unknown>)[command]!;
-    return (await this.getClient()).send(new Command(input));
+    await (await this.getClient()).send(new sdk.DeleteObjectCommand({ Bucket: this.location.bucket, Key: key, IfMatch: condition.ifMatch }));
   }
 
   private loadSdk() {
@@ -273,37 +292,20 @@ export class S3StateStore implements StateStore {
       ? Promise.resolve(this.options.client)
       : this.loadSdk().then((sdk) => {
           const region = this.location.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
-          return new sdk.S3Client(region ? { region } : {});
+          return new sdk.S3Client({ ...(region ? { region } : {}), followRegionRedirects: true });
         });
     return this.client;
   }
 
   private withHint(err: unknown, key: string): unknown {
+    if (nameOf(err) === "NoSuchBucket") {
+      return new Error(`The bucket ${this.location.bucket} does not exist; cloudgear does not create it`, { cause: err });
+    }
     if (nameOf(err) !== "AccessDenied" && statusOf(err) !== 403) return err;
     return new Error(
-      `Access denied to s3://${this.location.bucket}/${key}: the credentials need s3:GetObject, s3:PutObject and s3:DeleteObject on the prefix, and s3:ListBucket on the bucket`,
+      `Access denied to s3://${this.location.bucket}/${key}: the credentials need s3:GetObject, s3:PutObject and s3:DeleteObject on the prefix, and s3:ListBucket on the bucket (plus kms:Decrypt and kms:GenerateDataKey when the bucket encrypts with a KMS key)`,
       { cause: err },
     );
-  }
-
-  private get cacheDir(): string | undefined {
-    return this.options.cachePath ? path.dirname(this.options.cachePath) : undefined;
-  }
-
-  private get markerFile(): string | undefined {
-    return this.cacheDir ? path.join(this.cacheDir, "state.remote.json") : undefined;
-  }
-
-  private writeMarker(directory: string, etag: string): void {
-    writeFileAtomic(path.join(directory, "state.remote.json"), `${JSON.stringify({ location: this.describe(), etag }, null, 2)}\n`);
-  }
-
-  private ownsCache(): boolean {
-    try {
-      return JSON.parse(fs.readFileSync(this.markerFile!, "utf8")).location === this.describe();
-    } catch {
-      return false;
-    }
   }
 
   private readLocal(file: string): string | undefined {
@@ -322,36 +324,66 @@ export class S3StateStore implements StateStore {
     }
   }
 
-  private warnOnDivergence(remoteText: string | undefined): void {
+  private entryCount(text: string): number {
+    try {
+      return Object.keys((JSON.parse(text) as State).entries ?? {}).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  // True when the file is exactly what this store last mirrored.
+  private cacheIntact(file: string, local: string | undefined): boolean {
+    const marker = readRemoteMarker(path.dirname(file));
+    return !!marker && local !== undefined && marker.location === this.describe() && marker.sha256 === sha256(local);
+  }
+
+  private checkLocalCopy(remoteText: string | undefined): void {
     if (!this.firstLoad) return;
     this.firstLoad = false;
     const file = this.options.cachePath;
     const local = file ? this.readLocal(file) : undefined;
-    if (!file || local === undefined || this.ownsCache()) return;
-    if (remoteText !== undefined && this.sameState(local, remoteText)) return;
+    if (!file || local === undefined) return;
     const warn = this.options.warn ?? ((message: string) => console.warn(`warning: ${message}`));
     const name = path.relative(process.cwd(), file) || file;
+    const intact = this.cacheIntact(file, local);
+    if (remoteText === undefined) {
+      const entries = this.entryCount(local);
+      if (!entries) return;
+      this.unpushedLocalEntries = entries;
+      warn(
+        intact
+          ? `${this.describe()} holds no state any more, although ${name} was mirrored from it. Run \`cloudgear state push\` to restore it`
+          : `${name} holds ${entries} entries but ${this.describe()} holds no state, so the remote is treated as empty. To migrate the local state, run \`cloudgear state push\``,
+      );
+      return;
+    }
+    if (intact || this.sameState(local, remoteText)) return;
+    const kept = this.backupLocal(file, local);
     warn(
-      remoteText === undefined
-        ? `${name} exists but ${this.describe()} holds no state, so the remote is treated as empty. To migrate the local state, run \`cloudgear state push\``
-        : `${name} differs from the remote state at ${this.describe()}; the remote is used and the local copy is replaced (kept as ${path.basename(file)}.pre-remote). To migrate the local state instead, run \`cloudgear state push --force\``,
+      `${name} differs from the remote state at ${this.describe()}; the remote is used and the local copy is replaced${kept ? ` (kept as ${path.basename(kept)})` : ""}. To migrate the local state instead, run \`cloudgear state push --force\``,
     );
   }
 
-  private backupIfDiffers(file: string, text: string): void {
-    if (this.ownsCache()) return;
-    const local = this.readLocal(file);
-    if (local === undefined || this.sameState(local, text)) return;
-    writeFileAtomic(`${file}.pre-remote`, local);
+  private backupLocal(file: string, local: string): string | undefined {
+    const digest = sha256(local);
+    if (this.backedUp === digest) return undefined;
+    const stamp = new Date().toISOString().replace(/[-:.]/g, "");
+    let target = `${file}.pre-remote-${stamp}`;
+    for (let n = 1; fs.existsSync(target); n++) target = `${file}.pre-remote-${stamp}-${n}`;
+    writeFileAtomic(target, local);
+    this.backedUp = digest;
+    return target;
   }
 
-  private mirror(text: string, etag: string): void {
-    const file = this.options.cachePath;
+  private mirror(text: string, etag: string, directory?: string): void {
+    const file = directory ? path.join(directory, "state.json") : this.options.cachePath;
     if (!file) return;
     try {
-      this.backupIfDiffers(file, text);
+      const local = this.readLocal(file);
+      if (local !== undefined && !this.cacheIntact(file, local) && !this.sameState(local, text)) this.backupLocal(file, local);
       writeFileAtomic(file, text);
-      this.writeMarker(path.dirname(file), etag);
+      writeFileAtomic(path.join(path.dirname(file), MARKER_FILE), `${JSON.stringify({ location: this.describe(), etag, sha256: sha256(text) }, null, 2)}\n`);
     } catch (err) {
       debug("state", "local cache not written", { error: (err as Error).message });
     }

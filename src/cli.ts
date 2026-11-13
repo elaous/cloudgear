@@ -11,7 +11,7 @@ import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { stateKey, type State } from "./deploy/state";
-import { createStateStore, holdLock, stateLocation, type StateStore } from "./deploy/state-store";
+import { ask, assertNoUnpushedLocalState, createStateStore, holdLock, preserveOnFailure, stateLocation, type LockHandle, type StateStore } from "./deploy/state-store";
 import { stateCommand } from "./statecmd";
 import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
@@ -58,6 +58,8 @@ Options:
   --state <url>      Keep state in S3: s3://<bucket>/<prefix>[?region=<region>] (default: $CLOUDGEAR_STATE,
                      then .cloudgear/state.json); apply, destroy, import and state push take a lock
   --force            Overwrite existing remote state (state push), remove the lock (state unlock)
+  --from <file>      Push this state file instead of .cloudgear/state.json (state push)
+  --allow-empty-remote  Apply, destroy or import against an empty remote although a local state has entries
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
@@ -106,6 +108,8 @@ const CLI_OPTIONS = {
   all: { type: "boolean", default: false },
   "auto-approve": { type: "boolean", default: false },
   state: { type: "string" },
+  from: { type: "string" },
+  "allow-empty-remote": { type: "boolean", default: false },
   force: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
 } as const;
@@ -142,11 +146,11 @@ async function main() {
   let opened: Promise<StateStore> | undefined;
   const getStore = () => (opened ??= createStateStore({ url: stateLocation(values.state), localFile: statePath }));
   const locking = command === "apply" || command === "destroy" || command === "import" || (command === "state" && args[0] === "push");
-  const release = locking ? await holdLock(await getStore(), { command: [command, ...args].join(" ") }) : undefined;
+  const lock = locking ? await holdLock(await getStore(), { command: [command, ...args].join(" ") }) : undefined;
   try {
-    await dispatch(command, args, values, { configPath, workDir, statePath, getStore });
+    await dispatch(command, args, values, { configPath, workDir, statePath, getStore, lock });
   } finally {
-    await release?.();
+    await lock?.release();
   }
 }
 
@@ -155,9 +159,10 @@ interface CommandContext {
   workDir: string;
   statePath: string;
   getStore: () => Promise<StateStore>;
+  lock?: LockHandle;
 }
 
-async function dispatch(command: string, args: string[], values: Values, { configPath, workDir, statePath, getStore }: CommandContext): Promise<void> {
+async function dispatch(command: string, args: string[], values: Values, { configPath, workDir, statePath, getStore, lock }: CommandContext): Promise<void> {
   switch (command) {
     case "generate": {
       const entry = args[0];
@@ -205,6 +210,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const config = readConfig(configPath);
       const store = await getStore();
       const { state } = await store.load(config.project, config.provider);
+      assertNoUnpushedLocalState(store, values["allow-empty-remote"]!);
       const target =
         command === "destroy"
           ? { ...config, resource: [], function: [], certificate: [], cdn: [], api: undefined }
@@ -227,13 +233,14 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       if (!hasChanges(actions)) {
         console.log("\nNo changes.");
       } else {
-        if (!values["auto-approve"] && !confirm(`\nDo you want to ${command}?`)) {
+        if (!values["auto-approve"] && !(await ask(`\nDo you want to ${command}? [y/N] `, lock))) {
           console.log("Cancelled.");
           return;
         }
         try {
           await apply(actions, state, await drivers(actions, config, configPath, values.region, deployTags(config, configPath, values)), {
-            save: (s) => store.save(s),
+            save: preserveOnFailure(store, path.join(workDir, "state.json.unsaved")),
+            shouldStop: () => !!lock?.signal.aborted,
             log: (message) => console.log(`cloudgear: ${message}`),
           });
           console.log(`cloudgear: ${command} complete`);
@@ -316,6 +323,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const config = readConfig(configPath);
       const store = await getStore();
       const { state } = await store.load(config.project, config.provider);
+      assertNoUnpushedLocalState(store, values["allow-empty-remote"]!);
       const [first, second, third] = args;
       const policyDir = values["write-policies"];
       if (policyDir !== undefined && !policyDir.trim()) throw new Error("--write-policies needs a directory");
@@ -421,7 +429,8 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       return;
     }
     case "state": {
-      await stateCommand(args[0], await getStore(), { force: values.force!, workDir, statePath });
+      const config = args[0] === "push" ? readConfig(configPath) : undefined;
+      await stateCommand(args[0], await getStore(), { force: values.force!, workDir, statePath, from: values.from, project: config?.project, provider: config?.provider });
       return;
     }
     default:

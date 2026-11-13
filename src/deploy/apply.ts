@@ -55,6 +55,14 @@ export const incompleteSpec = (spec: Record<string, unknown>, before?: Record<st
 export interface ApplyOptions {
   save: (state: State) => void | Promise<void>;
   log?: (message: string) => void;
+  // Checked between steps; the current step finishes.
+  shouldStop?: () => boolean;
+}
+
+export class ApplyInterrupted extends Error {
+  constructor() {
+    super("Interrupted; the steps that finished are saved");
+  }
 }
 
 // Saves state after each action; partial failures keep progress.
@@ -147,6 +155,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
   };
 
   for (const action of actions) {
+    if (options.shouldStop?.()) throw new ApplyInterrupted();
     if (action.op === "noop" || action.op === "dry") {
       debug("apply", `${action.op} ${action.key}`);
       continue;

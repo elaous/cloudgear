@@ -53,7 +53,7 @@ export const incompleteSpec = (spec: Record<string, unknown>, before?: Record<st
 };
 
 export interface ApplyOptions {
-  save: (state: State) => void;
+  save: (state: State) => void | Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -66,7 +66,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
     return driver;
   };
   const context: DriverContext = { entry: (key) => state.entries[key], entries: () => Object.values(state.entries) };
-  const record = (entry: DesiredEntry, outputs: Record<string, string>, previous?: StateEntry) => {
+  const record = async (entry: DesiredEntry, outputs: Record<string, string>, previous?: StateEntry) => {
     state.entries[stateKey(entry)] = {
       kind: entry.kind,
       type: entry.type,
@@ -76,14 +76,14 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
       outputs: { ...previous?.outputs, ...outputs },
       deps: entry.deps,
     };
-    options.save(state);
+    await options.save(state);
     debug("state", `saved ${stateKey(entry)}`, { outputs: Object.keys(state.entries[stateKey(entry)]!.outputs) });
   };
 
   const create = async (action: PlannedAction) => {
     const desired = action.desired!;
     try {
-      record(desired, await driverFor(action.type).create(desired, context));
+      await record(desired, await driverFor(action.type).create(desired, context));
     } catch (err) {
       if (err instanceof PartialApplyError) {
         state.entries[stateKey(desired)] = {
@@ -95,7 +95,7 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
           outputs: err.outputs,
           deps: desired.deps,
         };
-        options.save(state);
+        await options.save(state);
         throw err.original;
       }
       throw err;
@@ -112,11 +112,11 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
       case "update":
         log(`updating ${action.type} ${action.name} (${action.changes.join(", ")})`);
         try {
-          record(desired!, await driverFor(action.type).update(desired!, current!, action.changes, context), current);
+          await record(desired!, await driverFor(action.type).update(desired!, current!, action.changes, context), current);
         } catch (err) {
           if (err instanceof PartialApplyError) {
             state.entries[action.key] = { ...current!, spec: incompleteSpec(desired!.spec, current!.spec), outputs: err.outputs, deps: desired!.deps };
-            options.save(state);
+            await options.save(state);
             throw err.original;
           }
           throw err;
@@ -126,19 +126,19 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
         log(`replacing ${action.type} ${action.name}`);
         await driverFor(action.type).delete(current!, context);
         delete state.entries[action.key];
-        options.save(state);
+        await options.save(state);
         await create(action);
         break;
       case "delete":
         log(`deleting ${action.type} ${action.name}`);
         await driverFor(action.type).delete(current!, context);
         delete state.entries[action.key];
-        options.save(state);
+        await options.save(state);
         break;
       case "forget":
         log(`forgetting ${action.type} ${action.name}`);
         delete state.entries[action.key];
-        options.save(state);
+        await options.save(state);
         break;
       case "noop":
       case "dry":

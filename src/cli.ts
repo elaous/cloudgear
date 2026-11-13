@@ -10,7 +10,9 @@ import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } fro
 import { awsDrivers } from "./deploy/aws";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
-import { loadState, saveState, stateKey, type State } from "./deploy/state";
+import { stateKey, type State } from "./deploy/state";
+import { createStateStore, holdLock, stateLocation, type StateStore } from "./deploy/state-store";
+import { stateCommand } from "./statecmd";
 import { INCLUDED_DIR, hashContents, includedPath } from "./build/bundle";
 import { generate } from "./generate";
 import { baseTags, type Tags } from "./deploy/aws/tags";
@@ -42,6 +44,10 @@ Commands:
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
                                Store the secrets the app declares (NAME reads its value from stdin)
   secrets list                 Show which declared secrets are stored; values are never printed
+  state pull                   Download the remote state.json and endpoints.json into .cloudgear/
+  state push [--force]         Upload the local .cloudgear/state.json; refuses to replace remote state without --force
+  state unlock --force         Remove a stale lock left by a run that died (prints who held it)
+  state show                   Print the remote location, entry count, version (ETag) and lock holder
 
 Options:
   --config <file>    Config file (default: cloudgear.prototxt)
@@ -49,6 +55,9 @@ Options:
   --invoker <arn>    IAM role/user ARN or account id allowed to call the functions; trusted to assert
                      caller identities, not just to call (generate only, repeatable)
   --reserved-concurrency <n>  Cap each function's concurrent executions (generate only)
+  --state <url>      Keep state in S3: s3://<bucket>/<prefix>[?region=<region>] (default: $CLOUDGEAR_STATE,
+                     then .cloudgear/state.json); apply, destroy, import and state push take a lock
+  --force            Overwrite existing remote state (state push), remove the lock (state unlock)
   --region <region>  Cloud region (default: $AWS_REGION / $AWS_DEFAULT_REGION)
   --env <name>       Environment tag for created resources, e.g. prod (apply only)
   --author <name>    Author tag (default: git user.name, then $USER) (apply only)
@@ -75,33 +84,40 @@ function fakeDrivers(): boolean {
   return ["CLOUDGEAR_DNS_DRIVER", "CLOUDGEAR_CERT_DRIVER", "CLOUDGEAR_CDN_DRIVER"].some((name) => process.env[name]);
 }
 
+const CLI_OPTIONS = {
+  config: { type: "string", default: "cloudgear.prototxt" },
+  project: { type: "string" },
+  invoker: { type: "string", multiple: true },
+  "reserved-concurrency": { type: "string" },
+  region: { type: "string" },
+  env: { type: "string" },
+  author: { type: "string" },
+  tag: { type: "string", multiple: true },
+  "from-envfile": { type: "string" },
+  "allow-unignored": { type: "boolean", default: false },
+  "skip-env-check": { type: "boolean", default: false },
+  "skip-dns-check": { type: "boolean", default: false },
+  "dns-server": { type: "string" },
+  domain: { type: "string" },
+  dir: { type: "string" },
+  arn: { type: "string" },
+  "write-policies": { type: "string" },
+  path: { type: "string" },
+  all: { type: "boolean", default: false },
+  "auto-approve": { type: "boolean", default: false },
+  state: { type: "string" },
+  force: { type: "boolean", default: false },
+  help: { type: "boolean", short: "h", default: false },
+} as const;
+
+function parseCli() {
+  return parseArgs({ allowPositionals: true, options: CLI_OPTIONS });
+}
+
+type Values = ReturnType<typeof parseCli>["values"];
+
 async function main() {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-      config: { type: "string", default: "cloudgear.prototxt" },
-      project: { type: "string" },
-      invoker: { type: "string", multiple: true },
-      "reserved-concurrency": { type: "string" },
-      region: { type: "string" },
-      env: { type: "string" },
-      author: { type: "string" },
-      tag: { type: "string", multiple: true },
-      "from-envfile": { type: "string" },
-      "allow-unignored": { type: "boolean", default: false },
-      "skip-env-check": { type: "boolean", default: false },
-      "skip-dns-check": { type: "boolean", default: false },
-      "dns-server": { type: "string" },
-      domain: { type: "string" },
-      dir: { type: "string" },
-      arn: { type: "string" },
-      "write-policies": { type: "string" },
-      path: { type: "string" },
-      all: { type: "boolean", default: false },
-      "auto-approve": { type: "boolean", default: false },
-      help: { type: "boolean", short: "h", default: false },
-    },
-  });
+  const { values, positionals } = parseCli();
   const [command, ...args] = positionals;
   if (!command || values.help) {
     console.log(USAGE);
@@ -123,6 +139,25 @@ async function main() {
     });
   }
 
+  let opened: Promise<StateStore> | undefined;
+  const getStore = () => (opened ??= createStateStore({ url: stateLocation(values.state), localFile: statePath }));
+  const locking = command === "apply" || command === "destroy" || command === "import" || (command === "state" && args[0] === "push");
+  const release = locking ? await holdLock(await getStore(), { command: [command, ...args].join(" ") }) : undefined;
+  try {
+    await dispatch(command, args, values, { configPath, workDir, statePath, getStore });
+  } finally {
+    await release?.();
+  }
+}
+
+interface CommandContext {
+  configPath: string;
+  workDir: string;
+  statePath: string;
+  getStore: () => Promise<StateStore>;
+}
+
+async function dispatch(command: string, args: string[], values: Values, { configPath, workDir, statePath, getStore }: CommandContext): Promise<void> {
   switch (command) {
     case "generate": {
       const entry = args[0];
@@ -143,7 +178,8 @@ async function main() {
     }
     case "plan": {
       const config = readConfig(configPath);
-      const state = loadState(statePath, config.project, config.provider);
+      const store = await getStore();
+      const { state } = await store.load(config.project, config.provider);
       debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
       console.log(formatPlan(plan(config, state)));
       const warning = envWarnings(config, configPath);
@@ -152,7 +188,8 @@ async function main() {
     }
     case "check-dns": {
       const config = readConfig(configPath);
-      const state = loadState(statePath, config.project, config.provider);
+      const store = await getStore();
+      const { state } = await store.load(config.project, config.provider);
       if (fakeDrivers()) {
         console.log("cloudgear: a CLOUDGEAR_*_DRIVER is set; the DNS check is skipped");
         return;
@@ -166,7 +203,8 @@ async function main() {
     case "apply":
     case "destroy": {
       const config = readConfig(configPath);
-      const state = loadState(statePath, config.project, config.provider);
+      const store = await getStore();
+      const { state } = await store.load(config.project, config.provider);
       const target =
         command === "destroy"
           ? { ...config, resource: [], function: [], certificate: [], cdn: [], api: undefined }
@@ -195,7 +233,7 @@ async function main() {
         }
         try {
           await apply(actions, state, await drivers(actions, config, configPath, values.region, deployTags(config, configPath, values)), {
-            save: (s) => saveState(statePath, s),
+            save: (s) => store.save(s),
             log: (message) => console.log(`cloudgear: ${message}`),
           });
           console.log(`cloudgear: ${command} complete`);
@@ -209,11 +247,11 @@ async function main() {
             console.log(`cloudgear: site https://${entry.name} (${status}; distribution ${entry.outputs.id}, ${entry.outputs.domain_name})`);
           }
         } finally {
-          writeEndpoints(config, state, workDir);
+          await writeEndpoints(config, state, workDir, store);
         }
         return;
       }
-      writeEndpoints(config, state, workDir);
+      await writeEndpoints(config, state, workDir, store);
       return;
     }
     case "dump-distributions": {
@@ -233,7 +271,8 @@ async function main() {
     }
     case "invalidate": {
       const config = readConfig(configPath);
-      const state = loadState(statePath, config.project, config.provider);
+      const store = await getStore();
+      const { state } = await store.load(config.project, config.provider);
       const distribution = pickDistribution(siteDistributions(config, state), values.domain);
       const paths = args.length ? args : ["/*"];
       for (const p of paths) if (!p.startsWith("/")) throw new Error(`Invalidation path "${p}" must start with "/"`);
@@ -275,7 +314,8 @@ async function main() {
     }
     case "import": {
       const config = readConfig(configPath);
-      const state = loadState(statePath, config.project, config.provider);
+      const store = await getStore();
+      const { state } = await store.load(config.project, config.provider);
       const [first, second, third] = args;
       const policyDir = values["write-policies"];
       if (policyDir !== undefined && !policyDir.trim()) throw new Error("--write-policies needs a directory");
@@ -317,7 +357,7 @@ async function main() {
           spec: { physical_name: physical },
           outputs: {},
         };
-        saveState(statePath, state);
+        await store.save(state);
         console.log(`cloudgear: imported ${bucket.type} ${bucket.name} as "${physical}"`);
         if (policyDir) {
           // The bucket policy is read from the bucket that was named, under its physical name.
@@ -344,7 +384,7 @@ async function main() {
       if (values.arn && !first) {
         const deployers = await drivers(planned.filter((a) => a.type === arnType), config, configPath, values.region, deployTags(config, configPath, values));
         const found = await adoptByArn(planned, state, deployers, arnType!, values.arn, !!values["write-policies"]);
-        saveState(statePath, state);
+        await store.save(state);
         reportAttached(syncAttached(configPath, state));
         for (const item of found.adopted) console.log(`cloudgear: imported ${item}`);
         for (const note of found.notes) console.warn(`warning: ${note}`);
@@ -364,7 +404,7 @@ async function main() {
       const deployers = await drivers(chosen, config, configPath, values.region, deployTags(config, configPath, values));
       const hint = values.arn || values["write-policies"] ? { ...(values.arn ? { arn: values.arn } : {}), ...(values["write-policies"] ? { exportPolicies: true } : {}) } : undefined;
       const result = await adoptEntries(planned, state, deployers, select, hint);
-      saveState(statePath, state);
+      await store.save(state);
       reportAttached(syncAttached(configPath, state));
       for (const item of result.adopted) console.log(`cloudgear: imported ${item}`);
       for (const note of result.notes) console.warn(`warning: ${note}`);
@@ -378,6 +418,10 @@ async function main() {
       if (result.failed.length) throw new Error(`These could not be imported (the rest were saved):\n  ${result.failed.join("\n  ")}`);
       if (!values.all && result.missing.length) throw new Error(`${result.missing[0]} was not found in the cloud`);
       if (!values.all && result.skipped.length && !result.files.length) throw new Error(`${result.skipped[0]} is already in state or cannot be imported`);
+      return;
+    }
+    case "state": {
+      await stateCommand(args[0], await getStore(), { force: values.force!, workDir, statePath });
       return;
     }
     default:
@@ -394,16 +438,23 @@ function bucketOfArn(arn: string, bucketOnly = false): string {
   return name;
 }
 
-function writeEndpoints(config: CloudgearConfig, state: State, workDir: string): void {
+async function writeEndpoints(config: CloudgearConfig, state: State, workDir: string, store: StateStore): Promise<void> {
   const endpointsPath = path.join(workDir, "endpoints.json");
   const endpoints = endpointsFrom(config, state);
+  let json: string | undefined;
   if (hasEndpoints(endpoints)) {
+    json = `${JSON.stringify(endpoints, null, 2)}\n`;
     fs.mkdirSync(workDir, { recursive: true });
-    fs.writeFileSync(endpointsPath, `${JSON.stringify(endpoints, null, 2)}\n`);
+    fs.writeFileSync(endpointsPath, json);
     console.log(`cloudgear: endpoints -> ${path.relative(process.cwd(), endpointsPath)}`);
   } else {
     fs.rmSync(endpointsPath, { force: true });
     console.log("cloudgear: no deployed endpoints");
+  }
+  try {
+    await store.saveEndpoints(json);
+  } catch (err) {
+    console.warn(`warning: endpoints were not stored at ${store.describe()}: ${err instanceof Error ? err.message : err}`);
   }
 }
 

@@ -207,17 +207,29 @@ export class FunctionRouter {
 
   fetch: RouterFetch = ((target: Request | string | URL, second?: FetchOpts | RequestInit) => {
     if (target instanceof Request) return this.handle(target);
-    if (target instanceof URL || (typeof target === "string" && (target.startsWith("/") || target.startsWith("\\") || SCHEME_URL.test(target)))) {
-      return this.fetchPath(target, second as RequestInit | undefined);
-    }
-    if (typeof target === "string") return this.fetchRoute(target, second as FetchOpts | undefined);
-    throw new TypeError("fetch takes a Request, a path or a route name");
+    return this.fetchClient(target, second);
   }) as RouterFetch;
 
+  fetchVia(base: string, input: string, init?: FetchOpts | RequestInit): Promise<Response> {
+    return this.fetchClient(input, init, trimTrailingSlashes(base));
+  }
+
+  private fetchClient(target: string | URL, second: FetchOpts | RequestInit | undefined, cdnBase?: string): Promise<Response> {
+    if (target instanceof URL || (typeof target === "string" && (target.startsWith("/") || target.startsWith("\\") || SCHEME_URL.test(target)))) {
+      return this.fetchPath(target, second as RequestInit | undefined, cdnBase);
+    }
+    if (typeof target === "string") return this.fetchRoute(target, second as FetchOpts | undefined, cdnBase);
+    throw new TypeError("fetch takes a Request, a path or a route name");
+  }
+
   urlFrom(name: string, params: Record<string, string | number> = {}): URL {
+    return this.routeUrl(name, params);
+  }
+
+  private routeUrl(name: string, params: Record<string, string | number>, cdnBase?: string): URL {
     const route = this.routes.find((r) => r.name === name);
     if (!route) throw new Error(`No route named "${name}"; known routes: ${this.routes.map((r) => r.name).join(", ") || "none"}`);
-    const template = this.urls()[name];
+    const template = cdnBase === undefined ? this.urls()[name] : `${cdnBase}${route.path}`;
     if (!template) throw new Error(`Route "${name}" has no URL yet; deploy it or call listen() first`);
     const unused = new Set(Object.keys(params));
     const filled = template.replace(new RegExp(PARAM.source, "g"), (_, key: string) => {
@@ -231,8 +243,8 @@ export class FunctionRouter {
     return new URL(filled);
   }
 
-  private async fetchRoute(name: string, opts: FetchOpts = {}): Promise<Response> {
-    const url = this.urlFrom(name, opts.params);
+  private async fetchRoute(name: string, opts: FetchOpts = {}, cdnBase?: string): Promise<Response> {
+    const url = this.routeUrl(name, opts.params ?? {}, cdnBase);
     const routeMethod = this.routes.find((r) => r.name === name)!.method;
     const method = assertMethod((opts.method ?? (routeMethod === ANY_METHOD ? "GET" : routeMethod)).toUpperCase());
     if (opts.query !== undefined) {
@@ -258,17 +270,18 @@ export class FunctionRouter {
       }
     }
     // CloudFront origin access control needs the payload hash on writes.
-    if (method === "POST" || method === "PUT" || method === "PATCH") {
+    if (cdnBase !== undefined) addCdnDigest(headers, method, body ?? new Uint8Array());
+    else if (method === "POST" || method === "PUT" || method === "PATCH") {
       headers.set("x-amz-content-sha256", createHash("sha256").update(body ?? "").digest("hex"));
     }
     debug("router", `fetch ${method} ${name}`);
     return fetch(url, { method, headers, body, redirect: "manual" });
   }
 
-  private async fetchPath(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  private async fetchPath(input: string | URL, init: RequestInit = {}, cdnBase?: string): Promise<Response> {
     const parsed = this.parseClientPath(input);
     const { route, method } = this.pickRoute(parsed.pathname, init.method);
-    const target = this.resolver()(route);
+    const target: Target | undefined = cdnBase === undefined ? this.resolver()(route) : { kind: "cdn", base: cdnBase };
     if (!target) throw new Error(`Route "${route.name}" has no URL yet; deploy it or call listen() first`);
     if ((method === "GET" || method === "HEAD") && init.body !== undefined && init.body !== null) throw new Error(`A ${method} request cannot have a body`);
     const original = new Request(`${PLACEHOLDER_ORIGIN}${parsed.pathname}${parsed.search}`, { ...init, method });
@@ -277,9 +290,7 @@ export class FunctionRouter {
     const headers = new Headers(original.headers);
     const bytes = new Uint8Array(await original.arrayBuffer());
     const hasBody = bytes.length > 0 || method === "POST" || method === "PUT" || method === "PATCH";
-    if (target.kind === "cdn" && hasBody && !headers.has("x-amz-content-sha256")) {
-      headers.set("x-amz-content-sha256", createHash("sha256").update(bytes).digest("hex"));
-    }
+    if (target.kind === "cdn") addCdnDigest(headers, method, bytes);
     return fetch(`${target.base}${parsed.pathname}${parsed.search}`, { redirect: "manual", ...init, method, headers, body: hasBody ? bytes : undefined });
   }
 
@@ -552,6 +563,19 @@ export async function request(
     signed: !!init.sign,
     bytes: body.length,
   });
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end--;
+  return value.slice(0, end);
+}
+
+function addCdnDigest(headers: Headers, method: string, payload: Uint8Array | string): void {
+  const hasBody = payload.length > 0 || method === "POST" || method === "PUT" || method === "PATCH";
+  if (hasBody && !headers.has("x-amz-content-sha256")) {
+    headers.set("x-amz-content-sha256", createHash("sha256").update(payload).digest("hex"));
+  }
 }
 
 function servedByCdn(api: Endpoints["api"]): boolean {

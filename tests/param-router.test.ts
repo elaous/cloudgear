@@ -74,7 +74,17 @@ describe("a ParamRouter in the analyzer", () => {
     expect(model.functions[1]!.include.map((f) => f.rel)).toEqual([expect.stringMatching(/api\/item\.ts$/)]);
   });
 
+  test("what a mounted script uses counts for the function, and the context is passed on", () => {
+    const model = analyzeApp(fixture("uses-store.ts"));
+    const fn = model.functions[0]!;
+    expect([...fn.uses.values()].map((use) => [use.resource, [...use.accesses]])).toEqual([["mounted-data", ["read"]]]);
+    expect(model.generated[0]!.text).toContain("default(req, ...rest)");
+  });
+
   test.each([
+    ["same-name.ts", /two ParamRouters are named "router"/],
+    ["entry-setting.ts", /"request" is not a ParamRouter route setting/],
+    ["mount-schedule.ts", /"schedule" cannot be set on a ParamRouter mount/],
     ["no-request.ts", /a ParamRouter needs request: true/],
     ["bad-key.ts", /Unsupported HTTP method "FETCH"/],
     ["missing-script.ts", /script "\.\/api\/nope\.ts" not found/],

@@ -193,6 +193,9 @@ export class FunctionRouter {
   url(method: Method | Lowercase<Method> | "*", path: string, handler: ((...args: any[]) => unknown) | string | ParamRouter, options: RouteOptions = {}): this {
     if (handler instanceof ParamRouter) {
       if (method !== "*") throw new Error('A ParamRouter is mounted with the method "*"');
+      for (const key of ["name", "schedule", "on"] as const) {
+        if (options[key] !== undefined) throw new Error(`"${key}" cannot be set on a ParamRouter mount`);
+      }
       const list = <T>(value: T | T[] | undefined): T[] => (value === undefined ? [] : Array.isArray(value) ? value : [value]);
       for (const [key, entry] of Object.entries(handler.routes)) {
         const route = parseRouteKey(key);

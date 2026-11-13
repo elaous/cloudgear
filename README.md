@@ -235,8 +235,12 @@ router.url("*", "/", new ParamRouter({
   declare with `.url(method, path, ...)` stay their own functions.
 - The environment scan follows each script's literal `import()`, so the function lists the variables every script
   reads, and `apply` checks them as for any function.
-- A request that matches no key is answered 404 by the router before it reaches a script, and a `HEAD` request goes
-  to the `GET` entry. In local mode `listen()` serves the same table.
+- A request that matches no key is answered 404 by the router before it reaches a script, and on AWS a `HEAD` request
+  goes to the `GET` entry. In local mode `listen()` serves the same keys as separate routes.
+- What the scripts use counts for the function: its variables, secrets, `BlobStore` access and published events are
+  traced through each script's default export, and a script receives the context as its last argument. An entry
+  takes only `script`, `env`, `include` and `policies`; the mount takes no `name`, `schedule` or `on`, and two
+  ParamRouters MUST have different `name`s.
 - The CDN still gets a cache behavior for each key until the CDN learns about mounts; a mount that should reach
   the function as the default behavior is not built yet.
 

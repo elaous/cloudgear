@@ -679,10 +679,11 @@ export function analyzeApp(entryPath: string): AppModel {
     scriptText?: string;
     // The mount's options first, then the entry's.
     options: (Node | undefined)[];
-    mount?: { name: string; include: { rel: string; abs: string }[] };
+    mount?: { name: string; include: { rel: string; abs: string }[]; roots: Node[] };
   }
 
   const registrations: Registration[] = [];
+  const dispatcherNames = new Map<string, string>();
   for (const call of addCalls) {
     const [methodArg, pathArg, fnArg] = call.getArguments();
     if (methodArg && Node.isStringLiteral(methodArg) && methodArg.getLiteralText() === "*") {
@@ -690,17 +691,29 @@ export function analyzeApp(entryPath: string): AppModel {
       if (!mounted) throw new Error(`${where(call)}: the method "*" is only for \`new ParamRouter({ ... })\``);
       const mountOptions = call.getArguments()[3];
       const callFile = call.getSourceFile().getFilePath();
+      const earlierMount = dispatcherNames.get(mounted.name);
+      if (earlierMount) throw new Error(`${where(call)}: two ParamRouters are named "${mounted.name}" (the other is at ${earlierMount}); pass { name } to tell them apart`);
+      dispatcherNames.set(mounted.name, where(call));
+      if (mountOptions && Node.isObjectLiteralExpression(mountOptions)) {
+        for (const prop of mountOptions.getProperties()) {
+          const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+          if (key === "name" || key === "schedule" || key === "on") throw new Error(`${where(prop)}: "${key}" cannot be set on a ParamRouter mount; ${key === "name" ? "name the ParamRouter with its { name } option" : "set it on the entry that needs it"}`);
+        }
+      }
       const settings = readRouteOptions(mountOptions, where(call), callFile, responseKindOf);
       if (!settings.request) throw new Error(`${where(call)}: a ParamRouter needs request: true, so its root script can read the method and path`);
       const include = new Map(settings.include.map((file) => [file.rel, file]));
       for (const entry of mounted.entries) {
         for (const file of readRouteOptions(entry.node, `${where(entry.node)}`, callFile, responseKindOf).include) include.set(file.rel, file);
       }
+      const roots: Node[] = [];
       for (const entry of mounted.entries) {
         const file = project.getSourceFile(entry.scriptFile);
         if (!file) throw new Error(`${where(entry.scriptNode)}: script "${entry.script}" not found; "./x" is relative to this file, any other path to the project root`);
         const exported = file.getExportedDeclarations().get("default")?.[0];
-        if (!exported || !functionNode(exported)) throw new Error(`${where(entry.scriptNode)}: script "${entry.script}" must export a function as its default export`);
+        const exportedNode = exported && functionNode(exported);
+        if (!exportedNode) throw new Error(`${where(entry.scriptNode)}: script "${entry.script}" must export a function as its default export`);
+        roots.push(exportedNode);
       }
       const dispatcherFile = path.join(projectRootOf(callFile), ".cloudgear", "dispatch", `${mounted.name}.ts`);
       const dispatcher = project.createSourceFile(
@@ -721,7 +734,7 @@ export function analyzeApp(entryPath: string): AppModel {
           scriptFile: dispatcherFile,
           scriptText: entry.script,
           options: [mountOptions, entry.node],
-          mount: { name: mounted.name, include: [...include.values()].sort((x, y) => (x.rel < y.rel ? -1 : 1)) },
+          mount: { name: mounted.name, include: [...include.values()].sort((x, y) => (x.rel < y.rel ? -1 : 1)), roots },
         });
       }
       continue;
@@ -753,7 +766,7 @@ export function analyzeApp(entryPath: string): AppModel {
     }
     const routeOptions = readRouteOptions(options[0], where(call), call.getSourceFile().getFilePath(), responseKindOf);
     if (mount) routeOptions.include = mount.include;
-    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, mount ? mount.name : scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request);
+    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, mount ? mount.name : scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request, mount?.roots);
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
@@ -1329,7 +1342,7 @@ export function analyzeApp(entryPath: string): AppModel {
     return `the receiver must be an exported instance variable itself (one of ${names.join(", ")}), not an alias or property`;
   }
 
-  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node, scriptName?: string, hasInput = true): AnalyzedFunction {
+  function functionFor(decl: Node, fnNode: NonNullable<ReturnType<typeof functionNode>>, label: string, receiver?: Node, scriptName?: string, hasInput = true, extraRoots: Node[] = []): AnalyzedFunction {
     const existing = functions.get(decl);
     if (existing) {
       const again = receiver ? exportTargetOf(decl, instanceExport, receiver) : undefined;
@@ -1371,7 +1384,10 @@ export function analyzeApp(entryPath: string): AppModel {
     const tallies = new Map<string, Tally>();
     secretUses = [];
     publishUses = new Set();
-    collectUsage(fnNode, tallies, new Set());
+    const visitedUsage = new Set<Node>();
+    collectUsage(fnNode, tallies, visitedUsage);
+    // The scripts a ParamRouter loads run inside this function.
+    for (const root of extraRoots) if (!visitedUsage.has(root)) collectUsage(root, tallies, visitedUsage);
     fn.secrets = uniqueSecrets(secretUses);
     fn.publishes = [...publishUses].sort();
     secretUses = undefined;
@@ -1826,6 +1842,8 @@ function scriptOf(call: CallExpression): string | undefined {
   return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
 }
 
+const PARAM_ROUTE_KEYS = new Set(["script", "env", "include", "policies"]);
+
 interface ParamRouterModel {
   mount: string;
   name: string;
@@ -1843,7 +1861,10 @@ function isParamRouterCall(call: CallExpression): boolean {
     method.getLiteralText() === "*" &&
     !!router &&
     Node.isNewExpression(router) &&
-    router.getExpression().getText() === "ParamRouter"
+    (() => {
+      const symbol = router.getExpression().getSymbol();
+      return (symbol?.isAlias() ? symbol.getAliasedSymbol() : symbol)?.getName() === "ParamRouter";
+    })()
   );
 }
 
@@ -1883,6 +1904,10 @@ function paramRouterOf(call: CallExpression, where: (node: Node) => string): Par
     } catch (err) {
       throw new Error(`${where(prop)}: ${(err as Error).message}`);
     }
+    for (const entryProp of value.getProperties()) {
+      const entryKey = Node.isSpreadAssignment(entryProp) ? undefined : propName(entryProp);
+      if (!entryKey || !PARAM_ROUTE_KEYS.has(entryKey)) throw new Error(`${where(entryProp)}: "${entryKey ?? "..."}" is not a ParamRouter route setting; use script, env, include or policies (request, response and public belong to the mount)`);
+    }
     const scriptProp = value.getProperty("script");
     const scriptNode = scriptProp && Node.isPropertyAssignment(scriptProp) ? scriptProp.getInitializer() : undefined;
     if (!scriptNode || !(Node.isStringLiteral(scriptNode) || Node.isNoSubstitutionTemplateLiteral(scriptNode))) throw new Error(`${where(prop)}: "${key}" needs script: "./path.ts" as a string literal`);
@@ -1895,7 +1920,7 @@ function paramRouterOf(call: CallExpression, where: (node: Node) => string): Par
 
 function importPathFrom(from: string, to: string): string {
   const rel = path.relative(path.dirname(from), to).split(path.sep).join("/");
-  return rel.startsWith(".") ? rel : `./${rel}`;
+  return rel.startsWith("./") || rel.startsWith("../") || path.isAbsolute(rel) ? rel : `./${rel}`;
 }
 
 // Root script of a ParamRouter: picks the script by method and path, and loads it on first use.
@@ -1907,17 +1932,21 @@ function dispatcherSource(routes: { method: string; pattern: string; rel: string
     ...routes.map((r) => `  { method: ${JSON.stringify(r.method)}, pattern: new RegExp(${JSON.stringify(r.pattern)}), load: () => import(${JSON.stringify(r.rel)}) },`),
     "];",
     "",
-    "export default async function handler(req: any, res: any) {",
+    "export default async function handler(req: any, ...rest: any[]) {",
     '  const path = new URL(req.url ?? "/", "http://localhost").pathname;',
     '  const method = String(req.method ?? "GET").toUpperCase();',
     "  const route =",
     "    ROUTES.find((r) => r.method === method && r.pattern.test(path)) ??",
     '    (method === "HEAD" ? ROUTES.find((r) => r.method === "GET" && r.pattern.test(path)) : undefined);',
     "  if (!route) {",
-    '    res.status(404).json({ error: "Not found" });',
-    "    return;",
+    "    const res = rest[0];",
+    '    if (res && typeof res.status === "function") {',
+    '      res.status(404).json({ error: "Not found" });',
+    "      return;",
+    "    }",
+    '    throw new Error("Not found");',
     "  }",
-    "  return (await route.load()).default(req, res);",
+    "  return (await route.load()).default(req, ...rest);",
     "}",
     "",
   ].join("\n");

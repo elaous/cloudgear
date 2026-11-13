@@ -18,7 +18,7 @@ import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
-import { behaviorsFor, conflictingGroups } from "../routes";
+import { behaviorsFor, conflictingGroups, FREE_PLAN_BEHAVIORS } from "../routes";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -1083,7 +1083,11 @@ export function analyzeApp(entryPath: string): AppModel {
 
       const routes = [...functions.values()].flatMap((fn) => fn.routes.map((r) => ({ method: r.method, path: r.path, function: fn.name })));
       const conflicts = conflictingGroups(routes);
-      if (conflicts.length && methodRouting !== "function") {
+      const cdnOptions = readCdnOptions(optionsArg, `${at}: CDN`);
+      // The Free plan allows 5 cache behaviors; a CloudFront Function can route instead of path behaviors.
+      const overFreePlan = cdnOptions?.free_plan === "true" && behaviorsFor(routes).length > FREE_PLAN_BEHAVIORS;
+      const functionRouting = methodRouting === "function" || overFreePlan;
+      if (conflicts.length && !functionRouting) {
         const lines = conflicts.map((group) => `  ${group.pattern} is served by ${group.functions.map((name) => `"${name}"`).join(" and ")} (${group.methods.join(", ")})`);
         throw new Error(
           [
@@ -1096,10 +1100,14 @@ export function analyzeApp(entryPath: string): AppModel {
           ].join("\n"),
         );
       }
-      if (methodRouting === "function" && !conflicts.length) {
+      if (methodRouting === "function" && !conflicts.length && !overFreePlan) {
         warnings.push(`${at}: methodRouting is set but no path reaches several functions; no CloudFront Function will be created`);
       }
-      const behaviors = methodRouting === "function" && conflicts.length ? 0 : behaviorsFor(routes).length;
+      if (overFreePlan) {
+        warnings.push(`${at}: freePlan allows ${FREE_PLAN_BEHAVIORS} cache behaviors and these routes need ${behaviorsFor(routes).length}, so one CloudFront Function routes them instead of path behaviors${conflicts.length ? `, which also tells apart the ${conflicts.length} path(s) several functions share by method` : ""}`);
+      }
+      const routedByFunction = functionRouting && (conflicts.length > 0 || overFreePlan);
+      const behaviors = routedByFunction ? 0 : behaviorsFor(routes).length;
       const origins = new Set(routes.map((r) => r.function)).size;
       if (behaviors > 25 || origins > 25) {
         warnings.push(`${at}: ${behaviors} behaviors and ${origins} origins; a CloudFront distribution allows 25 of each by default, so request a quota increase`);
@@ -1114,8 +1122,8 @@ export function analyzeApp(entryPath: string): AppModel {
         domain: routerHost,
         ...(routerHost !== cert.domain ? { certificate: cert.domain } : {}),
         via: "cloudfront",
-        ...(methodRouting === "function" && conflicts.length ? { method_routing: true } : {}),
-        options: readCdnOptions(optionsArg, `${at}: CDN`),
+        ...(routedByFunction ? { method_routing: true } : {}),
+        options: cdnOptions,
       };
     }
     return { certificates: [...certificates.values()], cdns, api };
@@ -1444,11 +1452,11 @@ function sameOptions(a: Record<string, string> | undefined, b: Record<string, st
   return JSON.stringify(Object.entries(a ?? {}).sort()) === JSON.stringify(Object.entries(b ?? {}).sort());
 }
 
-// `webAcl` and `priceClass` are the typed forms of options.web_acl and options.price_class.
+// `webAcl`, `priceClass` and `freePlan` are the typed forms of options.web_acl, options.price_class and options.free_plan.
 function readCdnOptions(optionsArg: Node | undefined, at: string): Record<string, string> | undefined {
   let options = readOptionsMap(optionsArg, "options", at);
   if (!optionsArg || !Node.isObjectLiteralExpression(optionsArg)) return options;
-  const typed: [field: string, option: string, allowTrue: boolean][] = [["webAcl", "web_acl", true], ["priceClass", "price_class", false]];
+  const typed: [field: string, option: string, allowTrue: boolean][] = [["webAcl", "web_acl", true], ["priceClass", "price_class", false], ["freePlan", "free_plan", true]];
   for (const [field, option, allowTrue] of typed) {
     const prop = optionsArg.getProperties().find((p) => propName(p) === field);
     if (!prop) continue;

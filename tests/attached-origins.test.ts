@@ -125,6 +125,34 @@ describe("attached origins", () => {
     expect(() => decodeConfig(encodeConfig(withCdn([{ ...attached[0]!, origin: "not json" }])))).toThrow(/not a JSON object/);
   });
 
+  test("on the Free plan, own and attached behaviors together are limited to 5", () => {
+    const many = (count: number) => [{ id: "legacy-api", origin: JSON.stringify(origin), behavior: Array.from({ length: count }, (_, i) => ({ path_pattern: `/p${i}/*`, behavior: JSON.stringify({ ...behavior, PathPattern: `/p${i}/*` }) })) }];
+    const free = (count: number) => {
+      const config = withCdn(many(count));
+      config.cdn[0]!.options = { free_plan: "true" };
+      return config;
+    };
+    expect(() => plan(free(5), emptyState())).not.toThrow();
+    expect(() => plan(free(6), emptyState())).toThrow(/the Free plan allows 5 cache behaviors, but this distribution has 6 \(0 from the config, 6 attached\)/);
+    expect(() => plan(withCdn(many(6)), emptyState())).not.toThrow();
+  });
+
+  test("a router CDN on the Free plan is refused over 5 behaviors unless function routing is on, and the error says how", () => {
+    const routed = (method_routing: boolean) =>
+      baseConfig({
+        resource: [],
+        function: [
+          fn({ name: "a", physical_name: "app-a", permission: [], env: [], route: [{ name: "a", method: "GET", path: "/a" }] }),
+          fn({ name: "b", physical_name: "app-b", permission: [], env: [], route: [{ name: "b", method: "GET", path: "/b" }] }),
+          fn({ name: "c", physical_name: "app-c", permission: [], env: [], route: [{ name: "c", method: "GET", path: "/c" }] }),
+        ],
+        certificate: [{ provider: "aws", domain: "api.example.com", dns: { ...dnsSpec, domain: "api.example.com" }, usage: "cdn" }],
+        api: { provider: "aws", domain: "api.example.com", via: "cloudfront", options: { free_plan: "true" }, ...(method_routing ? { method_routing: true } : {}) },
+      });
+    expect(() => plan(routed(false), emptyState())).toThrow(/has 6 \(6 from the config, 0 attached\); set methodRouting: "function" on the CDN/);
+    expect(() => plan(routed(true), emptyState())).not.toThrow();
+  });
+
   test("the plan carries them, and refuses ids and patterns that clash", () => {
     const attached = [{ id: "legacy-api", origin: JSON.stringify(origin), behavior: [{ path_pattern: "/legacy/*", behavior: JSON.stringify(behavior) }] }];
     const cdn = plan(withCdn(attached), emptyState()).find((a) => a.type === "@aws.CloudFront")!;

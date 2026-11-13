@@ -109,8 +109,6 @@ describe("option validation", () => {
     const acl = "arn:aws:wafv2:us-east-1:920042984913:global/webacl/CreatedByCloudFront-eab45982/b576f740-7bb3-4e5f-849b-af9d3c2b0c27";
     expect(check("@aws.CloudFront", { web_acl: acl })).not.toThrow();
     expect(check("@aws.CloudFront", { web_acl: "true" })).not.toThrow();
-    expect(check("@aws.CloudFront", { free_plan: "true" })).not.toThrow();
-    expect(check("@aws.CloudFront", { free_plan: "yes" })).toThrow(/must be one of true, false/);
     for (const value of ["", "arn:aws:wafv2:eu-west-1:920042984913:regional/webacl/x/b576f740-7bb3-4e5f-849b-af9d3c2b0c27", "arn:aws:s3:::bucket", "web-acl", "arn:aws-cn:wafv2:us-east-1:920042984913:global/webacl/x/b576f740-7bb3-4e5f-849b-af9d3c2b0c27", "arn:aws:wafv2:us-east-1:920042984913:global/webacl/x/------------------------------------", " arn:aws:wafv2:us-east-1:920042984913:global/webacl/x/b576f740-7bb3-4e5f-849b-af9d3c2b0c27", "b576f740-7bb3-4e5f-849b-af9d3c2b0c27"]) {
       expect(check("@aws.CloudFront", { web_acl: value })).toThrow(/WAFv2 web ACL ARN in us-east-1/);
     }

@@ -771,7 +771,7 @@ new CDN("aws", cert, { bucket, options: { price_class: "PriceClass_100" } });
 | --- | --- |
 | `@aws.S3` | `versioning` (`true`, `false`) |
 | `@aws.Lambda` | `tracing` (`Active`, `PassThrough`), `ephemeral_storage_mb` (512 to 10240), `env.<NAME>` |
-| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`; also the typed `priceClass: "PriceClass_100"` on the `CDN`), `free_plan` (`true`, the typed `freePlan: true` on the `CDN`: the distribution is on CloudFront's Free plan), `default_root_object`, `web_acl` (`true` to keep the distribution's own, or a WAFv2 web ACL ARN in `us-east-1`) |
+| `@aws.CloudFront` | `price_class` (`PriceClass_100`, `PriceClass_200`, `PriceClass_All`; also the typed `priceClass: "PriceClass_100"` on the `CDN`), `default_root_object`, `web_acl` (`true` to keep the distribution's own, or a WAFv2 web ACL ARN in `us-east-1`) |
 | `@aws.Certificate` | `key_algorithm` (`RSA_2048`, `EC_prime256v1`, `EC_secp384r1`) |
 
 A function's options are the router's `functionOptions` overridden by its
@@ -1353,15 +1353,6 @@ cloudgear import --all                             # everything planned that alr
   (import `--all`, or the certificate first), the bucket origin uses an access control,
   and it has no other origins; the router's distribution is always an update. A match
   does not check the DNS record or the bucket policy; the next change does.
-- **Free plan.** A distribution on CloudFront's Free plan is limited to 5 cache behaviors; AWS refuses
-  an update with more (`Distributions with the Free pricing plan can't have the following features:
-  More than 5 cache behaviors`). The plan itself is chosen in the CloudFront console; cloudgear cannot
-  set it. `freePlan: true` on the `CDN` tells cloudgear the distribution is on it. A router CDN whose
-  routes would need more than 5 behaviors is then routed by one CloudFront Function, as with
-  `methodRouting: "function"` (with a warning saying so), and any config whose behaviors, own and attached,
-  are still over 5 is refused when planned. The default behavior is not counted, as in CloudFront's own quota
-  for additional behaviors; this is not confirmed for the Free plan. Other Free-plan limits are not checked;
-  AWS reports them.
 - Every other origin of an imported distribution (all but the bucket's own and
   cloudgear's, with the path behaviors that reach them, if any) is kept without anything in the TypeScript setup.
   `import` writes them into `cloudgear.prototxt` as `attached` blocks of that

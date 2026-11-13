@@ -67,9 +67,6 @@ export interface CdnOptions {
   webAcl?: true | string;
   // Literal only; the same as options.price_class.
   priceClass?: PriceClass;
-  // The distribution is on CloudFront's Free plan, which allows 5 cache behaviors: a router CDN then routes with one
-  // CloudFront Function, and a config over the limit is refused when planned. Literal only.
-  freePlan?: true;
   options?: ProviderOptions;
   driver?: CdnDriver;
 }

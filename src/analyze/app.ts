@@ -17,7 +17,7 @@ import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/ev
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
-import { METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
+import { METHODS, compilePath, mountedPath, normalizeCron, parseRouteKey, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
 
 export interface AnalyzedResource {
@@ -158,6 +158,8 @@ export interface AppModel extends EdgeModel {
   optionalEnv: string[];
   buses: AnalyzedBus[];
   functions: AnalyzedFunction[];
+  // Root scripts cloudgear wrote for ParamRouters; generate puts them on disk before bundling.
+  generated: { file: string; text: string }[];
   warnings: string[];
 }
 
@@ -186,11 +188,12 @@ export function analyzeApp(entryPath: string): AppModel {
     for (const file of project.getSourceFiles().filter((f) => isAppFile(f) && !scanned.has(f))) {
       scanned.add(file);
       for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
-        const script = scriptOf(call);
-        if (script && !project.getSourceFile(script) && fs.existsSync(script)) {
-          project.addSourceFileAtPath(script);
-          project.resolveSourceFileDependencies();
-          added = true;
+        for (const script of [scriptOf(call), ...paramRouterScripts(call)]) {
+          if (script && !project.getSourceFile(script) && fs.existsSync(script)) {
+            project.addSourceFileAtPath(script);
+            project.resolveSourceFileDependencies();
+            added = true;
+          }
         }
       }
     }
@@ -199,6 +202,7 @@ export function analyzeApp(entryPath: string): AppModel {
   const isLocal = (node: Node) => localFiles.includes(node.getSourceFile());
 
   const warnings: string[] = [];
+  const generated: { file: string; text: string }[] = [];
   const where = (node: Node) => `${relative(node.getSourceFile().getFilePath())}:${node.getStartLineNumber()}`;
   const isClass = (expr: NewExpression, pkg: string, name: string) => {
     const decl = resolveSymbol(expr.getExpression().getSymbol())?.getDeclarations()[0];
@@ -666,15 +670,71 @@ export function analyzeApp(entryPath: string): AppModel {
   if (addCalls.length === 0 && scheduledMethods.length === 0 && eventMethods.length === 0) {
     throw new Error(`${where(router)}: FunctionRouter has no .url(...) routes`);
   }
+  interface Registration {
+    call: CallExpression;
+    method: string;
+    routePath: string;
+    fnArg: Node;
+    scriptFile?: string;
+    scriptText?: string;
+    // The mount's options first, then the entry's.
+    options: (Node | undefined)[];
+    mount?: { name: string; include: { rel: string; abs: string }[] };
+  }
+
+  const registrations: Registration[] = [];
   for (const call of addCalls) {
     const [methodArg, pathArg, fnArg] = call.getArguments();
+    if (methodArg && Node.isStringLiteral(methodArg) && methodArg.getLiteralText() === "*") {
+      const mounted = paramRouterOf(call, where);
+      if (!mounted) throw new Error(`${where(call)}: the method "*" is only for \`new ParamRouter({ ... })\``);
+      const mountOptions = call.getArguments()[3];
+      const callFile = call.getSourceFile().getFilePath();
+      const settings = readRouteOptions(mountOptions, where(call), callFile, responseKindOf);
+      if (!settings.request) throw new Error(`${where(call)}: a ParamRouter needs request: true, so its root script can read the method and path`);
+      const include = new Map(settings.include.map((file) => [file.rel, file]));
+      for (const entry of mounted.entries) {
+        for (const file of readRouteOptions(entry.node, `${where(entry.node)}`, callFile, responseKindOf).include) include.set(file.rel, file);
+      }
+      for (const entry of mounted.entries) {
+        const file = project.getSourceFile(entry.scriptFile);
+        if (!file) throw new Error(`${where(entry.scriptNode)}: script "${entry.script}" not found; "./x" is relative to this file, any other path to the project root`);
+        const exported = file.getExportedDeclarations().get("default")?.[0];
+        if (!exported || !functionNode(exported)) throw new Error(`${where(entry.scriptNode)}: script "${entry.script}" must export a function as its default export`);
+      }
+      const dispatcherFile = path.join(projectRootOf(callFile), ".cloudgear", "dispatch", `${mounted.name}.ts`);
+      const dispatcher = project.createSourceFile(
+        dispatcherFile,
+        dispatcherSource(
+          mounted.entries.map((entry) => ({ method: entry.method, pattern: compilePath(mountedPath(mounted.mount, entry.path)).regex.source, rel: importPathFrom(dispatcherFile, entry.scriptFile) })),
+        ),
+        { overwrite: true },
+      );
+      localFiles.push(dispatcher);
+      generated.push({ file: dispatcherFile, text: dispatcher.getFullText() });
+      for (const entry of mounted.entries) {
+        registrations.push({
+          call,
+          method: entry.method,
+          routePath: mountedPath(mounted.mount, entry.path),
+          fnArg: entry.scriptNode,
+          scriptFile: dispatcherFile,
+          scriptText: entry.script,
+          options: [mountOptions, entry.node],
+          mount: { name: mounted.name, include: [...include.values()].sort((x, y) => (x.rel < y.rel ? -1 : 1)) },
+        });
+      }
+      continue;
+    }
     const method = stringLiteral(methodArg, `${where(call)}: route method`).toUpperCase();
     if (!(METHODS as readonly string[]).includes(method)) throw new Error(`${where(call)}: unsupported HTTP method "${method}"`);
     const routePath = stringLiteral(pathArg, `${where(call)}: route path`);
     if (!fnArg) throw new Error(`${where(call)}: missing function argument`);
-
-    const scriptFile = scriptOf(call);
     const scriptText = Node.isStringLiteral(fnArg) || Node.isNoSubstitutionTemplateLiteral(fnArg) ? fnArg.getLiteralText() : undefined;
+    registrations.push({ call, method, routePath, fnArg, scriptFile: scriptOf(call), scriptText, options: [call.getArguments()[3]] });
+  }
+
+  for (const { call, method, routePath, fnArg, scriptFile, scriptText, options, mount } of registrations) {
     let decl: Node | undefined;
     if (scriptText !== undefined) {
       const file = scriptFile && project.getSourceFile(scriptFile);
@@ -691,8 +751,9 @@ export function analyzeApp(entryPath: string): AppModel {
           : `${where(call)}: "${fnArg.getText()}" must reference a named function declared in your project`,
       );
     }
-    const routeOptions = readRouteOptions(call.getArguments()[3], where(call), call.getSourceFile().getFilePath(), responseKindOf);
-    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request);
+    const routeOptions = readRouteOptions(options[0], where(call), call.getSourceFile().getFilePath(), responseKindOf);
+    if (mount) routeOptions.include = mount.include;
+    const fn = functionFor(decl, fnNode, fnArg.getText(), Node.isPropertyAccessExpression(fnArg) ? fnArg.getExpression() : undefined, mount ? mount.name : scriptFile && scriptNameOf(scriptFile, call.getSourceFile().getFilePath()), !routeOptions.request);
     if (fn.routes.some((r) => r.method === method && r.path === routePath)) {
       throw new Error(`${where(call)}: route "${method} ${routePath}" is registered twice`);
     }
@@ -712,11 +773,13 @@ export function analyzeApp(entryPath: string): AppModel {
     if (clashing) throw new Error(`${where(call)}: route name "${routeName}" is already used by ${clashing}; pass { name } to tell them apart`);
     routeNames.set(routeName, `${method} ${routePath}`);
     fn.routes.push({ method, path: routePath, name: routeName });
-    addSchedules(fn, readScheduleOption(call.getArguments()[3], `${where(call)}: route`));
-    addEvents(fn, readEventOption(call.getArguments()[3], `${where(call)}: route`));
-    fn.secrets = uniqueSecrets([...fn.secrets, ...readEnvOption(call.getArguments()[3], `${where(call)}: route`)]);
-    fn.policies = uniquePolicies([...fn.policies, ...readPolicyOption(call.getArguments()[3], `${where(call)}: route`)]);
-    const routeFunctionOptions = readOptionsMap(call.getArguments()[3], "options", `${where(call)}: route`);
+    for (const node of options) {
+      addSchedules(fn, readScheduleOption(node, `${where(call)}: route`));
+      addEvents(fn, readEventOption(node, `${where(call)}: route`));
+      fn.secrets = uniqueSecrets([...fn.secrets, ...readEnvOption(node, `${where(call)}: route`)]);
+      fn.policies = uniquePolicies([...fn.policies, ...readPolicyOption(node, `${where(call)}: route`)]);
+    }
+    const routeFunctionOptions = readOptionsMap(options[0], "options", `${where(call)}: route`);
     const earlier = routeOptionsOf.get(fn);
     if (earlier && !sameOptions(earlier.options, routeFunctionOptions)) {
       throw new Error(`${where(call)}: the routes of "${fn.name}" give it different options (${earlier.at}); set them identically or use functionOptions`);
@@ -777,6 +840,7 @@ export function analyzeApp(entryPath: string): AppModel {
     optionalEnv: readOptionalEnv(router.getArguments()[1], `${where(router)}: FunctionRouter`),
     buses: [...usedBuses.values()],
     functions: [...functions.values()],
+    generated,
     warnings: [...new Set(warnings)],
   };
 
@@ -1760,6 +1824,103 @@ function scriptOf(call: CallExpression): string | undefined {
   if (!(method && Node.isStringLiteral(method) && (METHODS as readonly string[]).includes(method.getLiteralText().toUpperCase()))) return undefined;
   if (!script || !(Node.isStringLiteral(script) || Node.isNoSubstitutionTemplateLiteral(script))) return undefined;
   return resolveRoutePath(script.getLiteralText(), call.getSourceFile().getFilePath());
+}
+
+interface ParamRouterModel {
+  mount: string;
+  name: string;
+  entries: { method: string; path: string; script: string; scriptFile: string; node: Node; scriptNode: Node }[];
+}
+
+function isParamRouterCall(call: CallExpression): boolean {
+  const callee = call.getExpression();
+  const [method, , router] = call.getArguments();
+  return (
+    Node.isPropertyAccessExpression(callee) &&
+    callee.getName() === "url" &&
+    !!method &&
+    Node.isStringLiteral(method) &&
+    method.getLiteralText() === "*" &&
+    !!router &&
+    Node.isNewExpression(router) &&
+    router.getExpression().getText() === "ParamRouter"
+  );
+}
+
+// The script files a ParamRouter names; errors are reported later, when it is read in full.
+function paramRouterScripts(call: CallExpression): string[] {
+  if (!isParamRouterCall(call)) return [];
+  const router = call.getArguments()[2] as NewExpression;
+  const table = router.getArguments()[0];
+  if (!table || !Node.isObjectLiteralExpression(table)) return [];
+  return table.getProperties().flatMap((prop) => {
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    const script = value && Node.isObjectLiteralExpression(value) ? value.getProperty("script") : undefined;
+    const literal = script && Node.isPropertyAssignment(script) ? script.getInitializer() : undefined;
+    return literal && (Node.isStringLiteral(literal) || Node.isNoSubstitutionTemplateLiteral(literal)) ? [resolveRoutePath(literal.getLiteralText(), call.getSourceFile().getFilePath())] : [];
+  });
+}
+
+function paramRouterOf(call: CallExpression, where: (node: Node) => string): ParamRouterModel | undefined {
+  if (!isParamRouterCall(call)) return undefined;
+  const [, mountArg, routerArg] = call.getArguments();
+  const router = routerArg as NewExpression;
+  const mount = stringLiteral(mountArg, `${where(call)}: ParamRouter mount path`);
+  if (!mount.startsWith("/")) throw new Error(`${where(call)}: the mount path "${mount}" must start with "/"`);
+  const [table, config] = router.getArguments();
+  if (!table || !Node.isObjectLiteralExpression(table)) throw new Error(`${where(router)}: ParamRouter needs an object literal of routes`);
+  const name = config ? readStringOption(config, "name", `${where(router)}: ParamRouter options`) ?? "router" : "router";
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) throw new Error(`${where(router)}: the ParamRouter name "${name}" must use letters, digits, "_" and "-"`);
+  const entries: ParamRouterModel["entries"] = [];
+  for (const prop of table.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${where(prop)}: spread in a ParamRouter cannot be analyzed`);
+    const key = propName(prop);
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    if (!key || !value || !Node.isObjectLiteralExpression(value)) throw new Error(`${where(prop)}: a ParamRouter route is "METHOD /path": { script: "./x.ts", ... }`);
+    let route: { method: string; path: string };
+    try {
+      route = parseRouteKey(key);
+    } catch (err) {
+      throw new Error(`${where(prop)}: ${(err as Error).message}`);
+    }
+    const scriptProp = value.getProperty("script");
+    const scriptNode = scriptProp && Node.isPropertyAssignment(scriptProp) ? scriptProp.getInitializer() : undefined;
+    if (!scriptNode || !(Node.isStringLiteral(scriptNode) || Node.isNoSubstitutionTemplateLiteral(scriptNode))) throw new Error(`${where(prop)}: "${key}" needs script: "./path.ts" as a string literal`);
+    const script = scriptNode.getLiteralText();
+    entries.push({ ...route, script, scriptFile: resolveRoutePath(script, call.getSourceFile().getFilePath()), node: value, scriptNode });
+  }
+  if (!entries.length) throw new Error(`${where(router)}: ParamRouter has no routes`);
+  return { mount, name, entries };
+}
+
+function importPathFrom(from: string, to: string): string {
+  const rel = path.relative(path.dirname(from), to).split(path.sep).join("/");
+  return rel.startsWith(".") ? rel : `./${rel}`;
+}
+
+// Root script of a ParamRouter: picks the script by method and path, and loads it on first use.
+function dispatcherSource(routes: { method: string; pattern: string; rel: string }[]): string {
+  return [
+    "// Generated by cloudgear from a ParamRouter; rewritten by every generate.",
+    "type Script = { default: (...args: any[]) => unknown };",
+    "const ROUTES: { method: string; pattern: RegExp; load: () => Promise<Script> }[] = [",
+    ...routes.map((r) => `  { method: ${JSON.stringify(r.method)}, pattern: new RegExp(${JSON.stringify(r.pattern)}), load: () => import(${JSON.stringify(r.rel)}) },`),
+    "];",
+    "",
+    "export default async function handler(req: any, res: any) {",
+    '  const path = new URL(req.url ?? "/", "http://localhost").pathname;',
+    '  const method = String(req.method ?? "GET").toUpperCase();',
+    "  const route =",
+    "    ROUTES.find((r) => r.method === method && r.pattern.test(path)) ??",
+    '    (method === "HEAD" ? ROUTES.find((r) => r.method === "GET" && r.pattern.test(path)) : undefined);',
+    "  if (!route) {",
+    '    res.status(404).json({ error: "Not found" });',
+    "    return;",
+    "  }",
+    "  return (await route.load()).default(req, res);",
+    "}",
+    "",
+  ].join("\n");
 }
 
 // Named after its root path: "api/v/[slug].ts" is "api-v-slug".

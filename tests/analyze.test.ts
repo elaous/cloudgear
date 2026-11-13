@@ -218,10 +218,10 @@ describe("analyzeApp", () => {
         expect(analyzeApp(fixture("edge/cdn-router-method-routing.ts")).api).toMatchObject({ via: "cloudfront", method_routing: true });
       });
 
-      test("methodRouting without a conflict is ignored with a warning", () => {
+      test("methodRouting routes by function even when no path is shared, so there are no path behaviors", () => {
         const model = analyzeApp(fixture("edge/cdn-router-unneeded-method-routing.ts"));
-        expect(model.api!.method_routing).toBeUndefined();
-        expect(model.warnings).toEqual([expect.stringMatching(/no path reaches several functions; no CloudFront Function will be created/)]);
+        expect(model.api).toMatchObject({ via: "cloudfront", method_routing: true });
+        expect(model.warnings.join("\n")).not.toMatch(/no CloudFront Function will be created/);
       });
 
       test("warns that POST needs the payload hash header", () => {

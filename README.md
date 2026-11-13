@@ -460,6 +460,11 @@ router through API Gateway, or set `methodRouting: "function"` on the CDN:
 new CDN("aws", apiCert, { router, methodRouting: "function" });
 ```
 
+`methodRouting: "function"` routes every path with that one CloudFront Function, whether or not
+paths are shared, so the distribution has no path behaviors besides the default one. That is also how
+to keep a distribution to the 5 cache behaviors CloudFront's Free plan allows: without it each route
+path is a behavior (one or two per route). The plan itself is chosen in the CloudFront console.
+
 `apply` then publishes a CloudFront Function that picks the function by method
 and path on every request (a `HEAD` request goes to the `GET` route unless the
 path has a `HEAD` route) and answers 404 for anything else. CloudFront charges

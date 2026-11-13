@@ -184,7 +184,7 @@ export function endpointsFrom(config: CloudgearConfig, state: State): EndpointsF
   const gateway = config.api && state.entries[stateKey({ type: viaCloudFront ? "@aws.CloudFront" : "@aws.ApiGateway", name: config.api.domain })];
   const api = viaCloudFront
     ? gateway?.outputs.domain_name
-      ? { domain: config.api!.domain, url: gateway.outputs.url ?? `https://${gateway.outputs.domain_name}`, id: gateway.outputs.id }
+      ? { domain: config.api!.domain, url: gateway.outputs.url ?? `https://${gateway.outputs.domain_name}`, id: gateway.outputs.id, via: "cloudfront" as const }
       : undefined
     : gateway?.outputs.url
       ? { domain: config.api!.domain, url: gateway.outputs.url, id: gateway.outputs.api_id }

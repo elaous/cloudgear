@@ -74,7 +74,9 @@ export interface FetchOpts {
 }
 
 export interface RouterFetch {
-  (req: Request): Promise<Response>;
+  // Second argument ignored; Bun.serve passes its server.
+  (req: Request, server?: unknown): Promise<Response>;
+  (input: string | URL, init?: RequestInit): Promise<Response>;
   (name: string, opts?: FetchOpts): Promise<Response>;
 }
 
@@ -101,7 +103,7 @@ export interface EndpointsFile {
   auth?: EndpointAuth;
   cdn?: { domain: string; url: string; id?: string };
   cdns?: Record<string, { domain: string; url: string; id?: string }>;
-  api?: { domain: string; url: string; id?: string };
+  api?: { domain: string; url: string; id?: string; via?: "cloudfront" };
 }
 
 export interface RateLimit {
@@ -153,8 +155,15 @@ interface CompiledRoute {
 interface Endpoints {
   routes: Record<string, string>;
   auth?: EndpointAuth;
-  api?: { domain: string };
+  api?: { domain: string; url?: string; via?: "cloudfront" };
 }
+
+type Target = { kind: "local" | "api" | "cdn" | "function"; base: string };
+
+const SCHEME_URL = /^[a-z][a-z\d+.-]*:\/\//i;
+const ABSOLUTE_INPUT = /^(?:[a-z][a-z\d+.-]*:\/\/|\/\/|\\\\)/i;
+const CLOUDFRONT_HOST = /\.cloudfront\.net$/i;
+const PLACEHOLDER_ORIGIN = "http://router.invalid";
 
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
 // Oldest counters dropped past this to bound memory.
@@ -219,6 +228,9 @@ export class FunctionRouter {
     const fn = typeof handler === "string" ? undefined : handler;
     const name = options.name ?? (fn?.name || key);
     if (!name) throw new Error(`Route "${key}": name must not be empty`);
+    if (name.startsWith("/") || name.startsWith("\\") || SCHEME_URL.test(name)) {
+      throw new Error(`Route "${key}": name "${name}" must not start with "/" or "\\" or look like a URL; fetch would read it as a path`);
+    }
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
@@ -231,7 +243,14 @@ export class FunctionRouter {
     return this.loadEndpoints() ? "remote" : "local";
   }
 
-  fetch: RouterFetch = ((target: Request | string, opts?: FetchOpts) => (typeof target === "string" ? this.fetchRoute(target, opts) : this.handle(target))) as RouterFetch;
+  fetch: RouterFetch = ((target: Request | string | URL, second?: FetchOpts | RequestInit) => {
+    if (target instanceof Request) return this.handle(target);
+    if (target instanceof URL || (typeof target === "string" && (target.startsWith("/") || target.startsWith("\\") || SCHEME_URL.test(target)))) {
+      return this.fetchPath(target, second as RequestInit | undefined);
+    }
+    if (typeof target === "string") return this.fetchRoute(target, second as FetchOpts | undefined);
+    throw new TypeError("fetch takes a Request, a path or a route name");
+  }) as RouterFetch;
 
   urlFrom(name: string, params: Record<string, string | number> = {}): URL {
     const route = this.routes.find((r) => r.name === name);
@@ -281,6 +300,73 @@ export class FunctionRouter {
     }
     debug("router", `fetch ${method} ${name}`);
     return fetch(url, { method, headers, body, redirect: "manual" });
+  }
+
+  private async fetchPath(input: string | URL, init: RequestInit = {}): Promise<Response> {
+    const parsed = this.parseClientPath(input);
+    const { route, method } = this.pickRoute(parsed.pathname, init.method);
+    const target = this.resolver()(route);
+    if (!target) throw new Error(`Route "${route.name}" has no URL yet; deploy it or call listen() first`);
+    if ((method === "GET" || method === "HEAD") && init.body !== undefined && init.body !== null) throw new Error(`A ${method} request cannot have a body`);
+    const original = new Request(`${PLACEHOLDER_ORIGIN}${parsed.pathname}${parsed.search}`, { ...init, method });
+    debug("router", `fetch ${method} ${route.key} via ${target.kind}`);
+    if (target.kind === "function") return this.fetchFunctionUrl(route, this.loadEndpoints()!.routes[route.key]!, parsed, original, init);
+    const headers = new Headers(original.headers);
+    const bytes = new Uint8Array(await original.arrayBuffer());
+    const hasBody = bytes.length > 0 || method === "POST" || method === "PUT" || method === "PATCH";
+    if (target.kind === "cdn" && hasBody && !headers.has("x-amz-content-sha256")) {
+      headers.set("x-amz-content-sha256", createHash("sha256").update(bytes).digest("hex"));
+    }
+    return fetch(`${target.base}${parsed.pathname}${parsed.search}`, { redirect: "manual", ...init, method, headers, body: hasBody ? bytes : undefined });
+  }
+
+  private parseClientPath(input: string | URL): URL {
+    if (input instanceof URL) {
+      if (input.protocol !== "http:" && input.protocol !== "https:") throw new Error(`fetch takes a path, got a ${input.protocol} URL "${input.href}"`);
+      if (input.host) throw new Error(`fetch takes a path and query without a host, got "${input.href}"; the router owns the host`);
+      return new URL(`${input.pathname}${input.search}`, PLACEHOLDER_ORIGIN);
+    }
+    if (ABSOLUTE_INPUT.test(input)) throw new Error(`fetch takes a path and query without a host, got "${input}"; the router owns the host`);
+    const parsed = new URL(input, PLACEHOLDER_ORIGIN);
+    if (parsed.origin !== PLACEHOLDER_ORIGIN) throw new Error(`fetch takes a path and query without a host, got "${input}"; the router owns the host`);
+    return parsed;
+  }
+
+  private pickRoute(pathname: string, requested: string | undefined): { route: CompiledRoute; method: Method } {
+    const matches: CompiledRoute[] = [];
+    for (const route of this.routes) {
+      let params: Record<string, string> | null;
+      try {
+        params = matchPath(route.matcher, pathname);
+      } catch {
+        throw new Error(`Malformed path "${pathname}"`);
+      }
+      if (params) matches.push(route);
+    }
+    if (!matches.length) throw new Error(`No route matches "${pathname}"`);
+    const methods = [...new Set(matches.map((r) => r.method))];
+    if (requested === undefined) {
+      if (methods.length > 1) throw new Error(`"${pathname}" matches routes for ${methods.join(", ")}; pass init.method`);
+      return { route: matches[0]!, method: matches[0]!.method };
+    }
+    const method = assertMethod(requested.toUpperCase());
+    const route = matches.find((r) => r.method === method);
+    if (!route) throw new Error(`Method ${method} is not allowed for "${pathname}"; allowed: ${methods.join(", ")}`);
+    return { route, method };
+  }
+
+  private async fetchFunctionUrl(route: CompiledRoute, url: string, parsed: URL, original: Request, init: RequestInit): Promise<Response> {
+    const unsupported = Object.keys(init).filter((key) => !["method", "headers", "body"].includes(key) && (init as Record<string, unknown>)[key] !== undefined);
+    if (unsupported.length) throw new Error(`fetch to a function URL does not support init.${unsupported.join(", init.")}`);
+    const forwarded = original.clone() as Request;
+    let input: Record<string, unknown>;
+    try {
+      const params = matchPath(route.matcher, parsed.pathname)!;
+      input = buildInput(parseBody(await original.text(), original.headers.get("content-type")), parsed.searchParams, params);
+    } catch {
+      throw new Error("Malformed request body");
+    }
+    return this.callFunction(route, url, input, {}, forwarded.headers, route.request ? forwarded : undefined);
   }
 
   private handle = async (req: Request): Promise<Response> => {
@@ -352,20 +438,31 @@ export class FunctionRouter {
 
   // Path params stay as {placeholders}; remote mode uses deployed URL.
   urls(): Record<string, string> {
+    const resolve = this.resolver();
+    const urls: Record<string, string> = {};
+    for (const route of this.routes) {
+      const target = resolve(route);
+      if (target) urls[route.name] = `${target.base}${route.path}`;
+    }
+    return urls;
+  }
+
+  private resolver(): (route: CompiledRoute) => Target | undefined {
     const remote = this.mode === "remote";
     const endpoints = remote ? this.loadEndpoints() : null;
     if (remote && !endpoints) throw new Error("Remote mode needs deployed endpoints; run cloudgear apply or pass endpoints");
     const local = this.server?.url.origin;
     const apiDomain = remote ? (this.options.cert?.domain ?? endpoints?.api?.domain) : undefined;
-    const api = apiDomain ? `https://${apiDomain}` : undefined;
-    if (api) return Object.fromEntries(this.routes.map((route) => [route.name, `${api}${route.path}`]));
-    if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
-    const urls: Record<string, string> = {};
-    for (const route of this.routes) {
-      const base = endpoints ? endpoints.routes[route.key] : local;
-      if (base) urls[route.name] = `${base.replace(/\/$/, "")}${route.path}`;
+    if (apiDomain) {
+      const kind = !this.options.cert && servedByCdn(endpoints?.api) ? "cdn" : "api";
+      return () => ({ kind, base: `https://${apiDomain}` });
     }
-    return urls;
+    if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
+    return (route) => {
+      const base = endpoints ? endpoints.routes[route.key] : local;
+      if (!base) return undefined;
+      return { kind: endpoints ? "function" : "local", base: base.replace(/\/$/, "") };
+    };
   }
 
   private checkRateLimit(req: Request): Response | null {
@@ -413,23 +510,26 @@ export class FunctionRouter {
       for (const cookie of result.cookies ?? []) headers.append("set-cookie", cookie);
       return new Response((result.base64 ? Buffer.from(result.body, "base64") : result.body) || null, { status: result.status, headers });
     }
-    const endpoints = this.loadEndpoints();
-    const url = endpoints?.routes[route.key];
+    const url = this.loadEndpoints()?.routes[route.key];
     if (!url) {
-      debug("router", `no deployed endpoint for ${route.key}`, { known: Object.keys(endpoints?.routes ?? {}) });
+      debug("router", `no deployed endpoint for ${route.key}`, { known: Object.keys(this.loadEndpoints()?.routes ?? {}) });
       return Response.json({ error: `No deployed endpoint for "${route.key}"` }, { status: 502 });
     }
+    return this.callFunction(route, url, input, context, req.headers, original);
+  }
+
+  private async callFunction(route: CompiledRoute, url: string, input: Record<string, unknown>, context: RequestContext, requestHeaders: { get(name: string): string | null }, original?: Request): Promise<Response> {
     let upstream: Response;
     try {
       const header = (this.options.authenticate as { header?: string } | undefined)?.header;
       // `authorization` is taken by SigV4; use a dedicated header.
-      const token = header && header !== "authorization" && !route.public ? req.headers.get(header) : null;
+      const token = header && header !== "authorization" && !route.public ? requestHeaders.get(header) : null;
       upstream = await request(url, input, {
         route: route.key,
         context,
         original: original ? await serializeRequest(original) : undefined,
         headers: token && header ? { [header]: token } : undefined,
-        sign: this.authMode(endpoints) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
+        sign: this.authMode(this.loadEndpoints()) === "iam" ? { credentials: this.options.credentials, region: this.options.region } : undefined,
       });
     } catch (err) {
       console.error(err);
@@ -483,6 +583,16 @@ export async function request(
   });
 }
 
+function servedByCdn(api: Endpoints["api"]): boolean {
+  if (!api) return false;
+  if (api.via) return true;
+  try {
+    return !!api.url && CLOUDFRONT_HOST.test(new URL(api.url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function readEndpoints(provider: string, file?: string): Endpoints | null {
   if (process.env.CLOUDGEAR_ENDPOINTS) {
     const routes = JSON.parse(process.env.CLOUDGEAR_ENDPOINTS);
@@ -496,7 +606,8 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   }
   if (Object.keys(parsed.routes).length === 0) return null;
   const apiDomain = typeof parsed.api?.domain === "string" ? parsed.api.domain : undefined;
-  return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain } } : {}) };
+  const apiUrl = typeof parsed.api?.url === "string" ? parsed.api.url : undefined;
+  return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain, ...(apiUrl ? { url: apiUrl } : {}), ...(parsed.api?.via === "cloudfront" ? { via: "cloudfront" as const } : {}) } } : {}) };
 }
 
 // Stops at nearest package.json; parent endpoints are not used.

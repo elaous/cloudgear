@@ -173,7 +173,7 @@ describe("applying a CDN that serves the router", () => {
     const config = routerCdnConfig();
     const aws = await applyAll(config, state);
     expect(await aws.dns!.get(DOMAIN, "CNAME")).toMatchObject({ values: ["d111.cloudfront.net"] });
-    expect(endpointsFrom(config, state).api).toEqual({ domain: DOMAIN, url: "https://d111.cloudfront.net", id: "E1" });
+    expect(endpointsFrom(config, state).api).toEqual({ domain: DOMAIN, url: "https://d111.cloudfront.net", id: "E1", via: "cloudfront" });
   });
 
   test("method routing publishes a CloudFront Function and attaches it to the default behavior", async () => {

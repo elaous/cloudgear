@@ -315,6 +315,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const certificateKey = certificateKeyOf(certificateDomain, "cdn");
     const routed = config.function.filter((fn) => fn.route.length > 0);
     const routes = routed.flatMap((fn) => fn.route.map((route) => ({ method: route.method, path: route.path, function: fn.physical_name })));
+    if (api.method_routing && !routes.length) throw new Error(`cloudgear config: ${api.domain}: method routing needs at least one route`);
     if (!api.method_routing && conflictingGroups(routes).length) {
       throw new Error(`cloudgear config: paths reach different functions, which CloudFront cannot tell apart; set methodRouting on the CDN or use API Gateway`);
     }

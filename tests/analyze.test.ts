@@ -219,7 +219,7 @@ describe("analyzeApp", () => {
       });
 
       test("methodRouting routes by function even when no path is shared, so there are no path behaviors", () => {
-        const model = analyzeApp(fixture("edge/cdn-router-unneeded-method-routing.ts"));
+        const model = analyzeApp(fixture("edge/cdn-router-method-routing-distinct.ts"));
         expect(model.api).toMatchObject({ via: "cloudfront", method_routing: true });
         expect(model.warnings.join("\n")).not.toMatch(/no CloudFront Function will be created/);
       });

@@ -665,6 +665,8 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
     .map((b) => ({ ...ZERO_BEHAVIOR, ...JSON.parse(b.behavior) }));
   behaviors.push(...attachedBehaviors);
 
+  const routedMethods = (spec.method_routes ?? []).map((route) => route.method);
+  const defaultMethods = routedMethods.length ? allowedMethods(routedMethods) : ALL_METHODS;
   const defaultBehavior = spec.bucket
     ? {
         TargetOriginId: siteId,
@@ -675,10 +677,10 @@ export function buildDistributionConfig(spec: CdnComparable, input: Distribution
         ...ZERO_BEHAVIOR,
       }
     : {
-        // Unmatched paths reach the first function, which answers 404.
+        // Unmatched paths reach the first function, which answers 404; with a routing function the methods are the routes'.
         TargetOriginId: originIdOf(functionOrigins.length ? [...originMap.keys()].sort()[0]! : ""),
-        AllowedMethods: { ...methodList(ALL_METHODS), CachedMethods: methodList(["GET", "HEAD"]) },
-        ViewerProtocolPolicy: viewerPolicy(ALL_METHODS),
+        AllowedMethods: { ...methodList(defaultMethods), CachedMethods: methodList(["GET", "HEAD"]) },
+        ViewerProtocolPolicy: viewerPolicy(defaultMethods),
         ...ZERO_BEHAVIOR,
         ...toFunction,
         ...(input.routeFunctionArn

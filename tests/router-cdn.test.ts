@@ -248,6 +248,44 @@ describe("applying a CDN that serves the router", () => {
     expect(state.entries[CDN_KEY]!.outputs.route_function).toMatch(/^cloudgear-.*-routes$/);
   });
 
+  test("routing by function without a shared path leaves the distribution with no path behaviors, and read-only routes keep their methods", async () => {
+    const config = routerCdnConfig({ function: [listItems, item], api: { provider: "aws", domain: DOMAIN, via: "cloudfront", method_routing: true } });
+    const entry = plan(config, emptyState()).find((a) => a.type === "@aws.CloudFront")!;
+    const spec = entry.desired!.spec as unknown as { behaviors?: unknown; method_routes?: unknown[] };
+    expect(spec.behaviors).toBeUndefined();
+    expect(spec.method_routes).toHaveLength(2);
+    const aws = await applyAll(config, emptyState());
+    const created = aws.of("CreateDistributionCommand")[0].DistributionConfig;
+    expect(created.CacheBehaviors.Quantity).toBe(0);
+    expect(created.DefaultCacheBehavior).toMatchObject({
+      ViewerProtocolPolicy: "redirect-to-https",
+      AllowedMethods: { Items: ["GET", "HEAD"] },
+      FunctionAssociations: { Quantity: 1 },
+    });
+    expect(aws.of("CreateFunctionCommand").length).toBeGreaterThan(0);
+  });
+
+  test("a distribution switches from path behaviors to the routing function by an update", async () => {
+    const state = emptyState();
+    await applyAll(routerCdnConfig(), state);
+    const switched = routerCdnConfig({ api: { provider: "aws", domain: DOMAIN, via: "cloudfront", method_routing: true } });
+    const aws = await applyAll(switched, state);
+    const updated = aws.of("UpdateDistributionCommand").at(-1).DistributionConfig;
+    expect(updated.CacheBehaviors.Quantity).toBe(0);
+    expect(updated.DefaultCacheBehavior.FunctionAssociations.Quantity).toBe(1);
+    expect(state.entries[CDN_KEY]!.outputs.route_function).toMatch(/^cloudgear-.*-routes$/);
+  });
+
+  test("a write route keeps all methods on the default behavior and refuses http", async () => {
+    const aws = await applyAll(conflictConfig(true), emptyState());
+    expect(aws.of("CreateDistributionCommand")[0].DistributionConfig.DefaultCacheBehavior).toMatchObject({ ViewerProtocolPolicy: "https-only" });
+    expect(aws.of("CreateDistributionCommand")[0].DistributionConfig.DefaultCacheBehavior.AllowedMethods.Items).toContain("POST");
+  });
+
+  test("routing by function needs at least one route", () => {
+    expect(() => plan(routerCdnConfig({ function: [], api: { provider: "aws", domain: DOMAIN, via: "cloudfront", method_routing: true } }), emptyState())).toThrow(/method routing needs at least one route/);
+  });
+
   test("a routing table beyond the CloudFront Function size limit is refused", async () => {
     const many = (method: string, name: string) =>
       fn({ name, physical_name: `app-${name}`, route: Array.from({ length: 300 }, (_, i) => ({ method, path: `/resource-number-${i}/{id}`, name: `${name}${i}` })) });

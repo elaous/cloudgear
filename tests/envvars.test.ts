@@ -35,6 +35,14 @@ describe("the environment report", () => {
     expect(v.LAZY_HELPER_VAR).toMatchObject({ required: false, provided: null });
   });
 
+  test("a dynamic import in a function that is not run is not followed, and a computed import is left alone", async () => {
+    const sibling = (await generated("lazy-sibling")).report.functions.api!;
+    expect(Object.keys(sibling.variables)).toEqual(["SIBLING_USED"]);
+    const computed = (await generated("lazy-computed")).report.functions.api!;
+    expect(computed.variables).toEqual({});
+    expect(computed.dynamic).toEqual([]);
+  });
+
   test("lists what each function's code reads, with how it is provided", async () => {
     const { report, configPath } = await generated("main");
     expect(configPath.endsWith(".prototxt")).toBe(true);

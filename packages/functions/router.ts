@@ -74,7 +74,7 @@ export interface FetchOpts {
 }
 
 export interface RouterFetch {
-  // The second argument is ignored: Bun.serve passes its server object.
+  // Second argument ignored; Bun.serve passes its server.
   (req: Request, server?: unknown): Promise<Response>;
   (input: string | URL, init?: RequestInit): Promise<Response>;
   (name: string, opts?: FetchOpts): Promise<Response>;
@@ -155,12 +155,14 @@ interface CompiledRoute {
 interface Endpoints {
   routes: Record<string, string>;
   auth?: EndpointAuth;
-  api?: { domain: string; via?: "cloudfront" };
+  api?: { domain: string; url?: string; via?: "cloudfront" };
 }
 
 type Target = { kind: "local" | "api" | "cdn" | "function"; base: string };
 
-const ABSOLUTE_INPUT = /^(?:[a-z][a-z\d+.-]*:|\/\/|\\\\)/i;
+const SCHEME_URL = /^[a-z][a-z\d+.-]*:\/\//i;
+const ABSOLUTE_INPUT = /^(?:[a-z][a-z\d+.-]*:\/\/|\/\/|\\\\)/i;
+const CLOUDFRONT_HOST = /\.cloudfront\.net$/i;
 const PLACEHOLDER_ORIGIN = "http://router.invalid";
 
 export const DEFAULT_ENDPOINTS_FILE = ".cloudgear/endpoints.json";
@@ -226,6 +228,9 @@ export class FunctionRouter {
     const fn = typeof handler === "string" ? undefined : handler;
     const name = options.name ?? (fn?.name || key);
     if (!name) throw new Error(`Route "${key}": name must not be empty`);
+    if (name.startsWith("/") || name.startsWith("\\") || SCHEME_URL.test(name)) {
+      throw new Error(`Route "${key}": name "${name}" must not start with "/" or "\\" or look like a URL; fetch would read it as a path`);
+    }
     if (this.routes.some((r) => r.name === name)) {
       throw new Error(`Route name "${name}" is already used; pass { name } to tell routes apart`);
     }
@@ -240,7 +245,7 @@ export class FunctionRouter {
 
   fetch: RouterFetch = ((target: Request | string | URL, second?: FetchOpts | RequestInit) => {
     if (target instanceof Request) return this.handle(target);
-    if (target instanceof URL || (typeof target === "string" && (target.startsWith("/") || ABSOLUTE_INPUT.test(target)))) {
+    if (target instanceof URL || (typeof target === "string" && (target.startsWith("/") || target.startsWith("\\") || SCHEME_URL.test(target)))) {
       return this.fetchPath(target, second as RequestInit | undefined);
     }
     if (typeof target === "string") return this.fetchRoute(target, second as FetchOpts | undefined);
@@ -302,20 +307,22 @@ export class FunctionRouter {
     const { route, method } = this.pickRoute(parsed.pathname, init.method);
     const target = this.resolver()(route);
     if (!target) throw new Error(`Route "${route.name}" has no URL yet; deploy it or call listen() first`);
+    if ((method === "GET" || method === "HEAD") && init.body !== undefined && init.body !== null) throw new Error(`A ${method} request cannot have a body`);
     const original = new Request(`${PLACEHOLDER_ORIGIN}${parsed.pathname}${parsed.search}`, { ...init, method });
     debug("router", `fetch ${method} ${route.key} via ${target.kind}`);
     if (target.kind === "function") return this.fetchFunctionUrl(route, this.loadEndpoints()!.routes[route.key]!, parsed, original, init);
     const headers = new Headers(original.headers);
     const bytes = new Uint8Array(await original.arrayBuffer());
-    const hasBody = bytes.length > 0 || method === "POST" || method === "PUT";
+    const hasBody = bytes.length > 0 || method === "POST" || method === "PUT" || method === "PATCH";
     if (target.kind === "cdn" && hasBody && !headers.has("x-amz-content-sha256")) {
       headers.set("x-amz-content-sha256", createHash("sha256").update(bytes).digest("hex"));
     }
-    return fetch(`${target.base}${parsed.pathname}${parsed.search}`, { redirect: "manual", ...init, method, headers, body: hasBody && method !== "GET" && method !== "HEAD" ? bytes : undefined });
+    return fetch(`${target.base}${parsed.pathname}${parsed.search}`, { redirect: "manual", ...init, method, headers, body: hasBody ? bytes : undefined });
   }
 
   private parseClientPath(input: string | URL): URL {
     if (input instanceof URL) {
+      if (input.protocol !== "http:" && input.protocol !== "https:") throw new Error(`fetch takes a path, got a ${input.protocol} URL "${input.href}"`);
       if (input.host) throw new Error(`fetch takes a path and query without a host, got "${input.href}"; the router owns the host`);
       return new URL(`${input.pathname}${input.search}`, PLACEHOLDER_ORIGIN);
     }
@@ -447,7 +454,7 @@ export class FunctionRouter {
     const local = this.server?.url.origin;
     const apiDomain = remote ? (this.options.cert?.domain ?? endpoints?.api?.domain) : undefined;
     if (apiDomain) {
-      const kind = !this.options.cert && endpoints?.api?.via === "cloudfront" ? "cdn" : "api";
+      const kind = !this.options.cert && servedByCdn(endpoints?.api) ? "cdn" : "api";
       return () => ({ kind, base: `https://${apiDomain}` });
     }
     if (!endpoints && !local) throw new Error("No deployed endpoints and the router is not listening; call listen() first");
@@ -576,6 +583,16 @@ export async function request(
   });
 }
 
+function servedByCdn(api: Endpoints["api"]): boolean {
+  if (!api) return false;
+  if (api.via) return true;
+  try {
+    return !!api.url && CLOUDFRONT_HOST.test(new URL(api.url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 function readEndpoints(provider: string, file?: string): Endpoints | null {
   if (process.env.CLOUDGEAR_ENDPOINTS) {
     const routes = JSON.parse(process.env.CLOUDGEAR_ENDPOINTS);
@@ -589,7 +606,8 @@ function readEndpoints(provider: string, file?: string): Endpoints | null {
   }
   if (Object.keys(parsed.routes).length === 0) return null;
   const apiDomain = typeof parsed.api?.domain === "string" ? parsed.api.domain : undefined;
-  return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain, ...(parsed.api?.via === "cloudfront" ? { via: "cloudfront" as const } : {}) } } : {}) };
+  const apiUrl = typeof parsed.api?.url === "string" ? parsed.api.url : undefined;
+  return { routes: parsed.routes, auth: parsed.auth, ...(apiDomain ? { api: { domain: apiDomain, ...(apiUrl ? { url: apiUrl } : {}), ...(parsed.api?.via === "cloudfront" ? { via: "cloudfront" as const } : {}) } } : {}) };
 }
 
 // Stops at nearest package.json; parent endpoints are not used.

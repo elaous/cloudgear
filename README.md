@@ -274,9 +274,9 @@ throws. Path params stay as `{placeholders}`.
 which CloudFront origin access control requires. Redirects are returned, not followed, and calls are not SigV4-signed, so
 an `"iam"` function URL still answers 403. `router.fetch(request)` still serves a `Request`, as before.
 
-`router.fetch(path, init)` is a client call to a registered route. `path` is a string starting with `/` or a host-less `URL`:
+`router.fetch(path, init)` is a client call to a registered route. `path` is a string starting with `/`:
 a path with an optional query string, such as `"/items/42?x=1"`. The router owns the host, so an absolute URL
-(`https://...`, `//host/...`, or a `URL` with a host) MUST NOT be passed and throws. The path is matched against the registered
+(`https://...`, `//host/...`, or any `URL` object) MUST NOT be passed and throws. The path is matched against the registered
 routes in registration order, like the server does; no match, a malformed percent-encoding, or a `init.method` that no route
 with that path has all throw. Without `init.method` the method is the matched route's; when the path has routes for several
 methods the call throws and asks for `init.method`. `init` is a standard `RequestInit`. A string that does not start with `/`
@@ -296,7 +296,12 @@ not used. Endpoints files written before `via` was recorded are treated as API G
 CDN-served routers. Calls to a function URL support only `method`, `headers` and `body` from `init`, and any other `init` field
 throws; the function receives the parsed input, and the headers only on routes declared with `request: true`
 (plus the `authenticate` header, as in dispatch). Other targets get the whole `init`, with `redirect: "manual"` unless set.
-Route names MUST NOT start with `/`.
+Route names MUST NOT start with `/` or `\`, or look like a URL (`scheme://`); `url()` throws otherwise, and a name such as
+`"users:list"` stays a name. `GET` and `HEAD` calls with a body throw. Bodies, including streams, are buffered in full so
+the digest covers the exact bytes sent. The path form adds the digest on CDN targets for `POST`, `PUT`, `PATCH` and any
+request with a body, and keeps a value the caller set; the name form always sets it on `POST`, `PUT` and `PATCH`, for any target.
+Without `via`, an endpoints file counts as CDN-served when `api.url` ends in `.cloudfront.net`. A `URL` object MUST be
+http(s) and carry a host, so it is always rejected; pass a string path.
 
 For each
 request the router either:

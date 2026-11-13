@@ -42,7 +42,12 @@ describe("router.fetch(path, init)", () => {
       .url("POST", "/items", () => ({}), { name: "create" })
       .url("PUT", "/things/{id}", () => ({}), { name: "put" })
       .url("GET", "/things/{id}", () => ({}), { name: "read" })
-      .url("DELETE", "/gone", () => ({}), { name: "gone" });
+      .url("DELETE", "/gone", () => ({}), { name: "gone" })
+      .url("PATCH", "/y", () => ({}), { name: "patch-y" })
+      .url("HEAD", "/y", () => ({}), { name: "head-y" })
+      .url("OPTIONS", "/y", () => ({}), { name: "options-y" })
+      .url("POST", "/y", () => ({}), { name: "post-y" })
+      .url("GET", "/colon", () => ({}), { name: "v1:thing" });
 
   const withEndpointsFile = async (file: object, options: FunctionRouterOptions = {}) => {
     const path = `${process.env.TMPDIR ?? "/tmp"}/cloudgear-client-${crypto.randomUUID()}.json`;
@@ -87,9 +92,55 @@ describe("router.fetch(path, init)", () => {
       expect(calls[0]).toMatchObject({ url: "https://api.example.com/items/42?x=1&y=a%20b", method: "GET" });
     });
 
-    test("a URL without a host is accepted", async () => {
-      await (await withEndpointsFile(cdnEndpoints())).fetch(new URL("file:///items/5?z=2"));
-      expect(calls[0]!.url).toBe("https://api.example.com/items/5?z=2");
+    test("URL objects must be http(s) and are rejected for their host", async () => {
+      const router = await withEndpointsFile(cdnEndpoints());
+      await expect(router.fetch(new URL("file:///items/5?z=2"))).rejects.toThrow(/got a file: URL/);
+      await expect(router.fetch(new URL("http://app/items/5"))).rejects.toThrow(/the router owns the host/);
+      expect(calls).toEqual([]);
+    });
+
+    test("a route name with a colon stays a name", async () => {
+      const router = await withEndpointsFile(cdnEndpoints("cloudfront"));
+      await router.fetch("v1:thing");
+      expect(calls[0]!.url).toBe("https://api.example.com/colon");
+    });
+
+    test("names that look like paths or URLs are refused at registration", () => {
+      const router = new FunctionRouter("aws", { mode: "local" });
+      for (const name of ["/x", "\\x", "https://x", "a+b://c"]) {
+        expect(() => router.url("GET", "/p", () => ({}), { name })).toThrow(/must not start with/);
+      }
+      expect(() => router.url("GET", "/p", () => ({}), { name: "users:list" })).not.toThrow();
+    });
+
+    test("a body on GET or HEAD throws before sending", async () => {
+      const router = await withEndpointsFile(cdnEndpoints("cloudfront"));
+      await expect(router.fetch("/items/1", { body: "x" })).rejects.toThrow(/A GET request cannot have a body/);
+      await expect(router.fetch("/y", { method: "HEAD", body: "x" })).rejects.toThrow(/A HEAD request cannot have a body/);
+      expect(calls).toEqual([]);
+    });
+
+    test("dot segments are normalised before matching", async () => {
+      await (await withEndpointsFile(cdnEndpoints("cloudfront"))).fetch("/x/../y", { method: "POST", body: "a" });
+      expect(calls[0]!.url).toBe("https://api.example.com/y");
+    });
+
+    test("HEAD and OPTIONS carry no digest, PATCH does", async () => {
+      const router = await withEndpointsFile(cdnEndpoints("cloudfront"));
+      await router.fetch("/y", { method: "HEAD" });
+      await router.fetch("/y", { method: "OPTIONS" });
+      await router.fetch("/y", { method: "PATCH", body: "p" });
+      await router.fetch("/y", { method: "PATCH" });
+      expect(calls.map((c) => c.method)).toEqual(["HEAD", "OPTIONS", "PATCH", "PATCH"]);
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBeNull();
+      expect(calls[1]!.headers.get("x-amz-content-sha256")).toBeNull();
+      expect(calls[2]!.headers.get("x-amz-content-sha256")).toBe(sha("p"));
+      expect(calls[3]!.headers.get("x-amz-content-sha256")).toBe(EMPTY_SHA);
+    });
+
+    test("an OPTIONS request with a body is hashed too", async () => {
+      await (await withEndpointsFile(cdnEndpoints("cloudfront"))).fetch("/y", { method: "OPTIONS", body: "o" });
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBe(sha("o"));
     });
 
     test("the method defaults to the route's and init.method is case-insensitive", async () => {
@@ -256,6 +307,46 @@ describe("router.fetch(path, init)", () => {
       await local.fetch("/echo", { method: "POST", body: "x" });
       expect(calls[0]).toMatchObject({ url: `${origin}/echo`, method: "POST" });
       expect(calls[0]!.headers.get("x-amz-content-sha256")).toBeNull();
+    });
+
+    test("URLSearchParams, Blob, FormData and stream bodies are hashed as serialized", async () => {
+      const router = await withEndpointsFile(cdnEndpoints("cloudfront"));
+      const form = new FormData();
+      form.set("a", "1");
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("str"));
+          controller.enqueue(new TextEncoder().encode("eam"));
+          controller.close();
+        },
+      });
+      await router.fetch("/y", { method: "POST", body: new URLSearchParams({ a: "1 2" }) });
+      await router.fetch("/y", { method: "POST", body: new Blob(["blob"]) });
+      await router.fetch("/y", { method: "POST", body: form });
+      await router.fetch("/y", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBe(sha("a=1+2"));
+      expect(calls[1]!.headers.get("x-amz-content-sha256")).toBe(sha("blob"));
+      expect(calls[2]!.headers.get("content-type")).toStartWith("multipart/form-data; boundary=");
+      expect(calls[2]!.headers.get("x-amz-content-sha256")).toBe(sha(calls[2]!.body));
+      expect(calls[3]!.headers.get("x-amz-content-sha256")).toBe(sha("stream"));
+      expect(calls[3]!.body).toBe("stream");
+    });
+
+    test("an old endpoints file infers CloudFront from the api url", async () => {
+      const file = { ...cdnEndpoints(), api: { domain: "api.example.com", url: "https://d111.cloudfront.net" } };
+      await (await withEndpointsFile(file)).fetch("/items", { method: "POST", body: "x" });
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBe(sha("x"));
+    });
+
+    test("an old endpoints file for API Gateway gets no digest", async () => {
+      const file = { ...cdnEndpoints(), api: { domain: "api.example.com", url: "https://abc.execute-api.us-east-1.amazonaws.com" } };
+      await (await withEndpointsFile(file)).fetch("/items", { method: "POST", body: "x" });
+      expect(calls[0]!.headers.get("x-amz-content-sha256")).toBeNull();
+    });
+
+    test("init.redirect overrides the manual default", async () => {
+      await (await withEndpointsFile(cdnEndpoints("cloudfront"))).fetch("/items/1", { redirect: "follow" });
+      expect(calls[0]!.init.redirect).toBe("follow");
     });
 
     test("other init fields pass through and redirects stay manual", async () => {

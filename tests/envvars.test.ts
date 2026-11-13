@@ -27,6 +27,14 @@ const generated = async (name: string) => {
 };
 
 describe("the environment report", () => {
+  test("follows a dynamic import with a literal specifier, including what that file imports", async () => {
+    const { report } = await generated("lazy");
+    const v = Object.values(report.functions)[0]!.variables;
+    expect(v.LAZY_VAR).toMatchObject({ required: true, provided: null });
+    expect(v.LAZY_VAR!.files.some((f) => f.endsWith("lazy-target.ts"))).toBe(true);
+    expect(v.LAZY_HELPER_VAR).toMatchObject({ required: false, provided: null });
+  });
+
   test("lists what each function's code reads, with how it is provided", async () => {
     const { report, configPath } = await generated("main");
     expect(configPath.endsWith(".prototxt")).toBe(true);

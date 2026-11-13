@@ -89,7 +89,7 @@ function isWrite(read: Node): boolean {
 
 const OBJECT_METHODS = new Set(["hasOwnProperty", "toString", "valueOf", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]);
 
-// Follows project imports only; not node_modules or dynamic imports.
+// Follows project imports, and dynamic imports with a literal specifier; not node_modules.
 export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolean, relative: (file: string) => string): EnvUse {
   const variables = new Map<string, { required: boolean; files: Set<string> }>();
   const dynamic: string[] = [];
@@ -149,12 +149,26 @@ export function scanEnvUse(fnNode: Node, isAppFile: (file: SourceFile) => boolea
     return declarationsOf(node).some((d) => aliases.has(d));
   };
 
+  // A lazily imported file may run any of its code, so all of it counts.
+  const addWholeFile = (file: SourceFile | undefined) => {
+    if (!file || !isAppFile(file)) return;
+    addFile(file);
+    for (const statement of file.getStatements()) addRegion(statement);
+  };
+
   const scan = (region: Node) => {
     const file = region.getSourceFile();
     const rel = relative(file.getFilePath());
     const at = (node: Node) => `${rel}:${node.getStartLineNumber()}`;
     const nodes = [region, ...region.getDescendants()];
     for (const node of nodes) {
+      if (Node.isCallExpression(node) && node.getExpression().getKind() === SyntaxKind.ImportKeyword) {
+        const specifier = node.getArguments()[0];
+        if (specifier && (Node.isStringLiteral(specifier) || Node.isNoSubstitutionTemplateLiteral(specifier))) {
+          const target = specifier.getSymbol()?.getDeclarations()[0];
+          if (target && Node.isSourceFile(target)) addWholeFile(target);
+        }
+      }
       if (Node.isIdentifier(node) && node !== region) {
         for (const decl of declarationsOf(node)) {
           if (!isAppFile(decl.getSourceFile())) continue;

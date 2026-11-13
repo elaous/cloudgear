@@ -1134,8 +1134,9 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
 - The scan follows the code the function runs: its body, what that calls
   (including helpers in other project files), and the top-level code of every
   project file it imports, which runs when the function loads. Other functions
-  that merely share its file are not included. `node_modules`, `require()` and
-  dynamic `import()` are not followed. `process.env`, `Bun.env`,
+  that merely share its file are not included. A dynamic `import("./x.ts")` with a
+  literal specifier is followed, and counts all of that file. `node_modules`,
+  `require()` and a computed `import(name)` are not followed. `process.env`, `Bun.env`,
   `globalThis.process.env`, `import.meta.env`, casts, and one-step aliases
   (`const env = process.env`) are understood.
 - A variable is `required` unless every read has a fallback (`?? x`, `|| x`,

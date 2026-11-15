@@ -1551,18 +1551,25 @@ letters, digits, `.`, `_`, `-`, with `/` between words).
 | `scanOnPush` | `true` | Scan images for known vulnerabilities when pushed |
 | `immutableTags` | `false` | Forbid moving a tag to another image |
 | `keepUntaggedDays` | `14` | Expire untagged images after this many days (1-365); `false` leaves lifecycle policies alone |
-| `allowDestroy` | `false` | Lets `cloudgear destroy` delete the repository and every image in it |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) remove the repository and every image in it |
 
 - **Adopt first:** an existing repository is adopted, and `apply` changes only
-  the settings that differ. `cloudgear import` reads it without changing
-  anything.
-- **Lifecycle policy:** cloudgear MUST NOT replace a lifecycle policy it did not
-  write. If the repository already has a different one, `apply` stops and tells
-  you to set `keepUntaggedDays: false` or delete that policy. Turning
-  `keepUntaggedDays` off removes only a policy cloudgear wrote.
+  the settings that differ. `cloudgear import --all` and
+  `cloudgear import @aws.ECR <name>` read it without changing anything;
+  `import --arn` does not support ECR. Tags are applied only when cloudgear
+  creates the repository.
+- **Lifecycle policy:** a policy is cloudgear's if every rule's description
+  starts with `cloudgear:`. cloudgear MUST NOT replace or delete any other
+  policy. If the repository has a different one, `apply` stops before changing
+  anything and tells you to set `keepUntaggedDays: false` or delete that policy.
+- **Tag exclusions:** a repository set to `IMMUTABLE_WITH_EXCLUSION` or
+  `MUTABLE_WITH_EXCLUSION` keeps that setting; `immutableTags` does not change
+  or report it.
 - **Destroy:** the repository is deleted only if the applied config had
-  `allowDestroy: true`, and `destroy` checks that before changing anything.
-  Deleting a repository deletes its images.
+  `allowDestroy: true`. `destroy`, and `apply` after you remove the
+  declaration, check that before changing anything. Deleting a repository
+  deletes its images. Import never records `allowDestroy`; the next `apply`
+  does.
 - **Cost:** ECR charges for stored image data, so the untagged-image expiry is
   on by default.
 

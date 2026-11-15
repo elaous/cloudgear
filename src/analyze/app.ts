@@ -1669,6 +1669,10 @@ function readOptionalEnv(options: Node | undefined, at: string): string[] {
   });
 }
 
+function unwrapLiteral(node: Node): Node {
+  return Node.isAsExpression(node) || Node.isParenthesizedExpression(node) || Node.isNonNullExpression(node) || Node.isSatisfiesExpression(node) ? unwrapLiteral(node.getExpression()) : node;
+}
+
 function optionValue(options: Node | undefined, name: string, at: string): Node | undefined {
   if (!options) return undefined;
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at} must be an object literal`);
@@ -1677,7 +1681,7 @@ function optionValue(options: Node | undefined, name: string, at: string): Node 
     if (propName(prop) !== name) continue;
     const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
     if (!value) throw new Error(`${at}: ${name} must be a literal`);
-    return value;
+    return unwrapLiteral(value);
   }
   return undefined;
 }
@@ -1685,9 +1689,8 @@ function optionValue(options: Node | undefined, name: string, at: string): Node 
 function readNumberOption(options: Node | undefined, name: string, at: string): number | undefined {
   const value = optionValue(options, name, at);
   if (!value) return undefined;
-  const literal = Node.isAsExpression(value) ? value.getExpression() : value;
-  if (!Node.isNumericLiteral(literal)) throw new Error(`${at}: ${name} must be a number literal, got: ${value.getText()}`);
-  return literal.getLiteralValue();
+  if (!Node.isNumericLiteral(value)) throw new Error(`${at}: ${name} must be a number literal, got: ${value.getText()}`);
+  return value.getLiteralValue();
 }
 
 function readBooleanOption(options: Node | undefined, name: string, at: string): boolean | undefined {

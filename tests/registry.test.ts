@@ -6,8 +6,9 @@ import { Registry } from "@cloudgear/registry";
 import { analyzeApp } from "../src/analyze/app";
 import type { Drivers } from "../src/deploy/apply";
 import { apply } from "../src/deploy/apply";
+import { adoptEntries } from "../src/deploy/adopt";
 import { awsDrivers, type SendClient } from "../src/deploy/aws";
-import { lifecyclePolicy } from "../src/deploy/aws/ecr";
+import { lifecyclePolicy, writtenByCloudgear } from "../src/deploy/aws/ecr";
 import { plan } from "../src/deploy/plan";
 import { stateKey } from "../src/deploy/state";
 import { validateOptions } from "../src/providers";
@@ -114,6 +115,10 @@ describe("analysis", () => {
     ]);
   });
 
+  test("keepUntaggedDays: false written with a cast is still recognised", () => {
+    expect(analyzeApp(fixture("false-const")).registries[0]!.keepUntaggedDays).toBe(false);
+  });
+
   test("duplicates, unknown options, a zero retention and a bad name are errors", () => {
     expect(() => analyzeApp(fixture("duplicate"))).toThrow(/Registry "same" is also declared at/);
     expect(() => analyzeApp(fixture("typo"))).toThrow(/unknown Registry option "scanOnpush" \(supported: scanOnPush, immutableTags, keepUntaggedDays, allowDestroy\)/);
@@ -209,6 +214,73 @@ describe("ecr driver", () => {
     expect(mismatch!.spec).toEqual({ physical_name: "app" });
     expect(mismatch!.notes![0]).toMatch(/scan on push is off \(config: on\); it has no lifecycle policy for untagged images/);
     expect(await fakeEcr().drivers["@aws.ECR"]!.adopt!(plain!, { entry: () => undefined })).toBeUndefined();
+  });
+});
+
+const FOREIGN = JSON.stringify({ rules: [{ rulePriority: 1, description: "mine", selection: { tagStatus: "any", countType: "imageCountMoreThan", countNumber: 5 }, action: { type: "expire" } }] });
+
+describe("safety", () => {
+  test("tag settings with exclusions are never changed or reported", async () => {
+    for (const mutability of ["IMMUTABLE_WITH_EXCLUSION", "MUTABLE_WITH_EXCLUSION"]) {
+      for (const options of [{ immutable_tags: "true" }, undefined]) {
+        const ecr = fakeEcr({ app: { imageTagMutability: mutability, imageScanningConfiguration: { scanOnPush: true }, lifecycle: lifecyclePolicy(14) } });
+        await applyConfig(configWith(options), emptyState(), ecr.drivers);
+        expect(ecr.names()).not.toContain("PutImageTagMutabilityCommand");
+        expect(ecr.repos.get("app")!.imageTagMutability).toBe(mutability);
+        const [entry] = plan(configWith(options), emptyState()).map((a) => a.desired!);
+        expect((await ecr.drivers["@aws.ECR"]!.adopt!(entry!, { entry: () => undefined }))!.notes).toBeUndefined();
+      }
+    }
+  });
+
+  test("a policy edited out of band is not deleted or overwritten later", async () => {
+    const ecr = fakeEcr();
+    const state = emptyState();
+    await applyConfig(configWith(), state, ecr.drivers);
+    ecr.repos.get("app")!.lifecycle = FOREIGN;
+    await applyConfig(configWith({ keep_untagged_days: "off" }), state, ecr.drivers);
+    expect(ecr.repos.get("app")!.lifecycle).toBe(FOREIGN);
+    await expect(applyConfig(configWith({ keep_untagged_days: "30" }), state, ecr.drivers)).rejects.toThrow(/did not write/);
+    expect(ecr.repos.get("app")!.lifecycle).toBe(FOREIGN);
+  });
+
+  test("a cloudgear-style policy with other days is rewritten even with no state", async () => {
+    const ecr = fakeEcr({ app: { imageScanningConfiguration: { scanOnPush: true }, lifecycle: lifecyclePolicy(90) } });
+    await applyConfig(configWith(), emptyState(), ecr.drivers);
+    expect(ecr.repos.get("app")!.lifecycle).toBe(lifecyclePolicy(14));
+    expect(writtenByCloudgear(lifecyclePolicy(7))).toBe(true);
+    expect(writtenByCloudgear(FOREIGN)).toBe(false);
+    expect(writtenByCloudgear("not json")).toBe(false);
+  });
+
+  test("a foreign policy stops apply before any setting changes", async () => {
+    const ecr = fakeEcr({ app: { imageScanningConfiguration: { scanOnPush: false }, imageTagMutability: "MUTABLE", lifecycle: FOREIGN } });
+    await expect(applyConfig(configWith({ immutable_tags: "true" }), emptyState(), ecr.drivers)).rejects.toThrow(/did not write/);
+    expect(ecr.names().filter((n) => n.startsWith("Put") || n.startsWith("Delete") || n.startsWith("Create"))).toEqual([]);
+  });
+
+  test("turning allowDestroy off and then removing the declaration is refused", async () => {
+    const ecr = fakeEcr();
+    const state = emptyState();
+    await applyConfig(configWith({ allow_destroy: "true" }), state, ecr.drivers);
+    await applyConfig(configWith(), state, ecr.drivers);
+    await expect(applyConfig(empty(), state, ecr.drivers)).rejects.toThrow(/Nothing was changed/);
+    expect(ecr.repos.size).toBe(1);
+  });
+
+  test("import grants no deletion; the next apply does", async () => {
+    const ecr = fakeEcr({ app: { imageScanningConfiguration: { scanOnPush: true }, lifecycle: lifecyclePolicy(14) } });
+    const state = emptyState();
+    const config = configWith({ allow_destroy: "true" });
+    const result = await adoptEntries(plan(config, state), state, ecr.drivers, () => true);
+    expect(result.adopted).toHaveLength(1);
+    expect(ecr.names().every((n) => n === "DescribeRepositoriesCommand" || n === "GetLifecyclePolicyCommand")).toBe(true);
+    await expect(applyConfig(empty(), state, ecr.drivers)).rejects.toThrow(/Nothing was changed/);
+    const next = plan(config, state);
+    expect(next.map((a) => a.op)).toEqual(["update"]);
+    await applyConfig(config, state, ecr.drivers);
+    await applyConfig(empty(), state, ecr.drivers);
+    expect(ecr.repos.size).toBe(0);
   });
 });
 

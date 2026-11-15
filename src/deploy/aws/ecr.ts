@@ -34,7 +34,7 @@ interface Repository {
   imageScanningConfiguration?: { scanOnPush?: boolean };
 }
 
-// "managed" in outputs means cloudgear wrote the lifecycle policy.
+// Recorded in outputs for information; ownership is decided by the policy text.
 const MANAGED = "managed";
 
 function wanted(spec: Record<string, unknown>): Wanted {
@@ -68,6 +68,20 @@ const canonical = (text: string): string => {
     return text;
   }
 };
+
+// A policy is cloudgear's if every rule it holds says so in its description.
+export function writtenByCloudgear(text: string): boolean {
+  try {
+    const rules = JSON.parse(text)?.rules;
+    return Array.isArray(rules) && rules.length > 0 && rules.every((rule: { description?: unknown }) => typeof rule?.description === "string" && rule.description.startsWith("cloudgear:"));
+  } catch {
+    return false;
+  }
+}
+
+// IMMUTABLE_WITH_EXCLUSION and MUTABLE_WITH_EXCLUSION carry filters cloudgear cannot express, so it leaves them be.
+const hasExclusions = (repo: Repository): boolean => /_WITH_EXCLUSION$/.test(repo.imageTagMutability ?? "");
+const tagsDiffer = (repo: Repository, want: Wanted): boolean => !hasExclusions(repo) && (repo.imageTagMutability === "IMMUTABLE") !== want.immutable;
 
 const named = (err: unknown, ...names: string[]): boolean => names.includes((err as { name?: string }).name ?? "");
 
@@ -106,31 +120,30 @@ export function ecrDriver(deps: EcrDeps): Driver {
     }
   }
 
-  // Brings a repository in line without replacing a lifecycle policy cloudgear did not write.
-  async function converge(name: string, repo: Repository, want: Wanted, previousLifecycle: string): Promise<string> {
+  // Decides any lifecycle conflict before changing a setting, so a refusal leaves the repository as it was.
+  async function converge(name: string, repo: Repository, want: Wanted): Promise<string> {
+    const existing = await lifecycleOf(name);
+    const policy = want.keepUntaggedDays === undefined ? undefined : lifecyclePolicy(want.keepUntaggedDays);
+    if (policy && existing !== undefined && canonical(existing) !== canonical(policy) && !writtenByCloudgear(existing)) {
+      throw new Error(`ECR repository "${name}" already has a lifecycle policy that cloudgear did not write; set keepUntaggedDays: false to leave it alone, or delete that policy`);
+    }
     if ((repo.imageScanningConfiguration?.scanOnPush ?? false) !== want.scanOnPush) {
       await deps.ecr.send(new PutImageScanningConfigurationCommand({ repositoryName: name, imageScanningConfiguration: { scanOnPush: want.scanOnPush } }));
     }
-    if ((repo.imageTagMutability === "IMMUTABLE") !== want.immutable) {
+    if (tagsDiffer(repo, want)) {
       await deps.ecr.send(new PutImageTagMutabilityCommand({ repositoryName: name, imageTagMutability: want.immutable ? "IMMUTABLE" : "MUTABLE" }));
     }
-    const existing = await lifecycleOf(name);
-    if (want.keepUntaggedDays === undefined) {
-      if (previousLifecycle === MANAGED && existing !== undefined) {
-        await deps.ecr.send(new DeleteLifecyclePolicyCommand({ repositoryName: name }));
-      }
+    if (!policy) {
+      if (existing !== undefined && writtenByCloudgear(existing)) await deps.ecr.send(new DeleteLifecyclePolicyCommand({ repositoryName: name }));
       return "unmanaged";
     }
-    const policy = lifecyclePolicy(want.keepUntaggedDays);
-    if (existing !== undefined && canonical(existing) === canonical(policy)) return MANAGED;
-    if (existing !== undefined && previousLifecycle !== MANAGED) {
-      throw new Error(`ECR repository "${name}" already has a lifecycle policy that cloudgear did not write; set keepUntaggedDays: false to leave it alone, or delete that policy`);
+    if (existing === undefined || canonical(existing) !== canonical(policy)) {
+      await deps.ecr.send(new PutLifecyclePolicyCommand({ repositoryName: name, lifecyclePolicyText: policy }));
     }
-    await deps.ecr.send(new PutLifecyclePolicyCommand({ repositoryName: name, lifecyclePolicyText: policy }));
     return MANAGED;
   }
 
-  async function ensure(entry: DesiredEntry, previousLifecycle: string): Promise<Record<string, string>> {
+  async function ensure(entry: DesiredEntry): Promise<Record<string, string>> {
     const want = wanted(entry.spec);
     let repo = await describe(entry.physical_name);
     if (repo) {
@@ -153,12 +166,12 @@ export function ecrDriver(deps: EcrDeps): Driver {
       }
     }
     if (!repo) throw new Error(`ECR repository "${entry.physical_name}" could not be created or found`);
-    return outputsOf(repo, await converge(entry.physical_name, repo, want, previousLifecycle));
+    return outputsOf(repo, await converge(entry.physical_name, repo, want));
   }
 
   return {
-    create: (entry) => ensure(entry, ""),
-    update: (entry, current) => ensure(entry, current.outputs.lifecycle ?? ""),
+    create: (entry) => ensure(entry),
+    update: (entry) => ensure(entry),
     protect: refusal,
     async delete(current) {
       const reason = refusal(current);
@@ -176,15 +189,14 @@ export function ecrDriver(deps: EcrDeps): Driver {
       if (!repo) return undefined;
       const want = wanted(entry.spec);
       const existing = await lifecycleOf(entry.physical_name);
-      const foreignPolicy = want.keepUntaggedDays !== undefined && existing !== undefined && canonical(existing) !== canonical(lifecyclePolicy(want.keepUntaggedDays));
-      const sameLifecycle = want.keepUntaggedDays === undefined || (existing !== undefined && !foreignPolicy);
+      const policy = want.keepUntaggedDays === undefined ? undefined : lifecyclePolicy(want.keepUntaggedDays);
       const differences = [
         ...((repo.imageScanningConfiguration?.scanOnPush ?? false) !== want.scanOnPush ? [`scan on push is ${want.scanOnPush ? "off" : "on"} (config: ${want.scanOnPush ? "on" : "off"})`] : []),
-        ...((repo.imageTagMutability === "IMMUTABLE") !== want.immutable ? [`tags are ${want.immutable ? "mutable" : "immutable"} (config: ${want.immutable ? "immutable" : "mutable"})`] : []),
-        ...(foreignPolicy ? ["it has a lifecycle policy cloudgear did not write; set keepUntaggedDays: false to leave it alone, or delete that policy"] : []),
-        ...(!sameLifecycle && !foreignPolicy ? ["it has no lifecycle policy for untagged images"] : []),
+        ...(tagsDiffer(repo, want) ? [`tags are ${want.immutable ? "mutable" : "immutable"} (config: ${want.immutable ? "immutable" : "mutable"})`] : []),
+        ...(policy && existing === undefined ? ["it has no lifecycle policy for untagged images"] : []),
+        ...(policy && existing !== undefined && canonical(existing) !== canonical(policy) ? [writtenByCloudgear(existing) ? "its untagged-image expiry differs" : "it has a lifecycle policy cloudgear did not write; set keepUntaggedDays: false to leave it alone, or delete that policy"] : []),
       ];
-      const lifecycle = want.keepUntaggedDays !== undefined && sameLifecycle ? MANAGED : "unmanaged";
+      const lifecycle = policy && existing !== undefined && canonical(existing) === canonical(policy) ? MANAGED : "unmanaged";
       return differences.length
         ? { outputs: outputsOf(repo, "unmanaged"), spec: { physical_name: entry.physical_name }, notes: [`ECR repository "${entry.physical_name}": ${differences.join("; ")}`] }
         : { outputs: outputsOf(repo, lifecycle), spec: withoutAllowDestroy(entry.spec) };

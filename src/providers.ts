@@ -31,6 +31,14 @@ const integerBetween =
   (value) =>
     /^\d+$/.test(value) && Number(value) >= min && Number(value) <= max ? undefined : `must be an integer from ${min} to ${max}`;
 
+const idList =
+  (pattern: RegExp, max: number, label: string): OptionRule =>
+  (value) => {
+    const ids = value.split(",");
+    if (ids.length > max) return `accepts at most ${max} ${label} ids`;
+    return ids.every((id) => pattern.test(id)) && new Set(ids).size === ids.length ? undefined : `must be a comma-separated list of distinct ${label} ids`;
+  };
+
 const environmentVariable: OptionRule = (value) =>
   value.length <= 4096 ? undefined : "must be at most 4096 characters";
 
@@ -44,7 +52,13 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     options: {
       "@aws.S3": { keys: { versioning: oneOf("true", "false") } },
       "@aws.Lambda": {
-        keys: { tracing: oneOf("Active", "PassThrough"), ephemeral_storage_mb: integerBetween(512, 10240) },
+        keys: {
+          tracing: oneOf("Active", "PassThrough"),
+          ephemeral_storage_mb: integerBetween(512, 10240),
+          vpc: (v) => (v === "default" || /^vpc-[0-9a-f]{8,17}$/.test(v) ? undefined : 'must be "default" or a VPC id such as "vpc-0123456789abcdef0"'),
+          subnets: idList(/^subnet-[0-9a-f]{8,17}$/, 16, "subnet"),
+          security_groups: idList(/^sg-[0-9a-f]{8,17}$/, 5, "security group"),
+        },
         prefixes: { [ENV_OPTION_PREFIX]: environmentVariable },
       },
       "@aws.CloudFront": {
@@ -196,7 +210,12 @@ export function validateConfigOptions(config: CloudgearConfig): void {
       throw new Error(`${resource.type} "${resource.name}": shards only applies to provisioned mode`);
     }
   }
-  for (const fn of config.function) check(fn.type, fn.name, fn.options);
+  for (const fn of config.function) {
+    check(fn.type, fn.name, fn.options);
+    if (!fn.options?.vpc && (fn.options?.subnets || fn.options?.security_groups)) {
+      throw new Error(`${fn.type} "${fn.name}": subnets and security_groups need a vpc`);
+    }
+  }
   for (const certificate of config.certificate) check(capability(certificate.provider, "cdn").certificate, certificate.domain, certificate.options);
   for (const cdn of config.cdn) check(capability(cdn.provider, "cdn").type, cdn.domain, cdn.options);
   if (config.api?.via === "cloudfront") check(capability(config.api.provider, "cdn").type, config.api.domain, config.api.options);

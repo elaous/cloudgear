@@ -114,6 +114,8 @@ export interface FunctionRouterOptions {
   cert?: { readonly domain: string };
   // Literals only; read by generate.
   functionOptions?: ProviderOptions;
+  // Runs every function inside an existing VPC (see @cloudgear/network); read by generate.
+  network?: { readonly provider: string };
   // Tolerated unset variables; literal names, not required by generate.
   optionalEnv?: string[];
   env?: EnvOption | EnvOption[];

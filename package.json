@@ -33,6 +33,7 @@
     "@aws-sdk/client-acm": "^3.700.0",
     "@aws-sdk/client-apigatewayv2": "^3.1156.0",
     "@aws-sdk/client-cloudfront": "^3.1156.0",
+    "@aws-sdk/client-ecr": "^3.1156.0",
     "@aws-sdk/client-eventbridge": "^3.1156.0",
     "@aws-sdk/client-iam": "^3.700.0",
     "@aws-sdk/client-lambda": "^3.700.0",
@@ -49,6 +50,7 @@
     "@cloudgear/events": "workspace:*",
     "@cloudgear/functions": "workspace:*",
     "@cloudgear/iam": "workspace:*",
+    "@cloudgear/registry": "workspace:*",
     "@cloudgear/secrets": "workspace:*",
     "ts-morph": "^24.0.0"
   },

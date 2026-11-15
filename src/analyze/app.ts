@@ -15,6 +15,7 @@ import { assertPolicyDocument, assertPolicyName, broadStatements, type PolicyDoc
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { Database, type PostgresVersion } from "@cloudgear/database";
+import { Registry } from "@cloudgear/registry";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
@@ -160,6 +161,17 @@ export interface AnalyzedDatabase {
   line: number;
 }
 
+export interface AnalyzedRegistry {
+  name: string;
+  provider: string;
+  scanOnPush?: boolean;
+  immutableTags?: boolean;
+  keepUntaggedDays?: number | false;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
 export interface AppModel extends EdgeModel {
   provider: string;
   region?: string;
@@ -170,11 +182,13 @@ export interface AppModel extends EdgeModel {
   optionalEnv: string[];
   buses: AnalyzedBus[];
   databases: AnalyzedDatabase[];
+  registries: AnalyzedRegistry[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
 
 const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
+const REGISTRY_OPTIONS = ["scanOnPush", "immutableTags", "keepUntaggedDays", "allowDestroy"];
 const QUERY_NAME = /^[A-Za-z0-9_.:/-]+$/;
 const QUERY_VALUE = /^[A-Za-z0-9_.:/-]*$/;
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
@@ -340,6 +354,34 @@ function analyzeEntry(entryPath: string): AppModel {
     const declared = databases.get(name);
     if (declared) throw new Error(`${at}: Database "${name}" is also declared at ${declared.file}:${declared.line}; declare each database once`);
     databases.set(name, { name, provider, region, postgres, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  const registries = new Map<string, AnalyzedRegistry>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/registry", "Registry"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Registry provider`);
+    if (provider !== "aws") throw new Error(`${at}: Registry provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Registry name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !REGISTRY_OPTIONS.includes(key)) throw new Error(`${at}: unknown Registry option "${key}" (supported: ${REGISTRY_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Registry options`;
+    const scanOnPush = readBooleanOption(optionsArg, "scanOnPush", where_);
+    const immutableTags = readBooleanOption(optionsArg, "immutableTags", where_);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    const daysNode = optionValue(optionsArg, "keepUntaggedDays", where_);
+    const keepUntaggedDays = daysNode?.getKind() === SyntaxKind.FalseKeyword ? (false as const) : readNumberOption(optionsArg, "keepUntaggedDays", where_);
+    try {
+      new Registry(provider, name, { ...(scanOnPush !== undefined ? { scanOnPush } : {}), ...(immutableTags !== undefined ? { immutableTags } : {}), ...(keepUntaggedDays !== undefined ? { keepUntaggedDays } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = registries.get(name);
+    if (declared) throw new Error(`${at}: Registry "${name}" is also declared at ${declared.file}:${declared.line}; declare each repository once`);
+    registries.set(name, { name, provider, scanOnPush, immutableTags, keepUntaggedDays, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
   }
   const usedBuses = new Map<string, AnalyzedBus>();
   const useBus = (bus: AnalyzedBus, _at: string) => {
@@ -828,6 +870,7 @@ function analyzeEntry(entryPath: string): AppModel {
     optionalEnv: readOptionalEnv(router.getArguments()[1], `${where(router)}: FunctionRouter`),
     buses: [...usedBuses.values()],
     databases: [...databases.values()],
+    registries: [...registries.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };

@@ -1531,6 +1531,41 @@ The first argument after the provider is the Neon project name, used as is.
   retried, so a rate limit stops the command without side effects and you can
   run it again.
 
+## Image registries: `@cloudgear/registry`
+
+`Registry` declares a container image repository. Constructing it does nothing;
+`cloudgear apply` creates it, or adopts the one that already has the name. AWS
+(ECR) is the first provider.
+
+```ts
+import { Registry } from "@cloudgear/registry";
+
+new Registry("aws", "tranquilo/web", { immutableTags: true });
+```
+
+The second argument is the repository name, used as is (2-256 lowercase
+letters, digits, `.`, `_`, `-`, with `/` between words).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `scanOnPush` | `true` | Scan images for known vulnerabilities when pushed |
+| `immutableTags` | `false` | Forbid moving a tag to another image |
+| `keepUntaggedDays` | `14` | Expire untagged images after this many days (1-365); `false` leaves lifecycle policies alone |
+| `allowDestroy` | `false` | Lets `cloudgear destroy` delete the repository and every image in it |
+
+- **Adopt first:** an existing repository is adopted, and `apply` changes only
+  the settings that differ. `cloudgear import` reads it without changing
+  anything.
+- **Lifecycle policy:** cloudgear MUST NOT replace a lifecycle policy it did not
+  write. If the repository already has a different one, `apply` stops and tells
+  you to set `keepUntaggedDays: false` or delete that policy. Turning
+  `keepUntaggedDays` off removes only a policy cloudgear wrote.
+- **Destroy:** the repository is deleted only if the applied config had
+  `allowDestroy: true`, and `destroy` checks that before changing anything.
+  Deleting a repository deletes its images.
+- **Cost:** ECR charges for stored image data, so the untagged-image expiry is
+  on by default.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1744,6 +1779,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/dns` | `DNS` and its Gandi and Route 53 drivers |
 | `@cloudgear/events` | `EventBus` and `on` |
 | `@cloudgear/database` | `Database` (Neon) |
+| `@cloudgear/registry` | `Registry` (ECR) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -1786,6 +1822,8 @@ Where each moving part lives, since several are called across packages:
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
 | `Database` | `packages/database/index.ts` | apps; `src/analyze/app.ts` |
 | `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
+| `Registry` | `packages/registry/index.ts` | apps; `src/analyze/app.ts` |
+| ECR repository driver | `src/deploy/aws/ecr.ts` | `awsDrivers` |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |
 | EventBridge bus and rule deployers | `src/deploy/aws/eventbus.ts`, `schedule.ts` | `awsDrivers` |

@@ -17,6 +17,7 @@ export interface ProviderProfile {
   api?: { type: string };
   schedule?: { type: string };
   events?: { type: string; rule: string };
+  registry?: { type: string };
 }
 
 const oneOf =
@@ -48,6 +49,14 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       "@aws.CloudFront": {
         keys: { price_class: oneOf("PriceClass_100", "PriceClass_200", "PriceClass_All"), web_acl: (v) => (v === "true" || WEB_ACL_ARN.test(v) ? undefined : "must be true (keep the web ACL the distribution has) or a WAFv2 web ACL ARN in us-east-1 (arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>); only the aws partition is supported"), default_root_object: (v) => (/^(?!\/)(?!.*\.\.)[\w.\-/]*$/.test(v) ? undefined : "must be a relative object key") },
       },
+      "@aws.ECR": {
+        keys: {
+          scan_on_push: oneOf("true", "false"),
+          immutable_tags: oneOf("true", "false"),
+          keep_untagged_days: (v) => (v === "off" || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 365) ? undefined : 'must be an integer from 1 to 365, or "off"'),
+          allow_destroy: oneOf("true"),
+        },
+      },
       "@aws.Certificate": { keys: { key_algorithm: oneOf("RSA_2048", "EC_prime256v1", "EC_secp384r1") } },
     },
     reservedEnv: /^(AWS_|CLOUDGEAR_|LAMBDA_|NODE_OPTIONS$|_)/,
@@ -56,6 +65,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     api: { type: "@aws.ApiGateway" },
     schedule: { type: "@aws.Schedule" },
     events: { type: "@aws.EventBus", rule: "@aws.EventRule" },
+    registry: { type: "@aws.ECR" },
     blobStore: {
       type: "@aws.S3",
       actions: {
@@ -96,9 +106,9 @@ export function profileOfType(type: string): ProviderProfile {
   return providerProfile(providerOfType(type));
 }
 
-export function capability<K extends "cdn" | "api" | "schedule" | "events">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
+export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
   const found = providerProfile(provider)[name];
-  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : "schedules"} yet`);
+  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : "schedules"} yet`);
   return found as NonNullable<ProviderProfile[K]>;
 }
 

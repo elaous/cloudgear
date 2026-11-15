@@ -209,6 +209,21 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         options: undefined,
       })),
     ).concat(
+      model.registries.map((registry) => ({
+        name: `registry.${registry.name}`,
+        type: capability(registry.provider, "registry").type,
+        physical_name: registry.name,
+        dry: false,
+        source: `${fromConfig(registry.file)}:${registry.line}`,
+        region: undefined,
+        options: {
+          ...(registry.scanOnPush !== undefined ? { scan_on_push: String(registry.scanOnPush) } : {}),
+          ...(registry.immutableTags !== undefined ? { immutable_tags: String(registry.immutableTags) } : {}),
+          ...(registry.keepUntaggedDays !== undefined ? { keep_untagged_days: registry.keepUntaggedDays === false ? "off" : String(registry.keepUntaggedDays) } : {}),
+          ...(registry.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
       model.databases.map((db) => ({
         name: `db.${db.name}`,
         type: `@${db.provider}.Database`,

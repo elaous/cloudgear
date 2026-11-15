@@ -33,6 +33,7 @@ import { createHash } from "node:crypto";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
+import { ECRClient } from "@aws-sdk/client-ecr";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
@@ -51,6 +52,7 @@ import { certificateDriver } from "./certificate";
 import { apiGatewayDriver } from "./apigateway";
 import { cloudFrontDriver } from "./cloudfront";
 import { scheduleDriver } from "./schedule";
+import { ecrDriver } from "./ecr";
 import { eventBusDriver, eventRuleDriver } from "./eventbus";
 
 export interface SendClient {
@@ -61,7 +63,7 @@ export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
   readIncluded?: (fn: FunctionSpec) => { name: string; data: Uint8Array }[];
-  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient };
+  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient; ecr?: SendClient };
   // Entry's own zone, so removals still clean up.
   dns?: (provider: string, zone: string, token?: SecretRefSpec) => DnsDriver | Promise<DnsDriver>;
   // Also tags each resource with its logical name.
@@ -111,6 +113,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   // CloudFront's API is global, reached through us-east-1.
   const cloudfront = withDebug("cloudfront", options.clients?.cloudfront ?? new CloudFrontClient({ region: "us-east-1" }));
   const apigateway = withDebug("apigateway", options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region }));
+  const ecr = withDebug("ecr", options.clients?.ecr ?? new ECRClient({ region: options.region }));
   const events = withDebug("events", options.clients?.events ?? new EventBridgeClient({ region: options.region }));
   const zones = new Map<string, Promise<DnsDriver>>();
   const requireDns = (provider: string, zone: string, token?: SecretRefSpec): Promise<DnsDriver> => {
@@ -342,6 +345,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   return {
     "@aws.Schedule": scheduleDriver({ events, lambda, log, tags: tagger }),
     "@aws.EventBus": eventBusDriver({ events, lambda, log, tags: tagger }),
+    "@aws.ECR": ecrDriver({ ecr, log, tags: tagger }),
     "@aws.EventRule": eventRuleDriver({ events, lambda, log, tags: tagger }),
     "@aws.Certificate": certificateDriver({ tags: tagger, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
     "@aws.CloudFront": cloudFrontDriver({ tags: tagger, cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Network } from "@cloudgear/network";
 import { analyzeApp } from "../src/analyze/app";
+import { adoptEntries } from "../src/deploy/adopt";
 import { apply } from "../src/deploy/apply";
 import { plan } from "../src/deploy/plan";
 import { stateKey } from "../src/deploy/state";
@@ -39,6 +40,19 @@ describe("analysis", () => {
     expect((await run("default")).map((f) => f.options)).toEqual([{ vpc: "default" }, { vpc: "default" }]);
     expect((await run("explicit")).map((f) => f.options)).toEqual([{ vpc: "vpc-0abc1234", subnets: "subnet-aaaa1111,subnet-bbbb2222", security_groups: "sg-0def4001" }]);
     expect((await run("none")).map((f) => f.options)).toEqual([undefined]);
+  });
+
+  test("an inline Network, a cast, and an id from the environment all resolve", () => {
+    const options = (name: string, env?: Record<string, string>) => analyzeApp(fixture(name), env).functions[0]!.options;
+    expect(options("inline")).toEqual({ vpc: "vpc-0abc1234" });
+    expect(options("as-cast")).toEqual({ vpc: "default" });
+    expect(options("env", { VPC_ID: "vpc-0abc5678" })).toEqual({ vpc: "vpc-0abc5678" });
+    expect(() => options("env", {})).toThrow(/environment variable VPC_ID is unset or empty/);
+  });
+
+  test("a reassignable variable and a route that overrides the network are errors", () => {
+    expect(() => analyzeApp(fixture("let"))).toThrow(/network must be a Network declared in your project/);
+    expect(() => analyzeApp(fixture("route-override"))).toThrow(/route options of "ping" set vpc, which the router's network already sets/);
   });
 
   test("a clash, a non-Network value, a bad id and an unknown option are errors", () => {
@@ -141,6 +155,126 @@ describe("lambda driver", () => {
     const next = plan(configWith({ vpc: "default" }), state).find((a) => a.type === "@aws.Lambda")!;
     expect(next.op).toBe("update");
     expect(next.changes).toContain("config");
+  });
+});
+
+const FUNCTION_ARN = "arn:aws:lambda:eu-west-1:1:function:app-foo";
+const inVpc = (role: string) => ({
+  GetFunctionCommand: () => ({ Configuration: { FunctionArn: FUNCTION_ARN, Role: `arn:aws:iam::1:role/${role}`, VpcConfig: { VpcId: "vpc-0abc1234", SubnetIds: ["subnet-aaaa1111"], SecurityGroupIds: ["sg-0def4001"] } } }),
+});
+const isFunction = (a: { type: string }) => a.type === "@aws.Lambda";
+const policyCalls = (calls: { name: string; input: any }[], name: string) => calls.filter((c) => c.name === name && c.input.PolicyArn === VPC_POLICY);
+
+describe("imported functions", () => {
+  test("import records the VPC a function runs in, and apply without a network takes it out", async () => {
+    const aws = fakeAws(inVpc("shared-role"));
+    const state = emptyState();
+    const adopted = await adoptEntries(plan(configWith(), state), state, aws.drivers, isFunction);
+    expect(adopted.notes.join(" ")).toMatch(/runs in VPC vpc-0abc1234, and will be taken out of it/);
+    expect(state.entries[KEY]!.outputs).toMatchObject({ vpc_id: "vpc-0abc1234", subnet_ids: "subnet-aaaa1111", security_group_ids: "sg-0def4001" });
+
+    const before = aws.calls.length;
+    await apply(plan(configWith(), state), state, aws.drivers, { save: () => {} });
+    const after = aws.calls.slice(before);
+    expect(after.find((c) => c.name === "UpdateFunctionConfigurationCommand")!.input).toMatchObject({ VpcConfig: { SubnetIds: [], SecurityGroupIds: [] } });
+    expect(policyCalls(after, "DetachRolePolicyCommand")).toEqual([]);
+    expect(state.entries[KEY]!.outputs.vpc_id).toBe("");
+  });
+
+  test("moving an imported function to another VPC gives its role the policy and keeps it", async () => {
+    const aws = fakeAws(inVpc("shared-role"));
+    const state = emptyState();
+    await adoptEntries(plan(configWith(), state), state, aws.drivers, isFunction);
+    const before = aws.calls.length;
+    await apply(plan(configWith({ vpc: "vpc-0abc5678" }), state), state, aws.drivers, { save: () => {} });
+    const after = aws.calls.slice(before);
+    expect(after.find((c) => c.name === "UpdateFunctionConfigurationCommand")!.input).toMatchObject({ VpcConfig: { SecurityGroupIds: ["sg-0def4001"] } });
+    expect(policyCalls(after, "AttachRolePolicyCommand")).toHaveLength(0);
+    await apply(plan(configWith(), state), state, aws.drivers, { save: () => {} });
+    expect(policyCalls(aws.calls, "DetachRolePolicyCommand")).toEqual([]);
+  });
+});
+
+describe("failures and edge cases", () => {
+  test("a failed update leaves no VPC policy on a role cloudgear created, and none is touched on an imported one", async () => {
+    const own = fakeAws({ UpdateFunctionConfigurationCommand: () => { throw new Error("no free IP addresses in the subnet"); } });
+    const state = emptyState();
+    const ok = fakeAws();
+    await applyAll(configWith(), state, ok);
+    const before = own.calls.length;
+    await expect(apply(plan(configWith({ vpc: "default" }), state), state, own.drivers, { save: () => {} })).rejects.toThrow(/no free IP addresses/);
+    const after = own.calls.slice(before);
+    expect(policyCalls(after, "AttachRolePolicyCommand")).toHaveLength(1);
+    expect(policyCalls(after, "DetachRolePolicyCommand")).toHaveLength(1);
+    expect(state.entries[KEY]!.spec.options).toBeUndefined();
+  });
+
+  test("a role that lacks any network permission yet is retried", async () => {
+    const aws = fakeAws({
+      UpdateFunctionConfigurationCommand: (_input, attempt) => {
+        if (attempt < 2) throw new Error("The provided execution role does not have permissions to call DescribeNetworkInterfaces on EC2");
+        return {};
+      },
+    });
+    const state = emptyState();
+    await applyAll(configWith(), state, fakeAws());
+    await apply(plan(configWith({ vpc: "default" }), state), state, aws.drivers, { save: () => {} });
+    expect(aws.of("UpdateFunctionConfigurationCommand")).toHaveLength(3);
+  });
+
+  test("changing from one VPC to another is a configuration update with the new network", async () => {
+    const aws = fakeAws();
+    const state = emptyState();
+    await applyAll(configWith({ vpc: "vpc-0abc1234" }), state, aws);
+    const before = aws.calls.length;
+    await apply(plan(configWith({ vpc: "vpc-0abc5678" }), state), state, aws.drivers, { save: () => {} });
+    const after = aws.calls.slice(before);
+    expect(after.find((c) => c.name === "DescribeVpcsCommand")!.input).toEqual({ VpcIds: ["vpc-0abc5678"] });
+    expect(state.entries[KEY]!.outputs.vpc_id).toBe("vpc-0abc5678");
+    expect(policyCalls(after, "AttachRolePolicyCommand")).toHaveLength(0);
+  });
+
+  test("a plain function's delete makes no VPC policy call", async () => {
+    const aws = fakeAws();
+    const state = emptyState();
+    await applyAll(configWith(), state, aws);
+    const before = aws.calls.length;
+    await apply(plan(baseConfig({ function: [] }), state), state, aws.drivers, { save: () => {} });
+    expect(policyCalls(aws.calls.slice(before), "DetachRolePolicyCommand")).toEqual([]);
+  });
+
+  test("default subnets skip unusable ones and prefer the most free addresses in each zone", async () => {
+    const aws = fakeAws({
+      DescribeSubnetsCommand: () => ({
+        Subnets: [
+          { SubnetId: "subnet-aaaa0001", AvailabilityZone: "eu-west-1a", State: "available", AvailableIpAddressCount: 5 },
+          { SubnetId: "subnet-aaaa0002", AvailabilityZone: "eu-west-1a", State: "available", AvailableIpAddressCount: 200 },
+          { SubnetId: "subnet-bbbb0001", AvailabilityZone: "eu-west-1b", State: "pending", AvailableIpAddressCount: 300 },
+          { SubnetId: "subnet-bbbb0002", AvailabilityZone: "eu-west-1b", State: "available", Ipv6Native: true, AvailableIpAddressCount: 300 },
+          { SubnetId: "subnet-cccc0001", AvailabilityZone: "eu-west-1c", State: "available", AvailableIpAddressCount: 50 },
+          { SubnetId: "subnet-dddd0001", AvailabilityZone: "eu-west-1-lax-1a", State: "available", AvailableIpAddressCount: 900 },
+        ],
+      }),
+    });
+    await applyAll(configWith({ vpc: "default" }), emptyState(), aws);
+    expect(aws.of("CreateFunctionCommand")[0].VpcConfig.SubnetIds).toEqual(["subnet-aaaa0002", "subnet-cccc0001"]);
+    expect(aws.logs.some((m) => /functions will use subnets subnet-aaaa0002, subnet-cccc0001/.test(m))).toBe(true);
+
+    const none = fakeAws({ DescribeSubnetsCommand: () => ({ Subnets: [{ SubnetId: "subnet-aaaa0001", AvailabilityZone: "eu-west-1a", State: "pending" }] }) });
+    await expect(applyAll(configWith({ vpc: "default" }), emptyState(), none)).rejects.toThrow(/no subnet Lambda can use/);
+  });
+
+  test("EC2 not-found errors become plain messages and nothing is created", async () => {
+    const named = (name: string) => () => {
+      throw Object.assign(new Error(name), { name });
+    };
+    const vpc = fakeAws({ DescribeVpcsCommand: named("InvalidVpcID.NotFound") });
+    await expect(applyAll(configWith({ vpc: "vpc-0abc1234" }), emptyState(), vpc)).rejects.toThrow(/VPC vpc-0abc1234 was not found in eu-west-1/);
+    const subnet = fakeAws({ DescribeSubnetsCommand: named("InvalidSubnetID.NotFound") });
+    await expect(applyAll(configWith({ vpc: "vpc-0abc1234", subnets: "subnet-aaaa1111" }), emptyState(), subnet)).rejects.toThrow(/Subnets subnet-aaaa1111 were not found in VPC vpc-0abc1234/);
+    const group = fakeAws({ DescribeSecurityGroupsCommand: named("InvalidGroup.NotFound") });
+    await expect(applyAll(configWith({ vpc: "vpc-0abc1234", security_groups: "sg-0def4001" }), emptyState(), group)).rejects.toThrow(/Security groups sg-0def4001 were not found/);
+    for (const aws of [vpc, subnet, group]) expect(aws.names()).not.toContain("CreateRoleCommand");
   });
 });
 

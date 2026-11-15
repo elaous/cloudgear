@@ -131,8 +131,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   };
   const log = options.log ?? (() => {});
 
-  async function waitForFunction(name: string) {
-    for (let attempt = 0; attempt < 60; attempt++) {
+  // A function that joins a VPC stays pending while Lambda creates its network interfaces.
+  async function waitForFunction(name: string, attempts = 60) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const config = await lambda.send(new GetFunctionConfigurationCommand({ FunctionName: name }));
       if (config.State === "Failed" || config.LastUpdateStatus === "Failed") {
         throw new Error(`Lambda ${name} failed: ${config.StateReason ?? config.LastUpdateStatusReason}`);
@@ -348,35 +349,55 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     securityGroupIds: string[];
   }
 
+  const notFound = (err: unknown, prefix: string): boolean => ((err as { name?: string }).name ?? "").startsWith(prefix);
+
   // Looks the VPC up so a wrong id fails before anything is created.
   async function networkFor(spec: FunctionComparable): Promise<ResolvedNetwork | undefined> {
     const wanted = spec.options?.vpc;
     if (!wanted) return undefined;
-    const vpcs = (await ec2.send(new DescribeVpcsCommand(wanted === "default" ? { Filters: [{ Name: "is-default", Values: ["true"] }] } : { VpcIds: [wanted] }))).Vpcs ?? [];
-    const vpcId = vpcs[0]?.VpcId as string | undefined;
+    let vpcs: { VpcId?: string }[];
+    try {
+      vpcs = (await ec2.send(new DescribeVpcsCommand(wanted === "default" ? { Filters: [{ Name: "is-default", Values: ["true"] }] } : { VpcIds: [wanted] }))).Vpcs ?? [];
+    } catch (err) {
+      if (!notFound(err, "InvalidVpcID")) throw err;
+      vpcs = [];
+    }
+    const vpcId = vpcs[0]?.VpcId;
     if (!vpcId) {
       throw new Error(wanted === "default" ? `There is no default VPC in ${options.region}; declare new Network("aws", { vpc: "vpc-..." }) and pass it as the router's network` : `VPC ${wanted} was not found in ${options.region}`);
     }
     const given = spec.options?.subnets?.split(",");
-    const subnets = (await ec2.send(new DescribeSubnetsCommand({ Filters: [{ Name: "vpc-id", Values: [vpcId] }], ...(given ? { SubnetIds: given } : {}) }))).Subnets ?? [];
-    const missing = (given ?? []).filter((id) => !subnets.some((subnet: { SubnetId?: string }) => subnet.SubnetId === id));
-    if (missing.length) throw new Error(`Subnets ${missing.join(", ")} are not in VPC ${vpcId}`);
-    if (!subnets.length) throw new Error(`VPC ${vpcId} has no subnets`);
-    // One subnet per availability zone, so the function survives losing a zone.
-    const ordered = [...subnets].sort((x: { SubnetId: string }, y: { SubnetId: string }) => (x.SubnetId < y.SubnetId ? -1 : 1));
-    const perZone = new Map<string, string>();
-    for (const subnet of ordered) {
-      const zone = (subnet as { AvailabilityZone?: string }).AvailabilityZone ?? subnet.SubnetId;
-      if (!perZone.has(zone)) perZone.set(zone, subnet.SubnetId);
+    let subnets: { SubnetId: string; AvailabilityZone?: string; State?: string; Ipv6Native?: boolean; AvailableIpAddressCount?: number }[];
+    try {
+      subnets = (await ec2.send(new DescribeSubnetsCommand({ Filters: [{ Name: "vpc-id", Values: [vpcId] }], ...(given ? { SubnetIds: given } : {}) }))).Subnets ?? [];
+    } catch (err) {
+      if (!given || !notFound(err, "InvalidSubnetID")) throw err;
+      throw new Error(`Subnets ${given.join(", ")} were not found in VPC ${vpcId}`);
     }
-    const subnetIds: string[] = given ? ordered.map((subnet: { SubnetId: string }) => subnet.SubnetId) : [...perZone.values()];
+    const missing = (given ?? []).filter((id) => !subnets.some((subnet) => subnet.SubnetId === id));
+    if (missing.length) throw new Error(`Subnets ${missing.join(", ")} are not in VPC ${vpcId}`);
+    // Without a choice: ordinary availability zones only, one subnet each, the one with the most free addresses.
+    const usable = subnets.filter((subnet) => subnet.State !== "pending" && !subnet.Ipv6Native && /^[a-z]{2}(-[a-z]+)+-\d[a-z]$/.test(subnet.AvailabilityZone ?? ""));
+    const perZone = new Map<string, (typeof usable)[number]>();
+    for (const subnet of [...usable].sort((x, y) => (y.AvailableIpAddressCount ?? 0) - (x.AvailableIpAddressCount ?? 0) || (x.SubnetId < y.SubnetId ? -1 : 1))) {
+      if (!perZone.has(subnet.AvailabilityZone!)) perZone.set(subnet.AvailabilityZone!, subnet);
+    }
+    const subnetIds = given ? [...given] : [...perZone.values()].map((subnet) => subnet.SubnetId).sort();
+    if (!subnetIds.length) throw new Error(`VPC ${vpcId} has no subnet Lambda can use; name subnets with the network's subnets option`);
+    if (!given) log(`functions will use subnets ${subnetIds.join(", ")} of ${vpcId}; name subnets in the network to choose others`);
     const groups = spec.options?.security_groups?.split(",");
-    const found = (await ec2.send(new DescribeSecurityGroupsCommand({ Filters: [{ Name: "vpc-id", Values: [vpcId] }, ...(groups ? [{ Name: "group-id", Values: groups }] : [{ Name: "group-name", Values: ["default"] }])] }))).SecurityGroups ?? [];
-    const groupIds: string[] = found.map((group: { GroupId: string }) => group.GroupId);
+    let found: { GroupId: string }[];
+    try {
+      found = (await ec2.send(new DescribeSecurityGroupsCommand({ Filters: [{ Name: "vpc-id", Values: [vpcId] }, ...(groups ? [{ Name: "group-id", Values: groups }] : [{ Name: "group-name", Values: ["default"] }])] }))).SecurityGroups ?? [];
+    } catch (err) {
+      if (!groups || !notFound(err, "InvalidGroup")) throw err;
+      throw new Error(`Security groups ${groups.join(", ")} were not found in VPC ${vpcId}`);
+    }
+    const groupIds = found.map((group) => group.GroupId);
     if (groups ? groups.some((id) => !groupIds.includes(id)) : !groupIds.length) {
       throw new Error(groups ? `Security groups ${groups.filter((id) => !groupIds.includes(id)).join(", ")} are not in VPC ${vpcId}` : `VPC ${vpcId} has no default security group; pass securityGroups`);
     }
-    return { vpcId, subnetIds, securityGroupIds: groupIds };
+    return { vpcId, subnetIds, securityGroupIds: groups ? [...groups] : groupIds };
   }
 
   const vpcConfig = (network: ResolvedNetwork | undefined, wasInVpc: boolean) =>
@@ -525,12 +546,12 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               );
               break;
             } catch (err) {
-              if (attempt >= 10 || !/cannot be assumed|CreateNetworkInterface/i.test((err as Error).message)) throw err;
+              if (attempt >= 10 || !/cannot be assumed|does not have permissions to call \w+ on EC2/i.test((err as Error).message)) throw err;
               await sleep(3000);
             }
           }
           undo.push(() => lambda.send(new DeleteFunctionCommand({ FunctionName: entry.physical_name })));
-          await waitForFunction(entry.physical_name);
+          await waitForFunction(entry.physical_name, network ? 150 : 60);
 
           const routed = (entry.source as FunctionSpec).route.length > 0;
           const url = routed
@@ -560,7 +581,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         }
         try {
           const found = await lambda.send(new GetFunctionCommand({ FunctionName: entry.physical_name }));
-          const config = found.Configuration as { FunctionArn?: string; Role?: string; PackageType?: string; Handler?: string; Environment?: { Variables?: Record<string, string> } } | undefined;
+          const config = found.Configuration as { FunctionArn?: string; Role?: string; PackageType?: string; Handler?: string; Environment?: { Variables?: Record<string, string> }; VpcConfig?: { VpcId?: string; SubnetIds?: string[]; SecurityGroupIds?: string[] } } | undefined;
           if (!config?.FunctionArn) return undefined;
           if (hint?.arn && parseArn(config.FunctionArn)?.account !== parseArn(hint.arn)?.account) throw new Error(`${hint.arn} is in another account than the function that was found (${config.FunctionArn})`);
           if (config.PackageType === "Image") throw new Error(`function "${entry.physical_name}" is a container image; cloudgear deploys zip bundles and cannot manage it`);
@@ -576,6 +597,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (extra.length) notes.push(`its environment variables not in the config will be removed: ${extra.sort().join(", ")}`);
           if (config.Handler && config.Handler !== "index.handler") notes.push(`its handler "${config.Handler}" will become index.handler, and its code is replaced by the bundle`);
           if ((spec.policies ?? []).length) notes.push(`the policies declared for it (${spec.policies!.map((p) => p.name).join(", ")}) are put on role ${config.Role?.split("/").at(-1) ?? "its role"} by name, overwriting a policy of that name already there, and are removed again if they leave the code`);
+          const liveVpc = config.VpcConfig?.VpcId ? config.VpcConfig : undefined;
+          if (liveVpc && !spec.options?.vpc) notes.push(`it runs in VPC ${liveVpc.VpcId}, and will be taken out of it because the config has no network`);
           const concurrency = (found as { Concurrency?: { ReservedConcurrentExecutions?: number } }).Concurrency?.ReservedConcurrentExecutions;
           const roleName = config.Role?.split("/").at(-1);
           let files: { path: string; content: string }[] | undefined;
@@ -597,6 +620,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
               arn: config.FunctionArn,
               ...(config.Role ? { role_arn: config.Role, role_name: config.Role.split("/").at(-1)! } : {}),
               ...(url?.FunctionUrl ? { url: url.FunctionUrl } : {}),
+              ...(liveVpc ? { vpc_id: liveVpc.VpcId!, subnet_ids: (liveVpc.SubnetIds ?? []).join(","), security_group_ids: (liveVpc.SecurityGroupIds ?? []).join(",") } : {}),
             },
             spec: { reserved_concurrency: concurrency ?? 0, ...(url?.AuthType ? { auth: url.AuthType === "NONE" ? "none" : "iam" } : {}) },
             notes,
@@ -619,38 +643,43 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           await waitForFunction(entry.physical_name);
         }
         if (changes.includes("config")) {
-          const wasInVpc = !!(current.spec.options as Record<string, string> | undefined)?.vpc;
+          const wasInVpc = !!(current.spec.options as Record<string, string> | undefined)?.vpc || !!current.outputs.vpc_id;
           const network = await networkFor(spec);
-          if (network && !wasInVpc) {
-            await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: VPC_ACCESS_POLICY }));
-            // A new policy takes seconds to apply; the update below retries until Lambda accepts the role.
-          }
-          for (let attempt = 0; ; attempt++) {
-            try {
-              await lambda.send(
-                new UpdateFunctionConfigurationCommand({
-                  FunctionName: entry.physical_name,
-                  Runtime: spec.runtime as any,
-                  Handler: "index.handler",
-                  MemorySize: spec.memory_mb,
-                  Timeout: spec.timeout_s,
-                  Environment: environment(spec),
-                  ...lambdaOptions(spec),
-                  ...vpcConfig(network, wasInVpc),
-                }),
-              );
-              break;
-            } catch (err) {
-              if (attempt >= 10 || !/CreateNetworkInterface/i.test((err as Error).message)) throw err;
-              await sleep(3000);
+          const ownRole = roleName === roleNameFor(entry.physical_name);
+          const attachedNow = !!network && !wasInVpc;
+          // The role needs network permissions first, imported or not; Lambda accepts it a few seconds later.
+          if (attachedNow) await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: VPC_ACCESS_POLICY }));
+          try {
+            for (let attempt = 0; ; attempt++) {
+              try {
+                await lambda.send(
+                  new UpdateFunctionConfigurationCommand({
+                    FunctionName: entry.physical_name,
+                    Runtime: spec.runtime as any,
+                    Handler: "index.handler",
+                    MemorySize: spec.memory_mb,
+                    Timeout: spec.timeout_s,
+                    Environment: environment(spec),
+                    ...lambdaOptions(spec),
+                    ...vpcConfig(network, wasInVpc),
+                  }),
+                );
+                break;
+              } catch (err) {
+                if (attempt >= 10 || !/does not have permissions to call \w+ on EC2/i.test((err as Error).message)) throw err;
+                await sleep(3000);
+              }
             }
+            await waitForFunction(entry.physical_name, network || wasInVpc ? 150 : 60);
+          } catch (err) {
+            // Leave a role cloudgear created as it was; a shared imported role is not touched.
+            if (attachedNow && ownRole) await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: VPC_ACCESS_POLICY })), "NoSuchEntity");
+            throw err;
           }
-          await waitForFunction(entry.physical_name);
-          // Imported roles may be shared; leave their policies in place.
-          if (!network && wasInVpc && roleName === roleNameFor(entry.physical_name)) {
+          if (!network && wasInVpc && ownRole) {
             await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: VPC_ACCESS_POLICY })), "NoSuchEntity");
           }
-          vpcOutputs = networkOutputs(network);
+          if (network || wasInVpc) vpcOutputs = networkOutputs(network);
           const previous = Number(current.spec.reserved_concurrency ?? 0);
           if (spec.reserved_concurrency !== previous) await setConcurrency(entry.physical_name, spec.reserved_concurrency);
         }
@@ -697,7 +726,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         // Imported roles may be shared; leave them in place.
         if (roleName !== roleNameFor(current.physical_name)) return;
         await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: BASIC_EXECUTION_POLICY })), "NoSuchEntity");
-        await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: VPC_ACCESS_POLICY })), "NoSuchEntity");
+        if (current.outputs.vpc_id || (current.spec.options as Record<string, string> | undefined)?.vpc) {
+          await ignore(iam.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: VPC_ACCESS_POLICY })), "NoSuchEntity");
+        }
         await ignore(iam.send(new DeleteRoleCommand({ RoleName: roleName })), "NoSuchEntity");
       },
     },

@@ -1647,22 +1647,38 @@ new FunctionRouter("aws", { authenticated: "iam", network }).url("GET", "/items"
 outside any VPC, as before.
 
 - **No outbound internet.** A Lambda in a VPC cannot reach the internet, or AWS
-  services without an endpoint, unless the VPC has a NAT gateway or VPC
-  endpoints. cloudgear MUST NOT create them. Check that every function on the
-  router can live without outbound calls before you set `network`; a NAT
-  gateway costs roughly $33 a month, so check current AWS pricing.
+  services without an endpoint, unless its subnets route through a NAT gateway
+  or the VPC has endpoints. The default VPC has only public subnets, and a
+  Lambda there still has no internet, even if a NAT gateway exists; you need
+  private subnets routed to one, named with `subnets`. cloudgear MUST NOT
+  create any of this. Check that every function on the router can live without
+  outbound calls before you set `network`. A NAT gateway is per availability
+  zone and costs roughly $33 a month each before traffic; check current AWS
+  pricing.
 - **Default security group.** The VPC's default security group lets its members
   reach each other, which is what a cache or database in the same group needs.
   If you changed it, name your own with `securityGroups`.
 - **What `apply` does.** It looks the VPC, subnets and groups up first, so a
   wrong id fails before anything is created. It then sets the function's VPC
-  configuration and attaches `AWSLambdaVPCAccessExecutionRole` to the role it
-  created. Removing `network` clears the configuration and detaches that
-  policy from roles cloudgear created; imported roles keep it.
+  configuration and attaches `AWSLambdaVPCAccessExecutionRole` to the
+  function's role, which Lambda needs; that includes an imported role. Removing
+  `network` clears the configuration and detaches that policy only from roles
+  cloudgear created. A route's own `options` MUST NOT set `vpc`, `subnets` or
+  `security_groups` when the router has a `network`.
+- **Subnets.** Without `subnets`, cloudgear takes one subnet per ordinary
+  availability zone, the one with the most free addresses, and logs which. In a
+  VPC that mixes public and private subnets that choice is arbitrary, so name
+  the subnets you want.
+- **Later applies.** `apply` looks the network up again whenever a function's
+  configuration changes, so a subnet or security group added since the last
+  apply can change the function's VPC configuration without the plan showing
+  it.
 - **Permissions.** The deploying identity needs `ec2:DescribeVpcs`,
-  `ec2:DescribeSubnets` and `ec2:DescribeSecurityGroups`.
-- **Limits.** The network is router-wide. `cloudgear import` does not read an
-  imported function's VPC configuration. After a function in a VPC is deleted,
+  `ec2:DescribeSubnets` and `ec2:DescribeSecurityGroups`, and
+  `iam:AttachRolePolicy` and `iam:DetachRolePolicy` for the VPC access policy.
+- **Limits.** The network is router-wide. `cloudgear import` records the VPC
+  an imported function runs in; if the config has no `network`, `apply` takes it
+  out of that VPC. After a function in a VPC is deleted,
   AWS can hold its network interfaces for a while, which delays deleting the
   subnets or groups it used.
 

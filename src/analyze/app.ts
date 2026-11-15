@@ -759,7 +759,9 @@ function analyzeEntry(entryPath: string): AppModel {
     if (expr && Node.isIdentifier(expr)) {
       const symbol = Node.isShorthandPropertyAssignment(prop) ? prop.getValueSymbol() : expr.getSymbol();
       const decl = resolveSymbol(symbol)?.getDeclarations()[0];
-      expr = decl && Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
+      const constant = decl && Node.isVariableDeclaration(decl) && decl.getVariableStatement()?.getDeclarationKind() === "const";
+      const init = constant ? decl.getInitializer() : undefined;
+      expr = init && unwrapLiteral(init);
     }
     if (!expr || !Node.isNewExpression(expr) || !isClass(expr, "@cloudgear/network", "Network")) {
       throw new Error(`${at}: network must be a Network declared in your project (const vpc = new Network("aws", { vpc: "vpc-..." }))`);
@@ -812,11 +814,9 @@ function analyzeEntry(entryPath: string): AppModel {
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerSecrets = readEnvOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerPolicies = readPolicyOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
-  const routerFunctionOptions = mergeNetwork(
-    readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`),
-    readNetworkOption(router.getArguments()[1], where(router)),
-    where(router),
-  );
+  const routerNetwork = readNetworkOption(router.getArguments()[1], where(router));
+  const routerNetworkKeys = Object.keys(routerNetwork);
+  const routerFunctionOptions = mergeNetwork(readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`), routerNetwork, where(router));
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
   const responseKindOf = (prop: Node): "helper" | "writer" | undefined => {
@@ -914,6 +914,8 @@ function analyzeEntry(entryPath: string): AppModel {
   for (const fn of functions.values()) {
     fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
     fn.policies = uniquePolicies([...routerPolicies, ...fn.policies]);
+    const overridden = routerNetworkKeys.find((key) => fn.options?.[key] !== undefined);
+    if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router's network already sets; change the network instead`);
     const merged = { ...routerFunctionOptions, ...fn.options };
     fn.options = Object.keys(merged).length ? merged : undefined;
   }

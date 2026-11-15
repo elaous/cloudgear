@@ -15,6 +15,7 @@ import { assertPolicyDocument, assertPolicyName, broadStatements, type PolicyDoc
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { Database, type PostgresVersion } from "@cloudgear/database";
+import { Network } from "@cloudgear/network";
 import { Registry } from "@cloudgear/registry";
 import { Stream, type StreamMode } from "@cloudgear/stream";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
@@ -200,6 +201,7 @@ export interface AppModel extends EdgeModel {
   warnings: string[];
 }
 
+const NETWORK_OPTIONS = ["vpc", "subnets", "securityGroups"];
 const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
 const STREAM_OPTIONS = ["mode", "shards", "retentionHours", "allowDestroy"];
 const REGISTRY_OPTIONS = ["scanOnPush", "immutableTags", "keepUntaggedDays", "allowDestroy"];
@@ -747,6 +749,42 @@ function analyzeEntry(entryPath: string): AppModel {
     return ref;
   }
 
+  // `network: vpc` where vpc is a `new Network(...)`; becomes the function options vpc, subnets and security_groups.
+  function readNetworkOption(options: Node | undefined, at: string): Record<string, string> {
+    if (!options || !Node.isObjectLiteralExpression(options)) return {};
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "network");
+    if (!prop) return {};
+    const named = Node.isPropertyAssignment(prop) ? prop.getInitializer() : Node.isShorthandPropertyAssignment(prop) ? prop.getNameNode() : undefined;
+    let expr = named && unwrapLiteral(named);
+    if (expr && Node.isIdentifier(expr)) {
+      const symbol = Node.isShorthandPropertyAssignment(prop) ? prop.getValueSymbol() : expr.getSymbol();
+      const decl = resolveSymbol(symbol)?.getDeclarations()[0];
+      expr = decl && Node.isVariableDeclaration(decl) ? decl.getInitializer() : undefined;
+    }
+    if (!expr || !Node.isNewExpression(expr) || !isClass(expr, "@cloudgear/network", "Network")) {
+      throw new Error(`${at}: network must be a Network declared in your project (const vpc = new Network("aws", { vpc: "vpc-..." }))`);
+    }
+    const here = `${where(expr)}: Network`;
+    const [providerArg, networkOptions] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${here} provider`);
+    if (provider !== "aws") throw new Error(`${here} provider must be "aws"`);
+    if (networkOptions && Node.isObjectLiteralExpression(networkOptions)) {
+      for (const p of networkOptions.getProperties()) {
+        const key = Node.isSpreadAssignment(p) ? undefined : propName(p);
+        if (key !== undefined && !NETWORK_OPTIONS.includes(key)) throw new Error(`${here}: unknown option "${key}" (supported: ${NETWORK_OPTIONS.join(", ")})`);
+      }
+    }
+    const vpc = readStringOption(networkOptions, "vpc", `${here} options`);
+    const subnets = readStringArrayOption(networkOptions, "subnets", `${here} options`);
+    const securityGroups = readStringArrayOption(networkOptions, "securityGroups", `${here} options`);
+    try {
+      new Network(provider, { ...(vpc !== undefined ? { vpc } : {}), ...(subnets ? { subnets } : {}), ...(securityGroups ? { securityGroups } : {}) });
+    } catch (err) {
+      throw new Error(`${here}: ${(err as Error).message}`);
+    }
+    return { vpc: vpc ?? "default", ...(subnets ? { subnets: subnets.join(",") } : {}), ...(securityGroups ? { security_groups: securityGroups.join(",") } : {}) };
+  }
+
   function readEnvOption(options: Node | undefined, at: string): SecretBindingModel[] {
     if (!options || !Node.isObjectLiteralExpression(options)) return [];
     const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "env");
@@ -774,7 +812,11 @@ function analyzeEntry(entryPath: string): AppModel {
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerSecrets = readEnvOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerPolicies = readPolicyOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
-  const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
+  const routerFunctionOptions = mergeNetwork(
+    readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`),
+    readNetworkOption(router.getArguments()[1], where(router)),
+    where(router),
+  );
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
   const responseKindOf = (prop: Node): "helper" | "writer" | undefined => {
@@ -1733,6 +1775,20 @@ function readNumberOption(options: Node | undefined, name: string, at: string): 
   if (!value) return undefined;
   if (!Node.isNumericLiteral(value)) throw new Error(`${at}: ${name} must be a number literal, got: ${value.getText()}`);
   return value.getLiteralValue();
+}
+
+function readStringArrayOption(options: Node | undefined, name: string, at: string): string[] | undefined {
+  const value = optionValue(options, name, at);
+  if (!value) return undefined;
+  if (!Node.isArrayLiteralExpression(value)) throw new Error(`${at}: ${name} must be an array of strings`);
+  return value.getElements().map((item) => configString(item, `${at}: ${name}`, setupEnv));
+}
+
+function mergeNetwork(options: Record<string, string> | undefined, network: Record<string, string>, at: string): Record<string, string> | undefined {
+  if (!Object.keys(network).length) return options;
+  const clash = Object.keys(network).find((key) => options?.[key] !== undefined);
+  if (clash) throw new Error(`${at}: give the network option or functionOptions.${clash}, not both`);
+  return { ...options, ...network };
 }
 
 function readBooleanOption(options: Node | undefined, name: string, at: string): boolean | undefined {

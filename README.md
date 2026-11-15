@@ -1622,6 +1622,50 @@ The second argument is the stream name, used as is (1-128 letters, digits,
 - **No client yet:** `Stream` only provisions the stream. Reading and writing
   records is not part of the package yet.
 
+## Networks: `@cloudgear/network`
+
+`Network` names an existing VPC. cloudgear never creates, changes or deletes
+VPCs, subnets or security groups. Pass it to the router to run every function
+inside that VPC, for example to reach a private database or cache:
+
+```ts
+import { Network } from "@cloudgear/network";
+
+const network = new Network("aws");                        // the region's default VPC
+// const network = new Network("aws", { vpc: "vpc-0abc1234", subnets: ["subnet-..."], securityGroups: ["sg-..."] });
+
+new FunctionRouter("aws", { authenticated: "iam", network }).url("GET", "/items", "./api/items.ts");
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `vpc` | the default VPC | An existing VPC id |
+| `subnets` | one subnet per availability zone | Subnet ids inside the VPC (at most 16) |
+| `securityGroups` | the VPC's default security group | Security group ids in the VPC (at most 5) |
+
+`subnets` and `securityGroups` need a `vpc`. Without a `network`, functions run
+outside any VPC, as before.
+
+- **No outbound internet.** A Lambda in a VPC cannot reach the internet, or AWS
+  services without an endpoint, unless the VPC has a NAT gateway or VPC
+  endpoints. cloudgear MUST NOT create them. Check that every function on the
+  router can live without outbound calls before you set `network`; a NAT
+  gateway costs roughly $33 a month, so check current AWS pricing.
+- **Default security group.** The VPC's default security group lets its members
+  reach each other, which is what a cache or database in the same group needs.
+  If you changed it, name your own with `securityGroups`.
+- **What `apply` does.** It looks the VPC, subnets and groups up first, so a
+  wrong id fails before anything is created. It then sets the function's VPC
+  configuration and attaches `AWSLambdaVPCAccessExecutionRole` to the role it
+  created. Removing `network` clears the configuration and detaches that
+  policy from roles cloudgear created; imported roles keep it.
+- **Permissions.** The deploying identity needs `ec2:DescribeVpcs`,
+  `ec2:DescribeSubnets` and `ec2:DescribeSecurityGroups`.
+- **Limits.** The network is router-wide. `cloudgear import` does not read an
+  imported function's VPC configuration. After a function in a VPC is deleted,
+  AWS can hold its network interfaces for a while, which delays deleting the
+  subnets or groups it used.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1837,6 +1881,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/database` | `Database` (Neon) |
 | `@cloudgear/registry` | `Registry` (ECR) |
 | `@cloudgear/stream` | `Stream` (Kinesis) |
+| `@cloudgear/network` | `Network` (existing VPC) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -1883,6 +1928,8 @@ Where each moving part lives, since several are called across packages:
 | ECR repository driver | `src/deploy/aws/ecr.ts` | `awsDrivers` |
 | `Stream` | `packages/stream/index.ts` | apps; `src/analyze/app.ts` |
 | Kinesis stream driver | `src/deploy/aws/kinesis.ts` | `awsDrivers` |
+| `Network` | `packages/network/index.ts` | apps; `src/analyze/app.ts` (`readNetworkOption`) |
+| VPC lookup and `VpcConfig` | `src/deploy/aws/index.ts` (`networkFor`) | the `@aws.Lambda` driver |
 | `destroyAllowed`, `withoutAllowDestroy` | `src/deploy/protect.ts` | the Neon, ECR and Kinesis drivers |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |

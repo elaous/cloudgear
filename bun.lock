@@ -18,6 +18,7 @@
         "@cloudgear/blob": "workspace:*",
         "@cloudgear/cdn": "workspace:*",
         "@cloudgear/core": "workspace:*",
+        "@cloudgear/database": "workspace:*",
         "@cloudgear/debug": "workspace:*",
         "@cloudgear/dns": "workspace:*",
         "@cloudgear/events": "workspace:*",
@@ -67,6 +68,10 @@
         "@cloudgear/blob": "workspace:*",
         "@cloudgear/functions": "workspace:*",
       },
+    },
+    "packages/database": {
+      "name": "@cloudgear/database",
+      "version": "0.1.0",
     },
     "packages/debug": {
       "name": "@cloudgear/debug",
@@ -218,6 +223,8 @@
     "@cloudgear/cdn": ["@cloudgear/cdn@workspace:packages/cdn"],
 
     "@cloudgear/core": ["@cloudgear/core@workspace:packages/core"],
+
+    "@cloudgear/database": ["@cloudgear/database@workspace:packages/database"],
 
     "@cloudgear/debug": ["@cloudgear/debug@workspace:packages/debug"],
 

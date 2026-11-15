@@ -1490,6 +1490,47 @@ remote read, cloudgear warns, keeps the local copy as
 
 All of them need `--state` or `CLOUDGEAR_STATE`.
 
+## Databases: `@cloudgear/database`
+
+`Database` declares a managed Postgres database. Constructing it does nothing;
+`cloudgear apply` creates it, or adopts the one that already has the name.
+Neon is the first provider.
+
+```ts
+import { Database } from "@cloudgear/database";
+
+new Database("neon", "tranquilo-app", { region: "aws-us-east-1", postgres: 17 });
+```
+
+| Option | Meaning |
+| --- | --- |
+| `region` | Neon region id such as `aws-us-east-1`. Omit it to accept the existing project's region |
+| `postgres` | Postgres major version: 14, 15, 16 or 17 |
+| `allowDestroy` | Lets `cloudgear destroy` delete it; the default `false` makes destroy refuse |
+
+The first argument after the provider is the Neon project name, used as is.
+
+- **Credentials:** set `NEON_API_KEY` to a personal API key from the Neon
+  console. cloudgear MUST NOT store it, and reads it only from the environment.
+- **Connection string:** cloudgear never reads, prints or stores it. You MUST
+  put it where your functions read it, for example with `cloudgear secrets set`.
+- **Adopt first:** if exactly one Neon project has the name, `apply` and
+  `cloudgear import --all` (or `cloudgear import @neon.Database <name>`) adopt
+  it instead of creating another. Two projects with the same name is an error.
+  An adopted project whose region or Postgres version differs from the code is
+  an error, because Neon cannot change either in place. Adopting never records
+  `allowDestroy`; the next `apply` does.
+- **Destroy:** a database is deleted only if the applied config had
+  `allowDestroy: true`. `destroy` and `apply` check this before changing
+  anything, so a refusal leaves every resource as it was. To remove a
+  database, set `allowDestroy`, run `apply`, then delete the declaration and run
+  `apply` again. A project deleted in the Neon console is not handled: remove
+  its entry from `.cloudgear/state.json` by hand.
+- **Limits:** only projects in your personal Neon account are listed and
+  created; organization-owned projects are not supported yet. Calls are not
+  retried, so a rate limit stops the command without side effects and you can
+  run it again.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1702,6 +1743,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/cdn` | `Cert` and `CDN` |
 | `@cloudgear/dns` | `DNS` and its Gandi and Route 53 drivers |
 | `@cloudgear/events` | `EventBus` and `on` |
+| `@cloudgear/database` | `Database` (Neon) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -1742,6 +1784,8 @@ Where each moving part lives, since several are called across packages:
 | `StateStore`, `LocalStateStore`, `holdLock` | `src/deploy/state-store.ts` | `src/cli.ts` |
 | `S3StateStore`, `parseS3Location` (remote state, lock) | `src/deploy/state-s3.ts` | `createStateStore`; `src/statecmd.ts` (`cloudgear state`) |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
+| `Database` | `packages/database/index.ts` | apps; `src/analyze/app.ts` |
+| `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |
 | EventBridge bus and rule deployers | `src/deploy/aws/eventbus.ts`, `schedule.ts` | `awsDrivers` |

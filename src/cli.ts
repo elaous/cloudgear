@@ -8,6 +8,7 @@ import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
+import { neonApiKey, neonDrivers } from "./deploy/neon";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { stateKey, type State } from "./deploy/state";
@@ -23,6 +24,7 @@ import { planPolicyFiles, writePolicyFiles } from "./policyfiles";
 import { pickDistribution, siteDistributions } from "./cdnselect";
 import { checkEnvironment, envWarnings } from "./envcheck";
 import { syncAttached } from "./attached";
+import { isBlobType } from "./providers";
 import { dumpDistributions } from "./dumpdistributions";
 import { checkDns, formatDnsCheck, systemLookup } from "./dnscheck";
 import { checkEnvFileIgnored, parseEnvFile, readSecretRef, secretStatus, setSecrets } from "./secrets";
@@ -40,7 +42,7 @@ Commands:
   dump-distributions [domain...] [--dir <dir>] [--all]
                                Write each distribution's live CloudFront config as JSON (default: the config's CDNs)
   invalidate [path...] [--domain <cdn>]  Clear a CDN's cache (default: everything)
-  destroy [--auto-approve]     Delete every managed resource (imported buckets are only forgotten)
+  destroy [--auto-approve]     Delete every managed resource (imported buckets are only forgotten; a database is refused unless it was applied with allowDestroy)
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
                                Store the secrets the app declares (NAME reads its value from stdin)
   secrets list                 Show which declared secrets are stored; values are never printed
@@ -353,10 +355,11 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       if (values.arn !== undefined && !values.arn.startsWith("arn:")) throw new Error(`--arn "${values.arn}" is not an ARN`);
       const arnType = values.arn ? typeOfArn(values.arn) : undefined;
       const arnBucket = !values.all && !first && arnType === "@aws.S3" ? bucketOfArn(values.arn!, true) : undefined;
+      const blobs = config.resource.filter((r) => isBlobType(r.type));
       // ARN names the physical bucket; config name only when unmatched.
-      const byArn = arnBucket ? (config.resource.filter((r) => r.physical_name === arnBucket).length ? config.resource.filter((r) => r.physical_name === arnBucket) : config.resource.filter((r) => r.name === arnBucket)) : [];
+      const byArn = arnBucket ? (blobs.filter((r) => r.physical_name === arnBucket).length ? blobs.filter((r) => r.physical_name === arnBucket) : blobs.filter((r) => r.name === arnBucket)) : [];
       if (byArn.length > 1) throw new Error(`${values.arn} fits several resources (${byArn.map((r) => r.name).join(", ")}); say which: cloudgear import <name> --arn <arn>`);
-      const bucket = !values.all && first && !first.startsWith("@") ? config.resource.find((r) => r.name === first) : byArn[0];
+      const bucket = !values.all && first && !first.startsWith("@") ? blobs.find((r) => r.name === first) : byArn[0];
       if (arnBucket && !bucket) throw new Error(`No bucket named "${arnBucket}" is in ${values.config}; run \`cloudgear plan\` to see the names`);
       if (bucket) {
         const existing = state.entries[stateKey(bucket)];
@@ -519,6 +522,7 @@ async function drivers(actions: PlannedAction[], config: CloudgearConfig, config
 
 const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags) => Promise<Drivers>> = {
   aws: awsDeployers,
+  neon: async () => neonDrivers({ apiKey: neonApiKey(), log: (message) => console.log(`cloudgear: ${message}`) }),
 };
 
 async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {

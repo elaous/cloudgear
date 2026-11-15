@@ -74,6 +74,7 @@ Options:
   --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
+  --env-file <file>  Dotenv file whose values setup.ts reads through process.env (generate); the shell wins
   --path <path>      Restrict secrets set to one declared path
   --all              Also store undeclared names from the env file under the path (secrets set)
 `;
@@ -98,6 +99,7 @@ const CLI_OPTIONS = {
   tag: { type: "string", multiple: true },
   "from-envfile": { type: "string" },
   "allow-unignored": { type: "boolean", default: false },
+  "env-file": { type: "string" },
   "skip-env-check": { type: "boolean", default: false },
   "skip-dns-check": { type: "boolean", default: false },
   "dns-server": { type: "string" },
@@ -176,6 +178,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         project: values.project,
         invokers: values.invoker,
         reservedConcurrency: values["reserved-concurrency"] === undefined ? undefined : Number(values["reserved-concurrency"]),
+        setupEnv: values["env-file"] ? { ...parseEnvFile(fs.readFileSync(values["env-file"], "utf8"), values["env-file"]), ...process.env } : undefined,
       });
       for (const warning of warnings) console.warn(`warning: ${warning}`);
       console.log(

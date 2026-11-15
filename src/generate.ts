@@ -20,6 +20,7 @@ export interface GenerateOptions {
   project?: string;
   invokers?: string[];
   reservedConcurrency?: number;
+  setupEnv?: Record<string, string | undefined>;
 }
 
 const MAX_INCLUDED_BYTES = 250 * 1024 * 1024;
@@ -27,7 +28,7 @@ const WARN_INCLUDED_BYTES = 40 * 1024 * 1024;
 const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
-  const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry));
+  const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry, options.setupEnv));
   debug("generate", "analyzed", () => ({
     provider: model.provider,
     region: model.region,

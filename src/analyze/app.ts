@@ -19,6 +19,7 @@ import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloud
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { ANY_METHOD, METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
+import { configString, type SetupEnv } from "./configvalue";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -169,7 +170,10 @@ const PERMISSIONS = { Get: "read", Put: "write", Delete: "delete", List: "list" 
 const permissionName = (access: BlobAccess) => `permissions.${Object.entries(PERMISSIONS).find(([, a]) => a === access)![0]}`;
 const ALL_ACCESS = [...new Set(Object.values(BLOB_OPERATIONS).flat())] as BlobAccess[];
 
-export function analyzeApp(entryPath: string): AppModel {
+let setupEnv: SetupEnv = process.env;
+
+export function analyzeApp(entryPath: string, env: SetupEnv = process.env): AppModel {
+  setupEnv = env;
   const entry = path.resolve(entryPath);
   const tsConfigFilePath = findUp(path.dirname(entry), "tsconfig.json");
   const project = new Project(
@@ -211,7 +215,7 @@ export function analyzeApp(entryPath: string): AppModel {
   for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/blob", "BlobStore"))) {
     const [providerArg, uriArg, optionsArg] = expr.getArguments();
     const provider = stringLiteral(providerArg, `${where(expr)}: BlobStore provider`);
-    const uri = stringLiteral(uriArg, `${where(expr)}: BlobStore URI`);
+    const uri = configString(uriArg, `${where(expr)}: BlobStore URI`, setupEnv);
     const storePath = readStorePath(optionsArg, where(expr));
     const storeRegion = readRegion(optionsArg, `${where(expr)}: BlobStore`);
     const storeOptions = readOptionsMap(optionsArg, "options", `${where(expr)}: BlobStore`);
@@ -901,7 +905,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const zone = readStringOption(optionsArg, "zone", `${at}: DNS options`);
       const token = readSecretToken(optionsArg, at);
       try {
-        const parsed = new DNS(provider, stringLiteral(domainArg, `${at}: DNS domain`), zone ? { zone } : {});
+        const parsed = new DNS(provider, configString(domainArg, `${at}: DNS domain`, setupEnv), zone ? { zone } : {});
         return { provider, domain: parsed.domain, zone: parsed.zone, ...(token ? { token } : {}) };
       } catch (err) {
         throw new Error(`${at}: ${(err as Error).message}`);
@@ -1580,8 +1584,9 @@ function readStringOption(options: Node | undefined, name: string, at: string): 
   for (const prop of options.getProperties()) {
     if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread cannot be analyzed`);
     if (propName(prop) === name) {
-      if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: ${name} must be a string literal`);
-      return stringLiteral(prop.getInitializer(), `${at}: ${name}`);
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : Node.isShorthandPropertyAssignment(prop) ? prop.getNameNode() : undefined;
+      if (!value) throw new Error(`${at}: ${name} must be a string literal`);
+      return configString(value, `${at}: ${name}`, setupEnv);
     }
   }
   return undefined;
@@ -1693,7 +1698,7 @@ function readStorePath(options: Node | undefined, at: string): string {
     }
     if (Node.isPropertyAssignment(prop) && propName(prop) === "path") {
       try {
-        return normalizeBlobPath(stringLiteral(prop.getInitializer(), `${at}: BlobStore path`));
+        return normalizeBlobPath(configString(prop.getInitializer(), `${at}: BlobStore path`, setupEnv));
       } catch (err) {
         throw new Error(`${at}: ${(err as Error).message}`);
       }

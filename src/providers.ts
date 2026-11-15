@@ -18,6 +18,7 @@ export interface ProviderProfile {
   schedule?: { type: string };
   events?: { type: string; rule: string };
   registry?: { type: string };
+  stream?: { type: string };
 }
 
 const oneOf =
@@ -57,6 +58,14 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           allow_destroy: oneOf("true"),
         },
       },
+      "@aws.Kinesis": {
+        keys: {
+          mode: oneOf("provisioned", "on-demand"),
+          shards: integerBetween(1, 10000),
+          retention_hours: integerBetween(24, 8760),
+          allow_destroy: oneOf("true"),
+        },
+      },
       "@aws.Certificate": { keys: { key_algorithm: oneOf("RSA_2048", "EC_prime256v1", "EC_secp384r1") } },
     },
     reservedEnv: /^(AWS_|CLOUDGEAR_|LAMBDA_|NODE_OPTIONS$|_)/,
@@ -66,6 +75,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     schedule: { type: "@aws.Schedule" },
     events: { type: "@aws.EventBus", rule: "@aws.EventRule" },
     registry: { type: "@aws.ECR" },
+    stream: { type: "@aws.Kinesis" },
     blobStore: {
       type: "@aws.S3",
       actions: {
@@ -106,9 +116,9 @@ export function profileOfType(type: string): ProviderProfile {
   return providerProfile(providerOfType(type));
 }
 
-export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
+export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry" | "stream">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
   const found = providerProfile(provider)[name];
-  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : "schedules"} yet`);
+  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : name === "stream" ? "a stream" : "schedules"} yet`);
   return found as NonNullable<ProviderProfile[K]>;
 }
 

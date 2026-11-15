@@ -1,5 +1,6 @@
 import type { Adopted, Driver, Drivers } from "../apply";
 import type { DesiredEntry } from "../plan";
+import { destroyAllowed, withoutAllowDestroy } from "../protect";
 import type { StateEntry } from "../state";
 
 export interface NeonDeps {
@@ -111,15 +112,7 @@ function differences(project: NeonProject, want: { region?: string; version?: st
 }
 
 function refusal(current: StateEntry): string | undefined {
-  const options = (current.spec.options ?? {}) as Record<string, string>;
-  return options.allow_destroy === "true" ? undefined : `Refusing to delete Neon project "${current.physical_name}": it holds data. Declare it with allowDestroy: true, apply, then remove it.`;
-}
-
-// Adoption must not grant deletion; the next apply records allow_destroy.
-function withoutAllowDestroy(spec: Record<string, unknown>): Record<string, unknown> {
-  const { allow_destroy: _ignored, ...options } = (spec.options ?? {}) as Record<string, string>;
-  const { options: _before, ...rest } = spec;
-  return Object.keys(options).length ? { ...rest, options } : rest;
+  return destroyAllowed(current) ? undefined : `Refusing to delete Neon project "${current.physical_name}": it holds data. Declare it with allowDestroy: true, apply, then remove it.`;
 }
 
 export function neonDrivers(deps: NeonDeps): Drivers {

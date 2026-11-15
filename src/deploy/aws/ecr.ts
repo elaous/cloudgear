@@ -11,6 +11,7 @@ import {
 import { DEFAULT_KEEP_UNTAGGED_DAYS } from "@cloudgear/registry";
 import type { Adopted, Driver } from "../apply";
 import type { DesiredEntry } from "../plan";
+import { destroyAllowed, withoutAllowDestroy } from "../protect";
 import type { StateEntry } from "../state";
 import type { SendClient } from "./index";
 import { tagList, type Tagger } from "./tags";
@@ -88,16 +89,9 @@ const named = (err: unknown, ...names: string[]): boolean => names.includes((err
 const outputsOf = (repo: Repository, lifecycle: string): Record<string, string> => ({ arn: repo.repositoryArn ?? "", uri: repo.repositoryUri ?? "", lifecycle });
 
 const refusal = (current: StateEntry): string | undefined =>
-  ((current.spec.options ?? {}) as Record<string, string>).allow_destroy === "true"
+  destroyAllowed(current)
     ? undefined
     : `Refusing to delete ECR repository "${current.physical_name}": it may hold images. Declare it with allowDestroy: true, apply, then remove it.`;
-
-// Adoption must not grant deletion; the next apply records allow_destroy.
-function withoutAllowDestroy(spec: Record<string, unknown>): Record<string, unknown> {
-  const { allow_destroy: _ignored, ...options } = (spec.options ?? {}) as Record<string, string>;
-  const { options: _before, ...rest } = spec;
-  return Object.keys(options).length ? { ...rest, options } : rest;
-}
 
 export function ecrDriver(deps: EcrDeps): Driver {
   async function describe(name: string): Promise<Repository | undefined> {

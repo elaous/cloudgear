@@ -16,6 +16,7 @@ import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { Database, type PostgresVersion } from "@cloudgear/database";
 import { Registry } from "@cloudgear/registry";
+import { Stream, type StreamMode } from "@cloudgear/stream";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
@@ -172,6 +173,17 @@ export interface AnalyzedRegistry {
   line: number;
 }
 
+export interface AnalyzedStream {
+  name: string;
+  provider: string;
+  mode?: StreamMode;
+  shards?: number;
+  retentionHours?: number;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
 export interface AppModel extends EdgeModel {
   provider: string;
   region?: string;
@@ -183,11 +195,13 @@ export interface AppModel extends EdgeModel {
   buses: AnalyzedBus[];
   databases: AnalyzedDatabase[];
   registries: AnalyzedRegistry[];
+  streams: AnalyzedStream[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
 
 const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
+const STREAM_OPTIONS = ["mode", "shards", "retentionHours", "allowDestroy"];
 const REGISTRY_OPTIONS = ["scanOnPush", "immutableTags", "keepUntaggedDays", "allowDestroy"];
 const QUERY_NAME = /^[A-Za-z0-9_.:/-]+$/;
 const QUERY_VALUE = /^[A-Za-z0-9_.:/-]*$/;
@@ -382,6 +396,33 @@ function analyzeEntry(entryPath: string): AppModel {
     const declared = registries.get(name);
     if (declared) throw new Error(`${at}: Registry "${name}" is also declared at ${declared.file}:${declared.line}; declare each repository once`);
     registries.set(name, { name, provider, scanOnPush, immutableTags, keepUntaggedDays, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  const streams = new Map<string, AnalyzedStream>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/stream", "Stream"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Stream provider`);
+    if (provider !== "aws") throw new Error(`${at}: Stream provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Stream name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !STREAM_OPTIONS.includes(key)) throw new Error(`${at}: unknown Stream option "${key}" (supported: ${STREAM_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Stream options`;
+    const mode = readStringOption(optionsArg, "mode", where_) as StreamMode | undefined;
+    const shards = readNumberOption(optionsArg, "shards", where_);
+    const retentionHours = readNumberOption(optionsArg, "retentionHours", where_);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    try {
+      new Stream(provider, name, { ...(mode !== undefined ? { mode } : {}), ...(shards !== undefined ? { shards } : {}), ...(retentionHours !== undefined ? { retentionHours } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = streams.get(name);
+    if (declared) throw new Error(`${at}: Stream "${name}" is also declared at ${declared.file}:${declared.line}; declare each stream once`);
+    streams.set(name, { name, provider, mode, shards, retentionHours, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
   }
   const usedBuses = new Map<string, AnalyzedBus>();
   const useBus = (bus: AnalyzedBus, _at: string) => {
@@ -871,6 +912,7 @@ function analyzeEntry(entryPath: string): AppModel {
     buses: [...usedBuses.values()],
     databases: [...databases.values()],
     registries: [...registries.values()],
+    streams: [...streams.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };

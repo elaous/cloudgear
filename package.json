@@ -43,6 +43,7 @@
     "@cloudgear/blob": "workspace:*",
     "@cloudgear/cdn": "workspace:*",
     "@cloudgear/core": "workspace:*",
+    "@cloudgear/database": "workspace:*",
     "@cloudgear/debug": "workspace:*",
     "@cloudgear/dns": "workspace:*",
     "@cloudgear/events": "workspace:*",

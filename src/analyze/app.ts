@@ -14,6 +14,7 @@ import {
 import { assertPolicyDocument, assertPolicyName, broadStatements, type PolicyDocument } from "@cloudgear/iam";
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
+import { Database, type PostgresVersion } from "@cloudgear/database";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
@@ -149,6 +150,16 @@ export interface EdgeModel {
   api?: { provider: string; domain: string; certificate?: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
 }
 
+export interface AnalyzedDatabase {
+  name: string;
+  provider: string;
+  region?: string;
+  postgres?: number;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
 export interface AppModel extends EdgeModel {
   provider: string;
   region?: string;
@@ -158,6 +169,7 @@ export interface AppModel extends EdgeModel {
   resources: AnalyzedResource[];
   optionalEnv: string[];
   buses: AnalyzedBus[];
+  databases: AnalyzedDatabase[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
@@ -302,6 +314,25 @@ function analyzeEntry(entryPath: string): AppModel {
       file: relative(expr.getSourceFile().getFilePath()),
       line: expr.getStartLineNumber(),
     });
+  }
+  const databases = new Map<string, AnalyzedDatabase>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/database", "Database"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Database provider`);
+    if (provider !== "neon") throw new Error(`${at}: Database provider must be "neon"`);
+    const name = configString(nameArg, `${at}: Database name`, setupEnv);
+    const region = readStringOption(optionsArg, "region", `${at}: Database options`);
+    const postgres = readNumberOption(optionsArg, "postgres", `${at}: Database options`);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", `${at}: Database options`) ?? false;
+    try {
+      new Database(provider, name, { ...(region ? { region } : {}), ...(postgres ? { postgres: postgres as PostgresVersion } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = databases.get(name);
+    if (declared) throw new Error(`${at}: Database "${name}" is also declared at ${declared.file}:${declared.line}; declare each database once`);
+    databases.set(name, { name, provider, region, postgres, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
   }
   const usedBuses = new Map<string, AnalyzedBus>();
   const useBus = (bus: AnalyzedBus, _at: string) => {
@@ -789,6 +820,7 @@ function analyzeEntry(entryPath: string): AppModel {
     resources: [...resources.values()],
     optionalEnv: readOptionalEnv(router.getArguments()[1], `${where(router)}: FunctionRouter`),
     buses: [...usedBuses.values()],
+    databases: [...databases.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };
@@ -1585,6 +1617,35 @@ function readOptionalEnv(options: Node | undefined, at: string): string[] {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`${at}: optionalEnv "${name}" is not an environment variable name`);
     return name;
   });
+}
+
+function optionValue(options: Node | undefined, name: string, at: string): Node | undefined {
+  if (!options) return undefined;
+  if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at} must be an object literal`);
+  for (const prop of options.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread cannot be analyzed`);
+    if (propName(prop) !== name) continue;
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    if (!value) throw new Error(`${at}: ${name} must be a literal`);
+    return value;
+  }
+  return undefined;
+}
+
+function readNumberOption(options: Node | undefined, name: string, at: string): number | undefined {
+  const value = optionValue(options, name, at);
+  if (!value) return undefined;
+  const literal = Node.isAsExpression(value) ? value.getExpression() : value;
+  if (!Node.isNumericLiteral(literal)) throw new Error(`${at}: ${name} must be a number literal, got: ${value.getText()}`);
+  return literal.getLiteralValue();
+}
+
+function readBooleanOption(options: Node | undefined, name: string, at: string): boolean | undefined {
+  const value = optionValue(options, name, at);
+  if (!value) return undefined;
+  if (value.getKind() === SyntaxKind.TrueKeyword) return true;
+  if (value.getKind() === SyntaxKind.FalseKeyword) return false;
+  throw new Error(`${at}: ${name} must be true or false, got: ${value.getText()}`);
 }
 
 function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {

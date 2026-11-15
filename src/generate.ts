@@ -208,6 +208,20 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         region: undefined,
         options: undefined,
       })),
+    ).concat(
+      model.databases.map((db) => ({
+        name: `db.${db.name}`,
+        type: `@${db.provider}.Database`,
+        physical_name: db.name,
+        dry: false,
+        source: `${fromConfig(db.file)}:${db.line}`,
+        region: undefined,
+        options: {
+          ...(db.region ? { region: db.region } : {}),
+          ...(db.postgres ? { pg_version: String(db.postgres) } : {}),
+          ...(db.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
     ),
     function: functions,
     invoker: invokers,

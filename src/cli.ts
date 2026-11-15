@@ -8,6 +8,7 @@ import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
+import { neonApiKey, neonDrivers } from "./deploy/neon";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { stateKey, type State } from "./deploy/state";
@@ -519,6 +520,7 @@ async function drivers(actions: PlannedAction[], config: CloudgearConfig, config
 
 const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags) => Promise<Drivers>> = {
   aws: awsDeployers,
+  neon: async () => neonDrivers({ apiKey: neonApiKey(), log: (message) => console.log(`cloudgear: ${message}`) }),
 };
 
 async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {

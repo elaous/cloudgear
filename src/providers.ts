@@ -120,10 +120,26 @@ export function providerProfile(provider: string): ProviderProfile {
   return profile;
 }
 
+// Services that run beside the cloud the functions deploy to.
+export const SERVICES: Record<string, { options: Record<string, OptionSchema> }> = {
+  neon: {
+    options: {
+      "@neon.Database": {
+        keys: {
+          region: (v) => (/^(aws|azure)-[a-z0-9]+(-[a-z0-9]+)+$/.test(v) ? undefined : 'must be a Neon region id such as "aws-us-east-1"'),
+          pg_version: oneOf("14", "15", "16", "17"),
+          allow_destroy: oneOf("true"),
+        },
+      },
+    },
+  },
+};
+
 export function validateOptions(provider: string, type: string, options: Record<string, string> | undefined, label: string): void {
+  const service = SERVICES[provider];
   for (const [key, value] of Object.entries(options ?? {})) {
-    const schema = providerProfile(provider).options[type];
-    const reserved = providerProfile(provider).reservedEnv;
+    const schema = (service ?? providerProfile(provider)).options[type];
+    const reserved = service ? /^$/ : providerProfile(provider).reservedEnv;
     const prefix = Object.keys(schema?.prefixes ?? {}).find((p) => key.startsWith(p));
     const rule = (schema && Object.hasOwn(schema.keys, key) ? schema.keys[key] : undefined) ?? (prefix ? schema!.prefixes![prefix] : undefined);
     if (!rule) {

@@ -166,6 +166,11 @@ interface CommandContext {
   lock?: LockHandle;
 }
 
+function readEnvFile(file: string): Record<string, string> {
+  if (!fs.existsSync(file)) throw new Error(`--env-file ${file} does not exist`);
+  return parseEnvFile(fs.readFileSync(file, "utf8"), file);
+}
+
 async function dispatch(command: string, args: string[], values: Values, { configPath, workDir, statePath, getStore, lock }: CommandContext): Promise<void> {
   switch (command) {
     case "generate": {
@@ -178,7 +183,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         project: values.project,
         invokers: values.invoker,
         reservedConcurrency: values["reserved-concurrency"] === undefined ? undefined : Number(values["reserved-concurrency"]),
-        setupEnv: values["env-file"] ? { ...parseEnvFile(fs.readFileSync(values["env-file"], "utf8"), values["env-file"]), ...process.env } : undefined,
+        setupEnv: values["env-file"] ? { ...readEnvFile(values["env-file"]), ...process.env } : undefined,
       });
       for (const warning of warnings) console.warn(`warning: ${warning}`);
       console.log(

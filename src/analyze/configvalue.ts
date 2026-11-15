@@ -2,63 +2,62 @@ import { Node, SyntaxKind } from "ts-morph";
 
 export type SetupEnv = Record<string, string | undefined>;
 
+type Resolved = { value: string } | { unset: string } | undefined;
+
 const ENV_OBJECTS = new Set(["process.env", "Bun.env", "import.meta.env"]);
 
 export function configString(node: Node | undefined, what: string, env: SetupEnv): string {
-  const value = node && resolve(node, what, env, new Set());
-  if (value === undefined) throw new Error(`${what} must be a string literal or an environment variable, got: ${node?.getText() ?? "nothing"}`);
-  return value;
+  const result = node && resolve(node, env, new Set());
+  if (result && "value" in result) return result.value;
+  if (result) throw new Error(`${what}: environment variable ${result.unset} is unset or empty; export it, pass --env-file, or give a default with ??`);
+  throw new Error(`${what} must be a string literal or an environment variable, got: ${node?.getText() ?? "nothing"}`);
 }
 
-function resolve(node: Node, what: string, env: SetupEnv, seen: Set<Node>): string | undefined {
-  if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) return node.getLiteralValue();
+function resolve(node: Node, env: SetupEnv, seen: Set<Node>): Resolved {
+  if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) return { value: node.getLiteralValue() };
   if (Node.isParenthesizedExpression(node) || Node.isNonNullExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node)) {
-    return resolve(node.getExpression(), what, env, seen);
+    return resolve(node.getExpression(), env, seen);
   }
   if (Node.isTemplateExpression(node)) {
-    let text = node.getHead().getLiteralText();
+    const parts: string[] = [node.getHead().getLiteralText()];
     for (const span of node.getTemplateSpans()) {
-      const part = resolve(span.getExpression(), what, env, seen);
-      if (part === undefined) return undefined;
-      text += part + span.getLiteral().getLiteralText();
+      const part = resolve(span.getExpression(), env, seen);
+      if (!part || "unset" in part) return part;
+      parts.push(part.value, span.getLiteral().getLiteralText());
     }
-    return text;
+    return { value: parts.join("") };
   }
-  if (Node.isBinaryExpression(node)) {
-    const operator = node.getOperatorToken().getKind();
-    if (operator === SyntaxKind.PlusToken) {
-      const left = resolve(node.getLeft(), what, env, seen);
-      const right = resolve(node.getRight(), what, env, seen);
-      return left === undefined || right === undefined ? undefined : left + right;
-    }
-    if (operator === SyntaxKind.QuestionQuestionToken || operator === SyntaxKind.BarBarToken) {
-      return resolveOptional(node.getLeft(), what, env, seen) ?? resolve(node.getRight(), what, env, seen);
-    }
-    return undefined;
-  }
+  if (Node.isBinaryExpression(node)) return resolveBinary(node, env, seen);
   const name = envName(node);
-  if (name !== undefined) {
-    const value = env[name];
-    if (value === undefined || value === "") throw new Error(`${what}: environment variable ${name} is not set; export it or pass --env-file`);
-    return value;
-  }
+  if (name !== undefined) return env[name] ? { value: env[name]! } : { unset: name };
   if (Node.isIdentifier(node)) {
     const parent = node.getParent();
     const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
     const declaration = symbol?.getDeclarations()[0];
     if (!declaration || !Node.isVariableDeclaration(declaration) || seen.has(declaration)) return undefined;
-    const statement = declaration.getVariableStatement();
     const initializer = declaration.getInitializer();
-    if (!statement || !initializer || statement.getDeclarationKind() !== "const") return undefined;
-    return resolve(initializer, what, env, new Set([...seen, declaration]));
+    if (!initializer || declaration.getVariableStatement()?.getDeclarationKind() !== "const") return undefined;
+    return resolve(initializer, env, new Set([...seen, declaration]));
   }
   return undefined;
 }
 
-function resolveOptional(node: Node, what: string, env: SetupEnv, seen: Set<Node>): string | undefined {
-  const name = envName(node);
-  if (name !== undefined) return env[name] || undefined;
-  return resolve(node, what, env, seen);
+function resolveBinary(node: import("ts-morph").BinaryExpression, env: SetupEnv, seen: Set<Node>): Resolved {
+  const operator = node.getOperatorToken().getKind();
+  const left = resolve(node.getLeft(), env, seen);
+  if (operator === SyntaxKind.PlusToken) {
+    const right = resolve(node.getRight(), env, seen);
+    if (!left || !right) return undefined;
+    if ("unset" in left) return left;
+    if ("unset" in right) return right;
+    return { value: left.value + right.value };
+  }
+  if (operator === SyntaxKind.QuestionQuestionToken || operator === SyntaxKind.BarBarToken) {
+    if (!left) return undefined;
+    const useRight = "unset" in left || (operator === SyntaxKind.BarBarToken && left.value === "");
+    return useRight ? resolve(node.getRight(), env, seen) : left;
+  }
+  return undefined;
 }
 
 function envName(node: Node): string | undefined {

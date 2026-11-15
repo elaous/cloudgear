@@ -173,7 +173,16 @@ const ALL_ACCESS = [...new Set(Object.values(BLOB_OPERATIONS).flat())] as BlobAc
 let setupEnv: SetupEnv = process.env;
 
 export function analyzeApp(entryPath: string, env: SetupEnv = process.env): AppModel {
+  const previous = setupEnv;
   setupEnv = env;
+  try {
+    return analyzeEntry(entryPath);
+  } finally {
+    setupEnv = previous;
+  }
+}
+
+function analyzeEntry(entryPath: string): AppModel {
   const entry = path.resolve(entryPath);
   const tsConfigFilePath = findUp(path.dirname(entry), "tsconfig.json");
   const project = new Project(

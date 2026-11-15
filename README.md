@@ -1053,14 +1053,22 @@ const dns = new DNS("gandi", `api.${domain}`, { zone: process.env.ENV_ZONE! });
 const bucket = new BlobStore("aws", "s3://web." + domain);
 ```
 
-`generate` resolves these from the shell, or from `--env-file <file>` (the
-shell wins), and writes the resolved values to `cloudgear.prototxt`. It
-accepts string literals, templates, `+`, `??` / `||` defaults, `const`
-variables and `process.env.X!`. An unset or empty variable without a default
-is an error naming the variable and the line. Anything else that cannot be
-known without running the code is rejected. Because `cloudgear.prototxt`
-holds the resolved values, you MUST run `generate` with the same variables
-for each environment.
+`generate` resolves these from the shell, or from `--env-file <file>`, and
+writes the resolved values to `cloudgear.prototxt`. The shell wins over the
+file, including a variable the shell sets to an empty string.
+
+It accepts string literals, templates, `+`, `??` / `||` defaults, `as` and `!`
+wrappers, and `const` variables declared in the same file (imported constants
+are not followed). An unset or empty variable is treated as unset: it takes
+the `??` / `||` default, and without one `generate` fails naming the variable
+and the line. A default never hides a left side that cannot be analyzed;
+that is an error. Anything else that cannot be known without running the code
+is rejected.
+
+`cloudgear.prototxt` holds the resolved values and is normally committed, so
+you MUST NOT read credentials into these fields, and you MUST run `generate`
+with the same variables for each environment. `--env-file` applies to
+`generate` only.
 
 `BlobStore` methods map to provider-neutral accesses (`read`, `write`,
 `delete`, `list`) in `BLOB_OPERATIONS`; `src/providers.ts` maps those to each

@@ -1515,7 +1515,7 @@ The first argument after the provider is the Neon project name, used as is.
 - **Connection string:** cloudgear never reads, prints or stores it. You MUST
   put it where your functions read it, for example with `cloudgear secrets set`.
 - **Adopt first:** if exactly one Neon project has the name, `apply` and
-  `cloudgear import --all` (or `cloudgear import @neon.Database <name>`) adopt
+  `cloudgear import --all` (or `cloudgear import @neon.Database db.<name>`) adopt
   it instead of creating another. Two projects with the same name is an error.
   An adopted project whose region or Postgres version differs from the code is
   an error, because Neon cannot change either in place. Adopting never records
@@ -1555,7 +1555,7 @@ letters, digits, `.`, `_`, `-`, with `/` between words).
 
 - **Adopt first:** an existing repository is adopted, and `apply` changes only
   the settings that differ. `cloudgear import --all` and
-  `cloudgear import @aws.ECR <name>` read it without changing anything;
+  `cloudgear import @aws.ECR registry.<name>` read it without changing anything;
   `import --arn` does not support ECR. Tags are applied only when cloudgear
   creates the repository.
 - **Lifecycle policy:** a policy is cloudgear's if every rule's description
@@ -1572,6 +1572,55 @@ letters, digits, `.`, `_`, `-`, with `/` between words).
   does.
 - **Cost:** ECR charges for stored image data, so the untagged-image expiry is
   on by default.
+
+## Streams: `@cloudgear/stream`
+
+`Stream` declares a data stream. Constructing it does nothing; `cloudgear apply`
+creates it, or adopts the one that already has the name. AWS (Kinesis Data
+Streams) is the first provider.
+
+```ts
+import { Stream } from "@cloudgear/stream";
+
+new Stream("aws", "tranquilo-events", { shards: 2 });
+```
+
+The second argument is the stream name, used as is (1-128 letters, digits,
+`.`, `_`, `-`).
+
+| Option | When creating | Meaning |
+| --- | --- | --- |
+| `mode` | `"provisioned"` | `"provisioned"` (you pick the shards) or `"on-demand"` (AWS scales it) |
+| `shards` | `1` | Provisioned mode only, 1-10000 |
+| `retentionHours` | `24` | 24-8760; longer retention costs extra |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) remove the stream and its data |
+
+- **Existing streams:** the defaults apply only when cloudgear creates the
+  stream. On an existing stream, `apply` changes only the options you set, so
+  declaring `new Stream("aws", "x")` never scales down or shortens a stream
+  someone sized differently. Removing an option later leaves the stream as it
+  is. Changes run one at a time, each after the stream is `ACTIVE` again; `apply`
+  waits up to 5 minutes for that and otherwise stops so you can run it again.
+- **Shards:** Kinesis can double or halve the shard count in one step, so
+  `apply` rescales in steps (1 to 10 shards takes 1, 2, 4, 8, 10). AWS also
+  limits how often a stream can be rescaled or switched between modes; its
+  error is shown as is. `shards` on an on-demand stream is an error.
+- **Retention:** shortening it makes older records unreadable for good, so it
+  needs `allowDestroy: true` in the config.
+- **Adopt first:** an existing stream is adopted instead of recreated.
+  `cloudgear import --all` and `cloudgear import @aws.Kinesis stream.<name>` read it
+  without changing anything; `import --arn` does not support Kinesis. Import
+  never records `allowDestroy`; the next `apply` does. Tags are applied only
+  when cloudgear creates the stream.
+- **Destroy:** the stream is deleted only if the applied config had
+  `allowDestroy: true`. `destroy`, and `apply` after you remove the
+  declaration, check that before changing anything. Deleting a stream deletes
+  its data.
+- **Cost:** a stream bills every hour it exists, even when idle. As a rough
+  guide, one provisioned shard is about $11 a month and an on-demand stream
+  about $29 a month before any traffic; check current AWS pricing.
+- **No client yet:** `Stream` only provisions the stream. Reading and writing
+  records is not part of the package yet.
 
 ## Policies: `@cloudgear/iam`
 
@@ -1787,6 +1836,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/events` | `EventBus` and `on` |
 | `@cloudgear/database` | `Database` (Neon) |
 | `@cloudgear/registry` | `Registry` (ECR) |
+| `@cloudgear/stream` | `Stream` (Kinesis) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -1831,6 +1881,9 @@ Where each moving part lives, since several are called across packages:
 | `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
 | `Registry` | `packages/registry/index.ts` | apps; `src/analyze/app.ts` |
 | ECR repository driver | `src/deploy/aws/ecr.ts` | `awsDrivers` |
+| `Stream` | `packages/stream/index.ts` | apps; `src/analyze/app.ts` |
+| Kinesis stream driver | `src/deploy/aws/kinesis.ts` | `awsDrivers` |
+| `destroyAllowed`, `withoutAllowDestroy` | `src/deploy/protect.ts` | the Neon, ECR and Kinesis drivers |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |
 | EventBridge bus and rule deployers | `src/deploy/aws/eventbus.ts`, `schedule.ts` | `awsDrivers` |

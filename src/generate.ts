@@ -224,6 +224,21 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         },
       })),
     ).concat(
+      model.streams.map((stream) => ({
+        name: `stream.${stream.name}`,
+        type: capability(stream.provider, "stream").type,
+        physical_name: stream.name,
+        dry: false,
+        source: `${fromConfig(stream.file)}:${stream.line}`,
+        region: undefined,
+        options: {
+          ...(stream.mode !== undefined ? { mode: stream.mode } : {}),
+          ...(stream.shards !== undefined ? { shards: String(stream.shards) } : {}),
+          ...(stream.retentionHours !== undefined ? { retention_hours: String(stream.retentionHours) } : {}),
+          ...(stream.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
       model.databases.map((db) => ({
         name: `db.${db.name}`,
         type: `@${db.provider}.Database`,

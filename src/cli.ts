@@ -42,7 +42,7 @@ Commands:
   dump-distributions [domain...] [--dir <dir>] [--all]
                                Write each distribution's live CloudFront config as JSON (default: the config's CDNs)
   invalidate [path...] [--domain <cdn>]  Clear a CDN's cache (default: everything)
-  destroy [--auto-approve]     Delete every managed resource (imported buckets are only forgotten; a database or image repository is refused unless it was applied with allowDestroy)
+  destroy [--auto-approve]     Delete every managed resource (imported buckets are only forgotten; a database, image repository or stream is refused unless it was applied with allowDestroy)
   secrets set [NAME] [--from-envfile <file>] [--path <path>] [--all]
                                Store the secrets the app declares (NAME reads its value from stdin)
   secrets list                 Show which declared secrets are stored; values are never printed

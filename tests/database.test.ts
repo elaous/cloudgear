@@ -7,6 +7,7 @@ import { analyzeApp } from "../src/analyze/app";
 import { apply, type Drivers } from "../src/deploy/apply";
 import { neonApiKey, neonDrivers } from "../src/deploy/neon";
 import { plan } from "../src/deploy/plan";
+import { isBlobType, validateOptions } from "../src/providers";
 import { stateKey } from "../src/deploy/state";
 import { decodeConfig, type CloudgearConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
@@ -50,6 +51,12 @@ describe("analysis", () => {
     expect(() => analyzeApp(fixture("duplicate"))).toThrow(/Database "same" is also declared at/);
     expect(() => analyzeApp(fixture("bad-version"))).toThrow(/Unsupported Postgres version 9/);
     expect(() => analyzeApp(fixture("dynamic-flag"))).toThrow(/allowDestroy must be true or false/);
+  });
+
+  test("a misspelled option, a zero version and an empty region are errors, not ignored", () => {
+    expect(() => analyzeApp(fixture("typo"))).toThrow(/unknown Database option "regoin" \(supported: region, postgres, allowDestroy\)/);
+    expect(() => analyzeApp(fixture("postgres-zero"))).toThrow(/Unsupported Postgres version 0/);
+    expect(() => analyzeApp(fixture("empty-region"))).toThrow(/Invalid Neon region ""/);
   });
 });
 
@@ -193,6 +200,36 @@ describe("neon driver", () => {
     expect((error as Error).message).toBe("Neon API GET /projects failed: 401 invalid token");
   });
 
+  test("a destroy that includes a protected database changes nothing", async () => {
+    const { state, drivers } = fakeNeon();
+    const deleted: string[] = [];
+    const all: Drivers = {
+      ...drivers,
+      "@aws.S3": { create: async () => ({}), update: async () => ({}), delete: async (current) => void deleted.push(current.name) },
+    };
+    const config = baseConfig({
+      resource: [
+        { name: "data", type: "@aws.S3", physical_name: "data", dry: false, source: "a.ts:1" },
+        { name: "db.app", type: "@neon.Database", physical_name: "app", dry: false, source: "a.ts:2" },
+      ],
+      function: [],
+    });
+    const saved = emptyState();
+    await applyConfig(config, saved, all);
+    await expect(applyConfig(baseConfig({ resource: [], function: [] }), saved, all)).rejects.toThrow(/^Nothing was changed\. Refusing to delete Neon project "app"/);
+    expect(deleted).toEqual([]);
+    expect(Object.keys(saved.entries)).toHaveLength(2);
+    expect(state.projects).toHaveLength(1);
+  });
+
+  test("adopting does not record allow_destroy", async () => {
+    const { drivers } = fakeNeon([{ id: "old", name: "app", region_id: "aws-us-east-1", pg_version: 17 }]);
+    const [entry] = plan(configWith({ region: "aws-us-east-1", allow_destroy: "true" }), emptyState()).map((a) => a.desired!);
+    const adopted = await drivers["@neon.Database"]!.adopt!(entry!, { entry: () => undefined });
+    expect(adopted!.spec).toEqual({ physical_name: "app", region: "", options: { region: "aws-us-east-1" } });
+    expect(drivers["@neon.Database"]!.protect!({ kind: "resource", type: "@neon.Database", name: "db.app", physical_name: "app", spec: adopted!.spec!, outputs: {} })).toMatch(/Refusing to delete/);
+  });
+
   test("adopt records the desired spec only when the project matches", async () => {
     const { drivers } = fakeNeon([{ id: "old", name: "app", region_id: "aws-us-east-1", pg_version: 17 }]);
     const [entry] = plan(configWith({ region: "aws-us-east-1" }), emptyState()).map((a) => a.desired!);
@@ -212,5 +249,22 @@ describe("NEON_API_KEY", () => {
     expect(() => neonApiKey({})).toThrow(/Set NEON_API_KEY/);
     expect(() => neonApiKey({ NEON_API_KEY: "  " })).toThrow(/Set NEON_API_KEY/);
     expect(neonApiKey({ NEON_API_KEY: " abc " })).toBe("abc");
+  });
+});
+
+describe("option validation", () => {
+  test("neon options are checked and existing providers are unaffected", () => {
+    validateOptions("neon", "@neon.Database", { region: "aws-us-east-1", pg_version: "17", allow_destroy: "true" }, "db");
+    expect(() => validateOptions("neon", "@neon.Database", { region: "Europe" }, "db")).toThrow(/option "region" must be a Neon region id/);
+    expect(() => validateOptions("neon", "@neon.Database", { pg_version: "9" }, "db")).toThrow(/option "pg_version" must be one of/);
+    expect(() => validateOptions("neon", "@neon.Database", { allow_destroy: "false" }, "db")).toThrow(/option "allow_destroy" must be one of true/);
+    expect(() => validateOptions("neon", "@neon.Database", { tier: "x" }, "db")).toThrow(/unknown option "tier"/);
+    expect(() => validateOptions("aws", "@aws.S3", { versioning: "true" }, "bucket")).not.toThrow();
+    expect(() => validateOptions("aws", "@aws.S3", { tier: "x" }, "bucket")).toThrow(/unknown option "tier"/);
+    expect(() => validateOptions("constructor", "@constructor.X", { a: "b" }, "x")).toThrow(/not supported yet/);
+  });
+
+  test("only blob stores count as buckets for the import-by-name shortcut", () => {
+    expect([isBlobType("@aws.S3"), isBlobType("@gcp.GCS"), isBlobType("@neon.Database"), isBlobType("@aws.EventBus")]).toEqual([true, true, false, false]);
   });
 });

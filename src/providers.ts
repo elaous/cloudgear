@@ -112,8 +112,10 @@ export function crossProviderAccess(functionProvider: string, storeProvider: str
   return CROSS_PROVIDER_ACCESS[`${functionProvider}->${storeProvider}`];
 }
 
+export const isBlobType = (type: string): boolean => Object.values(PROVIDERS).some((p) => p.blobStore.type === type);
+
 export function providerProfile(provider: string): ProviderProfile {
-  const profile = PROVIDERS[provider];
+  const profile = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
   if (!profile) {
     throw new Error(`Provider "${provider}" is not supported yet (supported: ${Object.keys(PROVIDERS).join(", ")})`);
   }
@@ -136,7 +138,7 @@ export const SERVICES: Record<string, { options: Record<string, OptionSchema> }>
 };
 
 export function validateOptions(provider: string, type: string, options: Record<string, string> | undefined, label: string): void {
-  const service = SERVICES[provider];
+  const service = Object.hasOwn(SERVICES, provider) ? SERVICES[provider] : undefined;
   for (const [key, value] of Object.entries(options ?? {})) {
     const schema = (service ?? providerProfile(provider)).options[type];
     const reserved = service ? /^$/ : providerProfile(provider).reservedEnv;

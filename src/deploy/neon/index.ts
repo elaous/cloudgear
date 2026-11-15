@@ -1,5 +1,6 @@
 import type { Adopted, Driver, Drivers } from "../apply";
 import type { DesiredEntry } from "../plan";
+import type { StateEntry } from "../state";
 
 export interface NeonDeps {
   apiKey: string;
@@ -109,6 +110,18 @@ function differences(project: NeonProject, want: { region?: string; version?: st
   return found;
 }
 
+function refusal(current: StateEntry): string | undefined {
+  const options = (current.spec.options ?? {}) as Record<string, string>;
+  return options.allow_destroy === "true" ? undefined : `Refusing to delete Neon project "${current.physical_name}": it holds data. Declare it with allowDestroy: true, apply, then remove it.`;
+}
+
+// Adoption must not grant deletion; the next apply records allow_destroy.
+function withoutAllowDestroy(spec: Record<string, unknown>): Record<string, unknown> {
+  const { allow_destroy: _ignored, ...options } = (spec.options ?? {}) as Record<string, string>;
+  const { options: _before, ...rest } = spec;
+  return Object.keys(options).length ? { ...rest, options } : rest;
+}
+
 export function neonDrivers(deps: NeonDeps): Drivers {
   const neon = neonClient(deps);
 
@@ -134,11 +147,10 @@ export function neonDrivers(deps: NeonDeps): Drivers {
       if (problems.length) throw new Error(`Neon project "${entry.physical_name}": ${problems.join(" and ")}; Neon cannot change that in place, so migrate the data by hand and use a new name`);
       return outputsOf(live);
     },
+    protect: refusal,
     async delete(current) {
-      const options = (current.spec.options ?? {}) as Record<string, string>;
-      if (options.allow_destroy !== "true") {
-        throw new Error(`Refusing to delete Neon project "${current.physical_name}": it holds data. Declare it with allowDestroy: true, apply, then remove it`);
-      }
+      const reason = refusal(current);
+      if (reason) throw new Error(reason);
       const id = current.outputs.project_id ?? (await neon.findByName(current.physical_name))?.id;
       if (id) await neon.remove(id);
       deps.log(`deleted Neon project ${current.physical_name}`);
@@ -149,7 +161,7 @@ export function neonDrivers(deps: NeonDeps): Drivers {
       const problems = differences(found, wanted(entry));
       return problems.length
         ? { outputs: outputsOf(found), spec: { physical_name: entry.physical_name }, notes: [`Neon project "${entry.physical_name}": ${problems.join(" and ")}; apply cannot change that, so update setup.ts to match`] }
-        : { outputs: outputsOf(found), spec: entry.spec };
+        : { outputs: outputsOf(found), spec: withoutAllowDestroy(entry.spec) };
     },
   };
 

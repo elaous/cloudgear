@@ -217,8 +217,8 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         source: `${fromConfig(db.file)}:${db.line}`,
         region: undefined,
         options: {
-          ...(db.region ? { region: db.region } : {}),
-          ...(db.postgres ? { pg_version: String(db.postgres) } : {}),
+          ...(db.region !== undefined ? { region: db.region } : {}),
+          ...(db.postgres !== undefined ? { pg_version: String(db.postgres) } : {}),
           ...(db.allowDestroy ? { allow_destroy: "true" } : {}),
         },
       })),

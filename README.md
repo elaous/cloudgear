@@ -1515,12 +1515,21 @@ The first argument after the provider is the Neon project name, used as is.
 - **Connection string:** cloudgear never reads, prints or stores it. You MUST
   put it where your functions read it, for example with `cloudgear secrets set`.
 - **Adopt first:** if exactly one Neon project has the name, `apply` and
-  `import` adopt it instead of creating another. Two projects with the same
-  name is an error. An adopted project whose region or Postgres version differs
-  from the code is an error, because Neon cannot change either in place.
+  `cloudgear import --all` (or `cloudgear import @neon.Database <name>`) adopt
+  it instead of creating another. Two projects with the same name is an error.
+  An adopted project whose region or Postgres version differs from the code is
+  an error, because Neon cannot change either in place. Adopting never records
+  `allowDestroy`; the next `apply` does.
 - **Destroy:** a database is deleted only if the applied config had
-  `allowDestroy: true`. To remove one, set it, run `apply`, then delete the
-  declaration and run `apply` again.
+  `allowDestroy: true`. `destroy` and `apply` check this before changing
+  anything, so a refusal leaves every resource as it was. To remove a
+  database, set `allowDestroy`, run `apply`, then delete the declaration and run
+  `apply` again. If the project was already deleted in the Neon console, the
+  same steps remove it from the state.
+- **Limits:** only projects in your personal Neon account are listed and
+  created; organization-owned projects are not supported yet. Calls are not
+  retried, so a rate limit stops the command without side effects and you can
+  run it again.
 
 ## Policies: `@cloudgear/iam`
 

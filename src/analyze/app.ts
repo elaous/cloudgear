@@ -174,6 +174,7 @@ export interface AppModel extends EdgeModel {
   warnings: string[];
 }
 
+const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
 const QUERY_NAME = /^[A-Za-z0-9_.:/-]+$/;
 const QUERY_VALUE = /^[A-Za-z0-9_.:/-]*$/;
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
@@ -322,11 +323,17 @@ function analyzeEntry(entryPath: string): AppModel {
     const provider = stringLiteral(providerArg, `${at}: Database provider`);
     if (provider !== "neon") throw new Error(`${at}: Database provider must be "neon"`);
     const name = configString(nameArg, `${at}: Database name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !DATABASE_OPTIONS.includes(key)) throw new Error(`${at}: unknown Database option "${key}" (supported: ${DATABASE_OPTIONS.join(", ")})`);
+      }
+    }
     const region = readStringOption(optionsArg, "region", `${at}: Database options`);
     const postgres = readNumberOption(optionsArg, "postgres", `${at}: Database options`);
     const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", `${at}: Database options`) ?? false;
     try {
-      new Database(provider, name, { ...(region ? { region } : {}), ...(postgres ? { postgres: postgres as PostgresVersion } : {}), allowDestroy });
+      new Database(provider, name, { ...(region !== undefined ? { region } : {}), ...(postgres !== undefined ? { postgres: postgres as PostgresVersion } : {}), allowDestroy });
     } catch (err) {
       throw new Error(`${at}: ${(err as Error).message}`);
     }

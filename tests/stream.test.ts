@@ -53,7 +53,7 @@ function fakeKinesis(initial: Record<string, Partial<Fake>> = {}, opts: { stuck?
         case "DescribeStreamSummaryCommand": {
           const stream = streams.get(input.StreamName);
           if (!stream) throw err("ResourceNotFoundException");
-          const status = opts.stuck ? "CREATING" : stream.busy > 0 ? "UPDATING" : stream.status;
+          const status = opts.stuck ? "CREATING" : stream.status !== "ACTIVE" ? stream.status : stream.busy > 0 ? "UPDATING" : stream.status;
           if (stream.busy > 0) stream.busy--;
           return { StreamDescriptionSummary: { StreamARN: stream.arn, StreamStatus: status, StreamModeDetails: { StreamMode: stream.mode }, OpenShardCount: stream.shards, RetentionPeriodHours: stream.retention } };
         }
@@ -71,7 +71,10 @@ function fakeKinesis(initial: Record<string, Partial<Fake>> = {}, opts: { stuck?
           mutate(byArn(input.StreamARN), (s) => (s.mode = input.StreamModeDetails.StreamMode));
           return {};
         case "UpdateShardCountCommand":
-          mutate(streams.get(input.StreamName), (s) => (s.shards = input.TargetShardCount));
+          mutate(streams.get(input.StreamName), (s) => {
+            if (input.TargetShardCount > s.shards * 2 || input.TargetShardCount * 2 < s.shards) throw err("InvalidArgumentException");
+            s.shards = input.TargetShardCount;
+          });
           return {};
         case "IncreaseStreamRetentionPeriodCommand":
         case "DecreaseStreamRetentionPeriodCommand":
@@ -169,13 +172,68 @@ describe("kinesis driver", () => {
   test("named settings are changed one at a time, waiting between changes", async () => {
     const k = fakeKinesis({ app: { shards: 1, retention: 24, mode: "ON_DEMAND" } });
     await applyConfig(configWith({ mode: "provisioned", shards: "3", retention_hours: "48" }), emptyState(), k.drivers);
-    expect(k.names().filter((n) => n !== "DescribeStreamSummaryCommand")).toEqual(["UpdateStreamModeCommand", "UpdateShardCountCommand", "IncreaseStreamRetentionPeriodCommand"]);
-    expect(k.calls.find((c) => c.name === "UpdateShardCountCommand")!.input).toMatchObject({ TargetShardCount: 3, ScalingType: "UNIFORM_SCALING" });
+    expect(k.names().filter((n) => n !== "DescribeStreamSummaryCommand")).toEqual(["UpdateStreamModeCommand", "UpdateShardCountCommand", "UpdateShardCountCommand", "IncreaseStreamRetentionPeriodCommand"]);
+    expect(k.calls.filter((c) => c.name === "UpdateShardCountCommand").map((c) => c.input)).toEqual([
+      { StreamName: "app", TargetShardCount: 2, ScalingType: "UNIFORM_SCALING" },
+      { StreamName: "app", TargetShardCount: 3, ScalingType: "UNIFORM_SCALING" },
+    ]);
     expect(k.streams.get("app")).toMatchObject({ mode: "PROVISIONED", shards: 3, retention: 48 });
 
     const lower = fakeKinesis({ app: { retention: 168 } });
-    await applyConfig(configWith({ retention_hours: "24" }), emptyState(), lower.drivers);
+    await applyConfig(configWith({ retention_hours: "24", allow_destroy: "true" }), emptyState(), lower.drivers);
     expect(lower.names()).toContain("DecreaseStreamRetentionPeriodCommand");
+  });
+
+  test("shards move toward the target in doubling and halving steps", async () => {
+    const up = fakeKinesis({ app: { shards: 1 } });
+    await applyConfig(configWith({ shards: "10" }), emptyState(), up.drivers);
+    expect(up.calls.filter((c) => c.name === "UpdateShardCountCommand").map((c) => c.input.TargetShardCount)).toEqual([2, 4, 8, 10]);
+    const down = fakeKinesis({ app: { shards: 10 } });
+    await applyConfig(configWith({ shards: "1" }), emptyState(), down.drivers);
+    expect(down.calls.filter((c) => c.name === "UpdateShardCountCommand").map((c) => c.input.TargetShardCount)).toEqual([5, 3, 2, 1]);
+    expect(down.streams.get("app")!.shards).toBe(1);
+  });
+
+  test("shortening retention is refused before any change unless allowDestroy is set", async () => {
+    const k = fakeKinesis({ app: { shards: 1, retention: 168, mode: "ON_DEMAND" } });
+    await expect(applyConfig(configWith({ mode: "provisioned", shards: "2", retention_hours: "24" }), emptyState(), k.drivers)).rejects.toThrow(/Shortening retention of Kinesis stream "app" from 168 to 24 hours makes older records unreadable for good/);
+    expect(k.names().filter((n) => n !== "DescribeStreamSummaryCommand")).toEqual([]);
+    expect(k.streams.get("app")!.retention).toBe(168);
+  });
+
+  test("a stream that is being deleted is neither adopted nor waited on", async () => {
+    const k = fakeKinesis({ app: { status: "DELETING" } });
+    await expect(applyConfig(configWith(), emptyState(), k.drivers)).rejects.toThrow(/is being deleted; run apply again once it is gone/);
+    expect(k.names()).not.toContain("CreateStreamCommand");
+    const [entry] = plan(configWith(), emptyState()).map((a) => a.desired!);
+    expect(await k.drivers["@aws.Kinesis"]!.adopt!(entry!, { entry: () => undefined })).toBeUndefined();
+  });
+
+  test("shards on an on-demand stream is an error, not silently ignored", async () => {
+    const existing = fakeKinesis({ app: { mode: "ON_DEMAND" } });
+    await expect(applyConfig(configWith({ shards: "2" }), emptyState(), existing.drivers)).rejects.toThrow(/is on-demand, so shards does not apply/);
+    const [entry] = plan(configWith({ shards: "2" }), emptyState()).map((a) => a.desired!);
+    expect((await existing.drivers["@aws.Kinesis"]!.adopt!(entry!, { entry: () => undefined }))!.notes![0]).toMatch(/shards is set but the stream is on-demand/);
+    expect(() => plan(configWith({ mode: "on-demand", shards: "2" }), emptyState())).toThrow(/shards only applies to provisioned mode/);
+  });
+
+  test("removing an option later leaves the stream as it is", async () => {
+    const k = fakeKinesis();
+    const state = emptyState();
+    await applyConfig(configWith({ shards: "2", retention_hours: "48" }), state, k.drivers);
+    const before = k.calls.length;
+    await applyConfig(configWith(), state, k.drivers);
+    expect(k.calls.slice(before).map((c) => c.name).filter((n) => n !== "DescribeStreamSummaryCommand")).toEqual([]);
+    expect(k.streams.get("app")).toMatchObject({ shards: 2, retention: 48 });
+  });
+
+  test("a stream deleted outside cloudgear is created again on the next apply", async () => {
+    const k = fakeKinesis();
+    const state = emptyState();
+    await applyConfig(configWith(), state, k.drivers);
+    k.streams.clear();
+    await applyConfig(configWith({ shards: "2" }), state, k.drivers);
+    expect(k.streams.get("app")).toMatchObject({ shards: 2 });
   });
 
   test("a stream that appears between the check and the create is adopted", async () => {

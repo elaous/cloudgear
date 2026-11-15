@@ -27,6 +27,7 @@ interface Wanted {
   mode?: "PROVISIONED" | "ON_DEMAND";
   shards?: number;
   retentionHours?: number;
+  allowDestroy: boolean;
 }
 
 interface Summary {
@@ -46,6 +47,7 @@ function wanted(spec: Record<string, unknown>): Wanted {
     ...(options.mode ? { mode: options.mode === "on-demand" ? ("ON_DEMAND" as const) : ("PROVISIONED" as const) } : {}),
     ...(options.shards ? { shards: Number(options.shards) } : {}),
     ...(options.retention_hours ? { retentionHours: Number(options.retention_hours) } : {}),
+    allowDestroy: options.allow_destroy === "true",
   };
 }
 
@@ -55,6 +57,7 @@ function differences(summary: Summary, want: Wanted): string[] {
   return [
     ...(want.mode && modeOf(summary) !== want.mode ? [`mode is ${modeOf(summary).toLowerCase().replace("_", "-")} (config: ${want.mode.toLowerCase().replace("_", "-")})`] : []),
     ...(want.shards !== undefined && (want.mode ?? modeOf(summary)) === "PROVISIONED" && summary.OpenShardCount !== want.shards ? [`${summary.OpenShardCount} shards (config: ${want.shards})`] : []),
+    ...(want.shards !== undefined && (want.mode ?? modeOf(summary)) === "ON_DEMAND" ? ["shards is set but the stream is on-demand"] : []),
     ...(want.retentionHours !== undefined && summary.RetentionPeriodHours !== want.retentionHours ? [`retention is ${summary.RetentionPeriodHours} hours (config: ${want.retentionHours})`] : []),
   ];
 }
@@ -65,6 +68,8 @@ const outputsOf = (summary: Summary): Record<string, string> => ({
   shards: String(summary.OpenShardCount ?? ""),
   retention_hours: String(summary.RetentionPeriodHours ?? ""),
 });
+
+const deleting = (name: string): Error => new Error(`Kinesis stream "${name}" is being deleted; run apply again once it is gone`);
 
 const named = (err: unknown, ...names: string[]): boolean => names.includes((err as { name?: string }).name ?? "");
 
@@ -89,22 +94,36 @@ export function kinesisDriver(deps: KinesisDeps): Driver {
       const summary = await describe(name);
       if (!summary) throw new Error(`Kinesis stream "${name}" disappeared while waiting for it`);
       if (summary.StreamStatus === "ACTIVE") return summary;
+      if (summary.StreamStatus === "DELETING") throw deleting(name);
       await deps.sleep(ACTIVE_WAIT_MS);
     }
     throw new Error(`Kinesis stream "${name}" is still not ACTIVE after ${(ACTIVE_ATTEMPTS * ACTIVE_WAIT_MS) / 1000} seconds; run apply again`);
   }
 
+  // Each step toward the shard target at most doubles or halves the count, which Kinesis requires.
+  const nextShards = (current: number, target: number): number => (target > current ? Math.min(target, current * 2) : Math.max(target, Math.ceil(current / 2)));
+
   async function converge(name: string, want: Wanted): Promise<Summary> {
     let summary = await active(name);
+    const mode = want.mode ?? modeOf(summary);
+    if (want.shards !== undefined && mode === "ON_DEMAND") {
+      throw new Error(`Kinesis stream "${name}" is on-demand, so shards does not apply; remove shards or set mode: "provisioned"`);
+    }
+    if (want.retentionHours !== undefined && summary.RetentionPeriodHours !== undefined && want.retentionHours < summary.RetentionPeriodHours && !want.allowDestroy) {
+      throw new Error(`Shortening retention of Kinesis stream "${name}" from ${summary.RetentionPeriodHours} to ${want.retentionHours} hours makes older records unreadable for good. Declare it with allowDestroy: true to allow that`);
+    }
     if (want.mode && modeOf(summary) !== want.mode) {
       await deps.kinesis.send(new UpdateStreamModeCommand({ StreamARN: summary.StreamARN, StreamModeDetails: { StreamMode: want.mode } }));
       deps.log(`switching Kinesis stream ${name} to ${want.mode.toLowerCase().replace("_", "-")}`);
       summary = await active(name);
     }
-    if (want.shards !== undefined && modeOf(summary) === "PROVISIONED" && summary.OpenShardCount !== want.shards) {
-      await deps.kinesis.send(new UpdateShardCountCommand({ StreamName: name, TargetShardCount: want.shards, ScalingType: "UNIFORM_SCALING" }));
-      deps.log(`scaling Kinesis stream ${name} to ${want.shards} shards`);
-      summary = await active(name);
+    if (want.shards !== undefined && mode === "PROVISIONED") {
+      while (summary.OpenShardCount !== undefined && summary.OpenShardCount !== want.shards) {
+        const target = nextShards(summary.OpenShardCount, want.shards);
+        await deps.kinesis.send(new UpdateShardCountCommand({ StreamName: name, TargetShardCount: target, ScalingType: "UNIFORM_SCALING" }));
+        deps.log(`scaling Kinesis stream ${name} to ${target} shards`);
+        summary = await active(name);
+      }
     }
     if (want.retentionHours !== undefined && summary.RetentionPeriodHours !== want.retentionHours) {
       const current = summary.RetentionPeriodHours ?? DEFAULT_RETENTION_HOURS;
@@ -118,7 +137,9 @@ export function kinesisDriver(deps: KinesisDeps): Driver {
   async function ensure(entry: DesiredEntry): Promise<Record<string, string>> {
     const want = wanted(entry.spec);
     const name = entry.physical_name;
-    if (await describe(name)) {
+    const existing = await describe(name);
+    if (existing?.StreamStatus === "DELETING") throw deleting(name);
+    if (existing) {
       deps.log(`adopted existing Kinesis stream ${name}`);
     } else {
       const mode = want.mode ?? "PROVISIONED";
@@ -156,7 +177,7 @@ export function kinesisDriver(deps: KinesisDeps): Driver {
     // Read only; a stream that differs is recorded without its spec so the next plan shows the change.
     async adopt(entry): Promise<Adopted | undefined> {
       const summary = await describe(entry.physical_name);
-      if (!summary) return undefined;
+      if (!summary || summary.StreamStatus === "DELETING") return undefined;
       const problems = differences(summary, wanted(entry.spec));
       return problems.length
         ? { outputs: outputsOf(summary), spec: { physical_name: entry.physical_name }, notes: [`Kinesis stream "${entry.physical_name}": ${problems.join("; ")}; apply will change it to match the config`] }

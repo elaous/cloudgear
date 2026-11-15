@@ -1515,7 +1515,7 @@ The first argument after the provider is the Neon project name, used as is.
 - **Connection string:** cloudgear never reads, prints or stores it. You MUST
   put it where your functions read it, for example with `cloudgear secrets set`.
 - **Adopt first:** if exactly one Neon project has the name, `apply` and
-  `cloudgear import --all` (or `cloudgear import @neon.Database <name>`) adopt
+  `cloudgear import --all` (or `cloudgear import @neon.Database db.<name>`) adopt
   it instead of creating another. Two projects with the same name is an error.
   An adopted project whose region or Postgres version differs from the code is
   an error, because Neon cannot change either in place. Adopting never records
@@ -1555,7 +1555,7 @@ letters, digits, `.`, `_`, `-`, with `/` between words).
 
 - **Adopt first:** an existing repository is adopted, and `apply` changes only
   the settings that differ. `cloudgear import --all` and
-  `cloudgear import @aws.ECR <name>` read it without changing anything;
+  `cloudgear import @aws.ECR registry.<name>` read it without changing anything;
   `import --arn` does not support ECR. Tags are applied only when cloudgear
   creates the repository.
 - **Lifecycle policy:** a policy is cloudgear's if every rule's description
@@ -1598,10 +1598,17 @@ The second argument is the stream name, used as is (1-128 letters, digits,
 - **Existing streams:** the defaults apply only when cloudgear creates the
   stream. On an existing stream, `apply` changes only the options you set, so
   declaring `new Stream("aws", "x")` never scales down or shortens a stream
-  someone sized differently. Changes run one at a time, each after the stream is
-  `ACTIVE` again, and AWS limits how often shards can be rescaled.
+  someone sized differently. Removing an option later leaves the stream as it
+  is. Changes run one at a time, each after the stream is `ACTIVE` again; `apply`
+  waits up to 5 minutes for that and otherwise stops so you can run it again.
+- **Shards:** Kinesis can double or halve the shard count in one step, so
+  `apply` rescales in steps (1 to 10 shards takes 1, 2, 4, 8, 10). AWS also
+  limits how often a stream can be rescaled or switched between modes; its
+  error is shown as is. `shards` on an on-demand stream is an error.
+- **Retention:** shortening it makes older records unreadable for good, so it
+  needs `allowDestroy: true` in the config.
 - **Adopt first:** an existing stream is adopted instead of recreated.
-  `cloudgear import --all` and `cloudgear import @aws.Kinesis <name>` read it
+  `cloudgear import --all` and `cloudgear import @aws.Kinesis stream.<name>` read it
   without changing anything; `import --arn` does not support Kinesis. Import
   never records `allowDestroy`; the next `apply` does. Tags are applied only
   when cloudgear creates the stream.

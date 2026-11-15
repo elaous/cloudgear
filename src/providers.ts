@@ -190,7 +190,12 @@ export function environmentOptions(options: Record<string, string> | undefined):
 export function validateConfigOptions(config: CloudgearConfig): void {
   const check = (type: string, name: string, options?: Record<string, string>) =>
     validateOptions(providerOfType(type), type, options, `${type} "${name}"`);
-  for (const resource of config.resource) check(resource.type, resource.name, resource.options);
+  for (const resource of config.resource) {
+    check(resource.type, resource.name, resource.options);
+    if (resource.type === "@aws.Kinesis" && resource.options?.mode === "on-demand" && resource.options.shards !== undefined) {
+      throw new Error(`${resource.type} "${resource.name}": shards only applies to provisioned mode`);
+    }
+  }
   for (const fn of config.function) check(fn.type, fn.name, fn.options);
   for (const certificate of config.certificate) check(capability(certificate.provider, "cdn").certificate, certificate.domain, certificate.options);
   for (const cdn of config.cdn) check(capability(cdn.provider, "cdn").type, cdn.domain, cdn.options);

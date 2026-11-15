@@ -1524,8 +1524,8 @@ The first argument after the provider is the Neon project name, used as is.
   `allowDestroy: true`. `destroy` and `apply` check this before changing
   anything, so a refusal leaves every resource as it was. To remove a
   database, set `allowDestroy`, run `apply`, then delete the declaration and run
-  `apply` again. If the project was already deleted in the Neon console, the
-  same steps remove it from the state.
+  `apply` again. A project deleted in the Neon console is not handled: remove
+  its entry from `.cloudgear/state.json` by hand.
 - **Limits:** only projects in your personal Neon account are listed and
   created; organization-owned projects are not supported yet. Calls are not
   retried, so a rate limit stops the command without side effects and you can

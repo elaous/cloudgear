@@ -427,7 +427,7 @@ export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
       actions.push({ ...base, op: "replace", changes: ["physical_name"] });
     } else {
       const changes = entry.kind === "function" ? functionChanges(current.spec, entry.spec) : specChanged(current.spec, entry.spec) ? ["spec"] : [];
-      if (!changes.length && entry.refresh && entry.deps.some((dep) => churned.has(dep))) changes.push("dependencies");
+      if (entry.refresh && entry.deps.some((dep) => churned.has(dep))) changes.push("dependencies");
       actions.push({ ...base, op: changes.length ? "update" : "noop", changes });
     }
     const last = actions[actions.length - 1]!;

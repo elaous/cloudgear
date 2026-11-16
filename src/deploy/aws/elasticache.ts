@@ -59,7 +59,7 @@ const networkOptions = (spec: Record<string, unknown>): Record<string, string> =
 
 const outputsOf = (id: string, found: Found, network?: ResolvedNetwork): Record<string, string> => ({
   id,
-  endpoint: `${found.host}:${found.port}`,
+  endpoint: found.host && found.port ? `${found.host}:${found.port}` : "",
   host: found.host,
   port: found.port,
   ...(network ? { vpc_id: network.vpcId, subnet_ids: network.subnetIds.join(","), security_group_ids: network.securityGroupIds.join(",") } : {}),
@@ -96,7 +96,7 @@ export function elastiCacheDriver(deps: ElastiCacheDeps): Driver {
         return { kind: "cluster", status: cluster.CacheClusterStatus ?? "", nodeType: cluster.CacheNodeType, engine: cluster.Engine, host: endpoint?.Address ?? "", port: String(endpoint?.Port ?? "") };
       }
     } catch (err) {
-      if (!named(err, "CacheClusterNotFound")) throw err;
+      if (!named(err, "CacheClusterNotFoundFault")) throw err;
     }
     return undefined;
   }
@@ -163,7 +163,7 @@ export function elastiCacheDriver(deps: ElastiCacheDeps): Driver {
         );
         deps.log(`creating cache ${id}; this takes several minutes`);
       } catch (err) {
-        if (!named(err, "ReplicationGroupAlreadyExistsFault", "CacheClusterAlreadyExists")) throw err;
+        if (!named(err, "ReplicationGroupAlreadyExistsFault", "CacheClusterAlreadyExistsFault")) throw err;
       }
     }
     found = await available(id);
@@ -188,18 +188,28 @@ export function elastiCacheDriver(deps: ElastiCacheDeps): Driver {
       const id = current.physical_name;
       const found = await find(id);
       if (found) {
-        try {
-          await client.send(found.kind === "group" ? new DeleteReplicationGroupCommand({ ReplicationGroupId: id }) : new DeleteCacheClusterCommand({ CacheClusterId: id }));
-        } catch (err) {
-          if (!named(err, "ReplicationGroupNotFoundFault", "CacheClusterNotFound")) throw err;
+        // A cache that is still being created or changed refuses a delete until it settles.
+        if (found.status !== "deleting" && !FAILED.has(found.status) && found.status !== "available") await available(id).catch(() => undefined);
+        if (found.status !== "deleting") {
+          try {
+            await client.send(found.kind === "group" ? new DeleteReplicationGroupCommand({ ReplicationGroupId: id }) : new DeleteCacheClusterCommand({ CacheClusterId: id }));
+          } catch (err) {
+            if (!named(err, "ReplicationGroupNotFoundFault", "CacheClusterNotFoundFault")) throw err;
+          }
+          deps.log(`deleting cache ${id}; this takes several minutes`);
         }
-        deps.log(`deleting cache ${id}; this takes several minutes`);
         await gone(id);
       }
-      try {
-        await client.send(new DeleteCacheSubnetGroupCommand({ CacheSubnetGroupName: id }));
-      } catch (err) {
-        if (!named(err, "CacheSubnetGroupNotFoundFault", "CacheSubnetGroupInUse")) throw err;
+      // The group can still read as in use for a moment after the cache is gone.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await client.send(new DeleteCacheSubnetGroupCommand({ CacheSubnetGroupName: id }));
+          break;
+        } catch (err) {
+          if (named(err, "CacheSubnetGroupNotFoundFault")) break;
+          if (!named(err, "CacheSubnetGroupInUse") || attempt >= 8) throw err;
+          await deps.sleep(15000);
+        }
       }
       deps.log(`deleted cache ${id}`);
     },
@@ -209,6 +219,7 @@ export function elastiCacheDriver(deps: ElastiCacheDeps): Driver {
       if (!found) return undefined;
       const problems = differences(found, wanted(entry.spec));
       const outputs = outputsOf(entry.physical_name, found);
+      if (found.status !== "available") problems.push(`it is ${found.status}, so it has no endpoint yet; apply will wait for it`);
       return problems.length
         ? { outputs, spec: { physical_name: entry.physical_name }, notes: [`cache "${entry.physical_name}": ${problems.join("; ")}; AWS cannot change that in place`] }
         : { outputs, spec: withoutAllowDestroy(entry.spec) };

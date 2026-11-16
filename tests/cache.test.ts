@@ -42,7 +42,8 @@ interface Group {
   kind: "group" | "cluster";
 }
 
-function fakeElastiCache(initial: Record<string, Partial<Group>> = {}, opts: { stuck?: boolean } = {}) {
+function fakeElastiCache(initial: Record<string, Partial<Group>> = {}, opts: { stuck?: boolean; subnetInUse?: number } = {}) {
+  let inUse = opts.subnetInUse ?? 0;
   const caches = new Map<string, Group>(Object.entries(initial).map(([id, g]) => [id, { status: "available", busy: 0, nodeType: "cache.t4g.micro", host: `${id}.cache.internal`, engine: "valkey", kind: "group", ...g }]));
   const subnetGroups = new Map<string, { SubnetIds: string[] }>();
   const calls: { name: string; input: any }[] = [];
@@ -69,14 +70,14 @@ function fakeElastiCache(initial: Record<string, Partial<Group>> = {}, opts: { s
           const id = input.ReplicationGroupId ?? input.CacheClusterId;
           const found = caches.get(id);
           const wantKind = name === "DescribeReplicationGroupsCommand" ? "group" : "cluster";
-          if (!found || found.kind !== wantKind) throw err(wantKind === "group" ? "ReplicationGroupNotFoundFault" : "CacheClusterNotFound");
+          if (!found || found.kind !== wantKind) throw err(wantKind === "group" ? "ReplicationGroupNotFoundFault" : "CacheClusterNotFoundFault");
           const status = opts.stuck ? "creating" : found.busy > 0 ? (found.status === "deleting" ? "deleting" : "creating") : found.status;
           if (found.busy > 0 && !opts.stuck) {
             found.busy--;
             if (found.busy === 0 && found.status === "deleting") caches.delete(id);
             else if (found.busy === 0) found.status = "available";
           }
-          const endpoint = { Address: found.host, Port: found.kind === "group" ? 6379 : 11211 };
+          const endpoint = status === "available" ? { Address: found.host, Port: found.kind === "group" ? 6379 : 11211 } : undefined;
           return found.kind === "group"
             ? { ReplicationGroups: [{ Status: status, CacheNodeType: found.nodeType, NodeGroups: [{ PrimaryEndpoint: endpoint }] }] }
             : { CacheClusters: [{ CacheClusterStatus: status, CacheNodeType: found.nodeType, Engine: found.engine, ConfigurationEndpoint: endpoint }] };
@@ -90,6 +91,10 @@ function fakeElastiCache(initial: Record<string, Partial<Group>> = {}, opts: { s
           return {};
         }
         case "DeleteCacheSubnetGroupCommand":
+          if (inUse > 0) {
+            inUse--;
+            throw err("CacheSubnetGroupInUse");
+          }
           if (!subnetGroups.delete(input.CacheSubnetGroupName)) throw err("CacheSubnetGroupNotFoundFault");
           return {};
       }
@@ -148,6 +153,7 @@ describe("Cache", () => {
     const long = cacheIdFor("p".repeat(50), "sessions");
     expect(long.length).toBeLessThanOrEqual(40);
     expect(long).toMatch(/^[a-z][a-z0-9-]*[a-z0-9]$/);
+    expect(cacheIdFor("a".repeat(30), "sessions-with-a-long-name")).not.toContain("--");
   });
 });
 
@@ -168,6 +174,16 @@ describe("analysis", () => {
     const model = analyzeApp(fixture("network"));
     expect(model.caches[0]).toMatchObject({ engine: "memcached", size: "small", allowDestroy: true, network: { vpc: "vpc-0abc1234", subnets: "subnet-aaaa1111", security_groups: "sg-0def4001" } });
     expect(model.functions[0]!.options).toEqual({ vpc: "vpc-0abc1234", subnets: "subnet-aaaa1111", security_groups: "sg-0def4001" });
+  });
+
+  test("a cache reached through an alias, a helper or another module is traced; other functions are untouched", () => {
+    for (const name of ["alias", "helper", "other-module"]) {
+      const model = analyzeApp(fixture(name));
+      const byName = Object.fromEntries(model.functions.map((f) => [f.name, f]));
+      const user = Object.values(byName).find((f) => f.name !== "plain")!;
+      expect([name, user.caches, user.options]).toEqual([name, ["sessions"], { vpc: "default" }]);
+      expect([name, byName.plain!.caches, byName.plain!.options]).toEqual([name, [], undefined]);
+    }
   });
 
   test("a function whose network differs from its cache's, and a declaration problem, are errors", () => {
@@ -235,6 +251,70 @@ describe("elasticache driver", () => {
 
     await expect(applyConfig(configWith({ size: "small" }), emptyState(), driversFor(cache).drivers)).rejects.toThrow(/node type is cache.t4g.micro \(config: cache.t4g.small\)/);
     await expect(applyConfig(configWith({ engine: "memcached" }), emptyState(), driversFor(cache).drivers)).rejects.toThrow(/it is a valkey or redis cache \(config: memcached\)/);
+  });
+
+  test("a memcached cache is found and deleted by its cluster id", async () => {
+    const cache = fakeElastiCache();
+    const { drivers } = driversFor(cache);
+    const state = emptyState();
+    await applyConfig(configWith({ engine: "memcached", allow_destroy: "true" }), state, drivers);
+    expect(state.entries[KEY]!.outputs.endpoint).toBe("app-sessions.cache.internal:11211");
+    await applyConfig(empty(), state, drivers);
+    expect(cache.names()).toContain("DeleteCacheClusterCommand");
+    expect(cache.caches.size).toBe(0);
+  });
+
+  test("a delete that is run again while the cache is still deleting waits instead of deleting twice", async () => {
+    const cache = fakeElastiCache();
+    const { drivers } = driversFor(cache);
+    const state = emptyState();
+    await applyConfig(configWith({ allow_destroy: "true" }), state, drivers);
+    const group = cache.caches.get("app-sessions")!;
+    group.status = "deleting";
+    group.busy = 2;
+    const before = cache.calls.length;
+    await applyConfig(empty(), state, drivers);
+    expect(cache.calls.slice(before).map((c) => c.name)).not.toContain("DeleteReplicationGroupCommand");
+    expect(cache.caches.size).toBe(0);
+    expect(state.entries).toEqual({});
+  });
+
+  test("a delete waits for a cache that is still being created", async () => {
+    const cache = fakeElastiCache();
+    const { drivers } = driversFor(cache);
+    const state = emptyState();
+    await applyConfig(configWith({ allow_destroy: "true" }), state, drivers);
+    const group = cache.caches.get("app-sessions")!;
+    group.status = "creating";
+    group.busy = 3;
+    await applyConfig(empty(), state, drivers);
+    expect(cache.caches.size).toBe(0);
+  });
+
+  test("a subnet group that still reads as in use is retried, and a persistent one is an error", async () => {
+    const settling = fakeElastiCache({}, { subnetInUse: 2 });
+    const { drivers } = driversFor(settling);
+    const state = emptyState();
+    await applyConfig(configWith({ allow_destroy: "true" }), state, drivers);
+    await applyConfig(empty(), state, drivers);
+    expect(settling.subnetGroups.size).toBe(0);
+    expect(settling.names().filter((n) => n === "DeleteCacheSubnetGroupCommand")).toHaveLength(3);
+
+    const stuck = fakeElastiCache({}, { subnetInUse: 99 });
+    const stuckDrivers = driversFor(stuck).drivers;
+    const stuckState = emptyState();
+    await applyConfig(configWith({ allow_destroy: "true" }), stuckState, stuckDrivers);
+    await expect(applyConfig(empty(), stuckState, stuckDrivers)).rejects.toThrow(/CacheSubnetGroupInUse/);
+    expect(stuckState.entries[KEY]).toBeDefined();
+  });
+
+  test("adopting a cache that is not available yet records no endpoint and says so", async () => {
+    const cache = fakeElastiCache({ "app-sessions": { status: "creating", busy: 5 } });
+    const { drivers } = driversFor(cache);
+    const [entry] = plan(configWith(), emptyState()).map((a) => a.desired!);
+    const adopted = await drivers["@aws.ElastiCache"]!.adopt!(entry!, { entry: () => undefined });
+    expect(adopted!.outputs.endpoint).toBe("");
+    expect(adopted!.notes![0]).toMatch(/it is creating, so it has no endpoint yet; apply will wait for it/);
   });
 
   test("a bad network fails before anything is created", async () => {
@@ -352,7 +432,37 @@ describe("function and cache together", () => {
   });
 });
 
+describe("function refresh", () => {
+  test("a cache replaced in the same apply as a code change still updates the function's endpoint", async () => {
+    const config = (physical: string, sha: string): CloudgearConfig =>
+      baseConfig({
+        resource: [cacheResource({ allow_destroy: "true" }, physical)],
+        function: [fn({ permission: [], bundle: { path: "build/foo/index.mjs", sha256: sha }, env: [{ key: "CLOUDGEAR_CACHE_SESSIONS", value_from: "cache.sessions", output: "endpoint" }], options: NETWORK })],
+      });
+    const live = new Set<string>();
+    const aws = fakeAws({
+      CreateReplicationGroupCommand: (input: any) => (live.add(input.ReplicationGroupId), {}),
+      DeleteReplicationGroupCommand: (input: any) => (live.delete(input.ReplicationGroupId), {}),
+      DescribeReplicationGroupsCommand: (input: any) => {
+        if (!live.has(input.ReplicationGroupId)) throw Object.assign(new Error("nf"), { name: "ReplicationGroupNotFoundFault" });
+        return { ReplicationGroups: [{ Status: "available", CacheNodeType: "cache.t4g.micro", NodeGroups: [{ PrimaryEndpoint: { Address: `${input.ReplicationGroupId}.cache.internal`, Port: 6379 } }] }] };
+      },
+    });
+    const state = emptyState();
+    await apply(plan(config("app-a", "v1"), state), state, aws.drivers, { save: () => {} });
+    const before = aws.calls.length;
+    await apply(plan(config("app-b", "v2"), state), state, aws.drivers, { save: () => {} });
+    const after = aws.calls.slice(before);
+    expect(after.map((c) => c.name)).toContain("UpdateFunctionCodeCommand");
+    expect(after.find((c) => c.name === "UpdateFunctionConfigurationCommand")!.input.Environment.Variables.CLOUDGEAR_CACHE_SESSIONS).toBe("app-b.cache.internal:6379");
+  });
+});
+
 describe("option validation", () => {
+  test("a user cannot override the generated cache variable", () => {
+    expect(() => validateOptions("aws", "@aws.Lambda", { "env.CLOUDGEAR_CACHE_SESSIONS": "x" }, "f")).toThrow(/not a usable environment variable name/);
+  });
+
   test("ElastiCache options are checked", () => {
     validateOptions("aws", "@aws.ElastiCache", { engine: "redis", size: "small", vpc: "default", allow_destroy: "true" }, "c");
     expect(() => validateOptions("aws", "@aws.ElastiCache", { engine: "dynamo" }, "c")).toThrow(/must be one of valkey, redis, memcached/);

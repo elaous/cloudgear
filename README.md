@@ -1727,13 +1727,16 @@ following references to that variable.
   valkey or redis against memcached, is an error, because AWS cannot change
   that in place; valkey and redis are not told apart. `cloudgear import --all`
   and `cloudgear import @aws.ElastiCache cache.<name>` read it without changing
-  anything and never record `allowDestroy`. The network cannot change after
-  the first apply.
+  anything and never record `allowDestroy`. cloudgear does not check which
+  network an adopted cache lives in, so give the cache the network it already
+  uses. The network cannot change after the first apply.
 - **Destroy.** The cache is deleted only if the applied config had
   `allowDestroy: true`, and `destroy` checks that before changing anything. It
-  waits for the cache to go, then deletes the subnet group cloudgear made for
-  it. If a cache is replaced, the functions that use it are updated with the new
-  endpoint.
+  waits up to 20 minutes for the cache to go and then deletes the subnet group
+  cloudgear made for it; if it gives up, run it again, because a second run
+  waits for the delete already under way. If a cache is replaced, the functions
+  that use it are updated with the new endpoint, even when the same apply also
+  changes their code.
 - **Cost.** A cache bills every hour it exists, even idle. As a rough guide the
   smallest node is about $9 to $12 a month; check current AWS pricing.
 - **Permissions.** On top of the Networks list, the deploying identity needs the

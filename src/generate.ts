@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
+import { Cache } from "@cloudgear/cache";
 import { debug, timed } from "@cloudgear/debug";
 import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { decodeConfig, encodeConfig, type AttachedOriginSpec, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
 import { configHash, envReportPath, type EnvReport, type EnvSource } from "./envreport";
-import { fitName, sanitizeName } from "./names";
+import { cacheIdFor, fitName, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
 
 // Set by the Lambda runtime or every Node program.
@@ -73,6 +74,19 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     const clash = envVars.get(envVar);
     if (clash) throw new Error(`BlobStores "${clash}" and "${resource.name}" map to the same env var ${envVar}; rename one`);
     envVars.set(envVar, resource.name);
+  }
+
+  const cacheEnvVars = new Map<string, string>();
+  const cacheIds = new Map<string, string>();
+  for (const cache of model.caches) {
+    const envVar = Cache.envVarFor(cache.name);
+    const clash = cacheEnvVars.get(envVar);
+    if (clash) throw new Error(`Caches "${clash}" and "${cache.name}" map to the same env var ${envVar}; rename one`);
+    cacheEnvVars.set(envVar, cache.name);
+    const id = cacheIdFor(project, cache.name);
+    const same = cacheIds.get(id);
+    if (same) throw new Error(`Caches "${same}" and "${cache.name}" both deploy as "${id}"; rename one`);
+    cacheIds.set(id, cache.name);
   }
 
   const physicalNames = new Map<string, string>();
@@ -173,6 +187,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       env: [
         ...usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
         ...fn.publishes.map((bus) => ({ key: EventBus.envVarFor(bus), value_from: busResource(bus) })),
+        ...fn.caches.map((cache) => ({ key: Cache.envVarFor(cache), value_from: `cache.${cache}`, output: "endpoint" })),
       ],
       reserved_concurrency: reservedConcurrency,
       options: fn.options,
@@ -221,6 +236,21 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
           ...(registry.immutableTags !== undefined ? { immutable_tags: String(registry.immutableTags) } : {}),
           ...(registry.keepUntaggedDays !== undefined ? { keep_untagged_days: registry.keepUntaggedDays === false ? "off" : String(registry.keepUntaggedDays) } : {}),
           ...(registry.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
+      model.caches.map((cache) => ({
+        name: `cache.${cache.name}`,
+        type: capability(cache.provider, "cache").type,
+        physical_name: cacheIdFor(project, cache.name),
+        dry: false,
+        source: `${fromConfig(cache.file)}:${cache.line}`,
+        region: undefined,
+        options: {
+          ...(cache.engine !== undefined ? { engine: cache.engine } : {}),
+          ...(cache.size !== undefined ? { size: cache.size } : {}),
+          ...cache.network,
+          ...(cache.allowDestroy ? { allow_destroy: "true" } : {}),
         },
       })),
     ).concat(

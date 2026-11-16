@@ -258,10 +258,10 @@ describe("failures and edge cases", () => {
     });
     await applyAll(configWith({ vpc: "default" }), emptyState(), aws);
     expect(aws.of("CreateFunctionCommand")[0].VpcConfig.SubnetIds).toEqual(["subnet-aaaa0002", "subnet-cccc0001"]);
-    expect(aws.logs.some((m) => /functions will use subnets subnet-aaaa0002, subnet-cccc0001/.test(m))).toBe(true);
+    expect(aws.logs.some((m) => /using subnets subnet-aaaa0002, subnet-cccc0001/.test(m))).toBe(true);
 
     const none = fakeAws({ DescribeSubnetsCommand: () => ({ Subnets: [{ SubnetId: "subnet-aaaa0001", AvailabilityZone: "eu-west-1a", State: "pending" }] }) });
-    await expect(applyAll(configWith({ vpc: "default" }), emptyState(), none)).rejects.toThrow(/no subnet Lambda can use/);
+    await expect(applyAll(configWith({ vpc: "default" }), emptyState(), none)).rejects.toThrow(/no subnet that can be used/);
   });
 
   test("EC2 not-found errors become plain messages and nothing is created", async () => {

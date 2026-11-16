@@ -19,6 +19,7 @@ export interface ProviderProfile {
   events?: { type: string; rule: string };
   registry?: { type: string };
   stream?: { type: string };
+  cache?: { type: string };
 }
 
 const oneOf =
@@ -39,6 +40,12 @@ const idList =
     return ids.every((id) => pattern.test(id)) && new Set(ids).size === ids.length ? undefined : `must be a comma-separated list of distinct ${label} ids`;
   };
 
+const NETWORK_RULES: Record<string, OptionRule> = {
+  vpc: (v) => (v === "default" || /^vpc-[0-9a-f]{8,17}$/.test(v) ? undefined : 'must be "default" or a VPC id such as "vpc-0123456789abcdef0"'),
+  subnets: idList(/^subnet-[0-9a-f]{8,17}$/, 16, "subnet"),
+  security_groups: idList(/^sg-[0-9a-f]{8,17}$/, 5, "security group"),
+};
+
 const environmentVariable: OptionRule = (value) =>
   value.length <= 4096 ? undefined : "must be at most 4096 characters";
 
@@ -55,9 +62,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
         keys: {
           tracing: oneOf("Active", "PassThrough"),
           ephemeral_storage_mb: integerBetween(512, 10240),
-          vpc: (v) => (v === "default" || /^vpc-[0-9a-f]{8,17}$/.test(v) ? undefined : 'must be "default" or a VPC id such as "vpc-0123456789abcdef0"'),
-          subnets: idList(/^subnet-[0-9a-f]{8,17}$/, 16, "subnet"),
-          security_groups: idList(/^sg-[0-9a-f]{8,17}$/, 5, "security group"),
+          ...NETWORK_RULES,
         },
         prefixes: { [ENV_OPTION_PREFIX]: environmentVariable },
       },
@@ -70,6 +75,14 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           immutable_tags: oneOf("true", "false"),
           keep_untagged_days: (v) => (v === "off" || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 365) ? undefined : 'must be an integer from 1 to 365, or "off"'),
           allow_destroy: oneOf("true"),
+        },
+      },
+      "@aws.ElastiCache": {
+        keys: {
+          engine: oneOf("valkey", "redis", "memcached"),
+          size: oneOf("micro", "small", "medium"),
+          allow_destroy: oneOf("true"),
+          ...NETWORK_RULES,
         },
       },
       "@aws.Kinesis": {
@@ -90,6 +103,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     events: { type: "@aws.EventBus", rule: "@aws.EventRule" },
     registry: { type: "@aws.ECR" },
     stream: { type: "@aws.Kinesis" },
+    cache: { type: "@aws.ElastiCache" },
     blobStore: {
       type: "@aws.S3",
       actions: {
@@ -130,9 +144,9 @@ export function profileOfType(type: string): ProviderProfile {
   return providerProfile(providerOfType(type));
 }
 
-export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry" | "stream">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
+export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry" | "stream" | "cache">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
   const found = providerProfile(provider)[name];
-  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : name === "stream" ? "a stream" : "schedules"} yet`);
+  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : name === "stream" ? "a stream" : name === "cache" ? "a cache" : "schedules"} yet`);
   return found as NonNullable<ProviderProfile[K]>;
 }
 

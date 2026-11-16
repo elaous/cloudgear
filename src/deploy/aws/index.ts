@@ -33,15 +33,16 @@ import { createHash } from "node:crypto";
 import { ACMClient } from "@aws-sdk/client-acm";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { ApiGatewayV2Client } from "@aws-sdk/client-apigatewayv2";
-import { DescribeSecurityGroupsCommand, DescribeSubnetsCommand, DescribeVpcsCommand, EC2Client } from "@aws-sdk/client-ec2";
+import { EC2Client } from "@aws-sdk/client-ec2";
 import { ECRClient } from "@aws-sdk/client-ecr";
+import { ElastiCacheClient } from "@aws-sdk/client-elasticache";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import { KinesisClient } from "@aws-sdk/client-kinesis";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { DriverContext, Drivers } from "../apply";
-import type { DesiredEntry, FunctionComparable } from "../plan";
+import { OUTPUT_REFERENCE, type DesiredEntry, type FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
 import type { FunctionSpec, SecretRefSpec } from "../../config/schema";
 import { environmentOptions } from "../../providers";
@@ -55,7 +56,9 @@ import { apiGatewayDriver } from "./apigateway";
 import { cloudFrontDriver } from "./cloudfront";
 import { scheduleDriver } from "./schedule";
 import { ecrDriver } from "./ecr";
+import { elastiCacheDriver } from "./elasticache";
 import { kinesisDriver } from "./kinesis";
+import { resolveNetwork, type ResolvedNetwork } from "./network";
 import { eventBusDriver, eventRuleDriver } from "./eventbus";
 
 export interface SendClient {
@@ -66,7 +69,7 @@ export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
   readIncluded?: (fn: FunctionSpec) => { name: string; data: Uint8Array }[];
-  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient; ecr?: SendClient; kinesis?: SendClient; ec2?: SendClient };
+  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient; ecr?: SendClient; kinesis?: SendClient; ec2?: SendClient; elasticache?: SendClient };
   // Entry's own zone, so removals still clean up.
   dns?: (provider: string, zone: string, token?: SecretRefSpec) => DnsDriver | Promise<DnsDriver>;
   // Also tags each resource with its logical name.
@@ -120,6 +123,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const apigateway = withDebug("apigateway", options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region }));
   const ecr = withDebug("ecr", options.clients?.ecr ?? new ECRClient({ region: options.region }));
   const ec2 = withDebug("ec2", options.clients?.ec2 ?? new EC2Client({ region: options.region }));
+  const elasticache = withDebug("elasticache", options.clients?.elasticache ?? new ElastiCacheClient({ region: options.region }));
   const kinesis = withDebug("kinesis", options.clients?.kinesis ?? new KinesisClient({ region: options.region }));
   const events = withDebug("events", options.clients?.events ?? new EventBridgeClient({ region: options.region }));
   const zones = new Map<string, Promise<DnsDriver>>();
@@ -339,66 +343,22 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     );
   }
 
-  function environment(spec: FunctionComparable) {
-    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...spec.env, ...environmentOptions(spec.options) } };
+  // Values that point at another resource's output are filled in from state; without a context they stay as written.
+  function environment(spec: FunctionComparable, context?: DriverContext) {
+    const resolved = Object.fromEntries(
+      Object.entries(spec.env).map(([key, value]) => {
+        if (!context || !value.startsWith(OUTPUT_REFERENCE)) return [key, value];
+        const at = value.lastIndexOf("#");
+        const stateEntry = value.slice(OUTPUT_REFERENCE.length, at);
+        const found = context.entry(stateEntry)?.outputs[value.slice(at + 1)];
+        if (found === undefined || found === "") throw new Error(`${stateEntry} has no ${value.slice(at + 1)} yet, so ${key} cannot be set; apply it first`);
+        return [key, found];
+      }),
+    );
+    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...resolved, ...environmentOptions(spec.options) } };
   }
 
-  interface ResolvedNetwork {
-    vpcId: string;
-    subnetIds: string[];
-    securityGroupIds: string[];
-  }
-
-  const notFound = (err: unknown, prefix: string): boolean => ((err as { name?: string }).name ?? "").startsWith(prefix);
-
-  // Looks the VPC up so a wrong id fails before anything is created.
-  async function networkFor(spec: FunctionComparable): Promise<ResolvedNetwork | undefined> {
-    const wanted = spec.options?.vpc;
-    if (!wanted) return undefined;
-    let vpcs: { VpcId?: string }[];
-    try {
-      vpcs = (await ec2.send(new DescribeVpcsCommand(wanted === "default" ? { Filters: [{ Name: "is-default", Values: ["true"] }] } : { VpcIds: [wanted] }))).Vpcs ?? [];
-    } catch (err) {
-      if (!notFound(err, "InvalidVpcID")) throw err;
-      vpcs = [];
-    }
-    const vpcId = vpcs[0]?.VpcId;
-    if (!vpcId) {
-      throw new Error(wanted === "default" ? `There is no default VPC in ${options.region}; declare new Network("aws", { vpc: "vpc-..." }) and pass it as the router's network` : `VPC ${wanted} was not found in ${options.region}`);
-    }
-    const given = spec.options?.subnets?.split(",");
-    let subnets: { SubnetId: string; AvailabilityZone?: string; State?: string; Ipv6Native?: boolean; AvailableIpAddressCount?: number }[];
-    try {
-      subnets = (await ec2.send(new DescribeSubnetsCommand({ Filters: [{ Name: "vpc-id", Values: [vpcId] }], ...(given ? { SubnetIds: given } : {}) }))).Subnets ?? [];
-    } catch (err) {
-      if (!given || !notFound(err, "InvalidSubnetID")) throw err;
-      throw new Error(`Subnets ${given.join(", ")} were not found in VPC ${vpcId}`);
-    }
-    const missing = (given ?? []).filter((id) => !subnets.some((subnet) => subnet.SubnetId === id));
-    if (missing.length) throw new Error(`Subnets ${missing.join(", ")} are not in VPC ${vpcId}`);
-    // Without a choice: ordinary availability zones only, one subnet each, the one with the most free addresses.
-    const usable = subnets.filter((subnet) => subnet.State !== "pending" && !subnet.Ipv6Native && /^[a-z]{2}(-[a-z]+)+-\d[a-z]$/.test(subnet.AvailabilityZone ?? ""));
-    const perZone = new Map<string, (typeof usable)[number]>();
-    for (const subnet of [...usable].sort((x, y) => (y.AvailableIpAddressCount ?? 0) - (x.AvailableIpAddressCount ?? 0) || (x.SubnetId < y.SubnetId ? -1 : 1))) {
-      if (!perZone.has(subnet.AvailabilityZone!)) perZone.set(subnet.AvailabilityZone!, subnet);
-    }
-    const subnetIds = given ? [...given] : [...perZone.values()].map((subnet) => subnet.SubnetId).sort();
-    if (!subnetIds.length) throw new Error(`VPC ${vpcId} has no subnet Lambda can use; name subnets with the network's subnets option`);
-    if (!given) log(`functions will use subnets ${subnetIds.join(", ")} of ${vpcId}; name subnets in the network to choose others`);
-    const groups = spec.options?.security_groups?.split(",");
-    let found: { GroupId: string }[];
-    try {
-      found = (await ec2.send(new DescribeSecurityGroupsCommand({ Filters: [{ Name: "vpc-id", Values: [vpcId] }, ...(groups ? [{ Name: "group-id", Values: groups }] : [{ Name: "group-name", Values: ["default"] }])] }))).SecurityGroups ?? [];
-    } catch (err) {
-      if (!groups || !notFound(err, "InvalidGroup")) throw err;
-      throw new Error(`Security groups ${groups.join(", ")} were not found in VPC ${vpcId}`);
-    }
-    const groupIds = found.map((group) => group.GroupId);
-    if (groups ? groups.some((id) => !groupIds.includes(id)) : !groupIds.length) {
-      throw new Error(groups ? `Security groups ${groups.filter((id) => !groupIds.includes(id)).join(", ")} are not in VPC ${vpcId}` : `VPC ${vpcId} has no default security group; pass securityGroups`);
-    }
-    return { vpcId, subnetIds, securityGroupIds: groups ? [...groups] : groupIds };
-  }
+  const networkFor = (spec: FunctionComparable) => resolveNetwork({ ec2, region: options.region, log }, spec.options);
 
   const vpcConfig = (network: ResolvedNetwork | undefined, wasInVpc: boolean) =>
     network ? { VpcConfig: { SubnetIds: network.subnetIds, SecurityGroupIds: network.securityGroupIds } } : wasInVpc ? { VpcConfig: { SubnetIds: [], SecurityGroupIds: [] } } : {};
@@ -418,6 +378,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     "@aws.EventBus": eventBusDriver({ events, lambda, log, tags: tagger }),
     "@aws.ECR": ecrDriver({ ecr, log, tags: tagger }),
     "@aws.Kinesis": kinesisDriver({ kinesis, log, tags: tagger, sleep }),
+    "@aws.ElastiCache": elastiCacheDriver({ elasticache, ec2, region: options.region, log, tags: tagger, sleep }),
     "@aws.EventRule": eventRuleDriver({ events, lambda, log, tags: tagger }),
     "@aws.Certificate": certificateDriver({ tags: tagger, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),
     "@aws.CloudFront": cloudFrontDriver({ tags: tagger, cloudfront, s3: s3For, lambda, dns: requireDns, region: options.region, sleep, log }),
@@ -504,7 +465,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     },
 
     "@aws.Lambda": {
-      async create(entry: DesiredEntry) {
+      async create(entry: DesiredEntry, context) {
         const spec = entry.spec as unknown as FunctionComparable;
         const roleName = roleNameFor(entry.physical_name);
         const network = await networkFor(spec);
@@ -538,7 +499,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
                   Code: { ZipFile: code },
                   MemorySize: spec.memory_mb,
                   Timeout: spec.timeout_s,
-                  Environment: environment(spec),
+                  Environment: environment(spec, context),
                   ...(options.tags ? { Tags: tagsFor(entry.name) } : {}),
                   ...lambdaOptions(spec),
                   ...vpcConfig(network, false),
@@ -642,7 +603,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code }));
           await waitForFunction(entry.physical_name);
         }
-        if (changes.includes("config")) {
+        // A resource this function reads an output from was replaced; its new value has to be put in the environment.
+        const refreshed = changes.includes("dependencies") && Object.values(spec.env).some((value) => value.startsWith(OUTPUT_REFERENCE));
+        if (changes.includes("config") || refreshed) {
           const wasInVpc = !!(current.spec.options as Record<string, string> | undefined)?.vpc || !!current.outputs.vpc_id;
           const network = await networkFor(spec);
           const ownRole = roleName === roleNameFor(entry.physical_name);
@@ -659,7 +622,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
                     Handler: "index.handler",
                     MemorySize: spec.memory_mb,
                     Timeout: spec.timeout_s,
-                    Environment: environment(spec),
+                    Environment: environment(spec, context),
                     ...lambdaOptions(spec),
                     ...vpcConfig(network, wasInVpc),
                   }),

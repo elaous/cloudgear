@@ -1682,6 +1682,64 @@ outside any VPC, as before.
   AWS can hold its network interfaces for a while, which delays deleting the
   subnets or groups it used.
 
+## Caches: `@cloudgear/cache`
+
+`Cache` declares a managed in-memory cache. Constructing it does nothing;
+`cloudgear apply` creates it, or adopts the one that already has the name. AWS
+(ElastiCache) is the first provider.
+
+```ts
+import { Cache } from "@cloudgear/cache";
+
+const cache = new Cache("aws", "sessions");
+
+export async function handler() {
+  const [host, port] = [cache.host, cache.port];   // from CLOUDGEAR_CACHE_SESSIONS
+  // connect with the Redis or Memcached client you use
+}
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `engine` | `"valkey"` | `"valkey"` or `"redis"` (same protocol) or `"memcached"` |
+| `size` | `"micro"` | One node: `"micro"`, `"small"` or `"medium"` (`cache.t4g.*`) |
+| `network` | the default VPC | A `Network` from `@cloudgear/network` |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) remove the cache and its data |
+
+Assign the cache to a variable: cloudgear finds the functions that use it by
+following references to that variable.
+
+- **Functions that use it.** Each function whose code reaches `cache` runs in
+  the cache's network, with `CLOUDGEAR_CACHE_<NAME>` set to `host:port`, filled
+  in once the cache exists. Other functions are not touched. If the router's
+  `network` differs from the cache's, or one function uses caches in different
+  networks, `generate` stops.
+- **No outbound internet** for those functions; see Networks above. cloudgear
+  does not create a NAT gateway.
+- **Access.** The cache and the functions share the network's security groups
+  (the VPC's default group unless you name some), which let their members reach
+  each other. The cache has no password and no TLS, and encrypts data at rest.
+  Anything else in those groups can reach it.
+- **Creating takes minutes.** `apply` waits up to 20 minutes; if it gives up,
+  run it again and it adopts the cache and keeps waiting. A single node has no
+  replica, so a failure or maintenance loses its contents.
+- **Adopt first.** An existing cache is adopted. A different node type, or
+  valkey or redis against memcached, is an error, because AWS cannot change
+  that in place; valkey and redis are not told apart. `cloudgear import --all`
+  and `cloudgear import @aws.ElastiCache cache.<name>` read it without changing
+  anything and never record `allowDestroy`. The network cannot change after
+  the first apply.
+- **Destroy.** The cache is deleted only if the applied config had
+  `allowDestroy: true`, and `destroy` checks that before changing anything. It
+  waits for the cache to go, then deletes the subnet group cloudgear made for
+  it. If a cache is replaced, the functions that use it are updated with the new
+  endpoint.
+- **Cost.** A cache bills every hour it exists, even idle. As a rough guide the
+  smallest node is about $9 to $12 a month; check current AWS pricing.
+- **Permissions.** On top of the Networks list, the deploying identity needs the
+  ElastiCache create, describe and delete actions for replication groups, cache
+  clusters and subnet groups.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1898,6 +1956,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/registry` | `Registry` (ECR) |
 | `@cloudgear/stream` | `Stream` (Kinesis) |
 | `@cloudgear/network` | `Network` (existing VPC) |
+| `@cloudgear/cache` | `Cache` (ElastiCache) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -1945,7 +2004,10 @@ Where each moving part lives, since several are called across packages:
 | `Stream` | `packages/stream/index.ts` | apps; `src/analyze/app.ts` |
 | Kinesis stream driver | `src/deploy/aws/kinesis.ts` | `awsDrivers` |
 | `Network` | `packages/network/index.ts` | apps; `src/analyze/app.ts` (`readNetworkOption`) |
-| VPC lookup and `VpcConfig` | `src/deploy/aws/index.ts` (`networkFor`) | the `@aws.Lambda` driver |
+| VPC lookup (`resolveNetwork`) | `src/deploy/aws/network.ts` | the Lambda and ElastiCache drivers |
+| `Cache` | `packages/cache/index.ts` | apps; `src/analyze/app.ts` |
+| ElastiCache driver | `src/deploy/aws/elasticache.ts` | `awsDrivers` |
+| `OUTPUT_REFERENCE` (env filled from a resource's output) | `src/deploy/plan.ts` | `environment()` in the Lambda driver |
 | `destroyAllowed`, `withoutAllowDestroy` | `src/deploy/protect.ts` | the Neon, ECR and Kinesis drivers |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |

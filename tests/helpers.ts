@@ -115,12 +115,12 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
     tags,
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
     readIncluded: (spec) => (spec.include ?? []).map((name) => ({ name, data: new TextEncoder().encode(`content of ${name}`) })),
-    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client, ec2: client },
+    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client, ec2: client, elasticache: client },
     dns: dns ? (provider, zone, token) => (onDns?.(provider, zone, token), dns) : undefined,
     sleep: async () => void sleeps.push(0),
     log: (message) => void logs.push(message),
   });
-  return { calls, drivers, dns, sleeps, logs, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };
+  return { calls, drivers, client, dns, sleeps, logs, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };
 }
 
 export async function applyAll(config: CloudgearConfig, state: State, aws = fakeAws()) {

@@ -15,6 +15,7 @@ import { assertPolicyDocument, assertPolicyName, broadStatements, type PolicyDoc
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { Database, type PostgresVersion } from "@cloudgear/database";
+import { Cache, type CacheEngine, type CacheSize } from "@cloudgear/cache";
 import { Network } from "@cloudgear/network";
 import { Registry } from "@cloudgear/registry";
 import { Stream, type StreamMode } from "@cloudgear/stream";
@@ -101,6 +102,7 @@ export interface AnalyzedFunction {
   policies: PolicyModel[];
   events: EventTriggerModel[];
   publishes: string[];
+  caches: string[];
   include: { rel: string; abs: string }[];
   passRequest: boolean;
   responseKind?: "helper" | "writer";
@@ -174,6 +176,18 @@ export interface AnalyzedRegistry {
   line: number;
 }
 
+export interface AnalyzedCache {
+  name: string;
+  provider: string;
+  engine?: CacheEngine;
+  size?: CacheSize;
+  // The vpc, subnets and security_groups option values; "default" VPC when no network was given.
+  network: Record<string, string>;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
 export interface AnalyzedStream {
   name: string;
   provider: string;
@@ -197,12 +211,15 @@ export interface AppModel extends EdgeModel {
   databases: AnalyzedDatabase[];
   registries: AnalyzedRegistry[];
   streams: AnalyzedStream[];
+  caches: AnalyzedCache[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
 
+const NETWORK_OPTION_KEYS = ["vpc", "subnets", "security_groups"];
 const NETWORK_OPTIONS = ["vpc", "subnets", "securityGroups"];
 const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
+const CACHE_OPTIONS = ["engine", "size", "network", "allowDestroy"];
 const STREAM_OPTIONS = ["mode", "shards", "retentionHours", "allowDestroy"];
 const REGISTRY_OPTIONS = ["scanOnPush", "immutableTags", "keepUntaggedDays", "allowDestroy"];
 const QUERY_NAME = /^[A-Za-z0-9_.:/-]+$/;
@@ -426,6 +443,37 @@ function analyzeEntry(entryPath: string): AppModel {
     if (declared) throw new Error(`${at}: Stream "${name}" is also declared at ${declared.file}:${declared.line}; declare each stream once`);
     streams.set(name, { name, provider, mode, shards, retentionHours, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
   }
+  const cacheDecls = new Map<Node, AnalyzedCache>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/cache", "Cache"))) {
+    const at = where(expr);
+    const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
+    if (!decl || decl.getInitializer() !== expr) throw new Error(`${at}: assign new Cache(...) to a variable so the functions that use it can be traced`);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Cache provider`);
+    if (provider !== "aws") throw new Error(`${at}: Cache provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Cache name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !CACHE_OPTIONS.includes(key)) throw new Error(`${at}: unknown Cache option "${key}" (supported: ${CACHE_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Cache options`;
+    const engine = readStringOption(optionsArg, "engine", where_) as CacheEngine | undefined;
+    const size = readStringOption(optionsArg, "size", where_) as CacheSize | undefined;
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    const network = readNetworkOption(optionsArg, at);
+    try {
+      new Cache(provider, name, { ...(engine !== undefined ? { engine } : {}), ...(size !== undefined ? { size } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = [...cacheDecls.values()].find((c) => c.name === name);
+    if (declared) throw new Error(`${at}: Cache "${name}" is also declared at ${declared.file}:${declared.line}; declare each cache once`);
+    cacheDecls.set(decl, { name, provider, engine, size, network: Object.keys(network).length ? network : { vpc: "default" }, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  let cacheUses: Set<string> | undefined;
+
   const usedBuses = new Map<string, AnalyzedBus>();
   const useBus = (bus: AnalyzedBus, _at: string) => {
     if (!usedBuses.has(bus.name)) usedBuses.set(bus.name, bus);
@@ -916,7 +964,16 @@ function analyzeEntry(entryPath: string): AppModel {
     fn.policies = uniquePolicies([...routerPolicies, ...fn.policies]);
     const overridden = routerNetworkKeys.find((key) => fn.options?.[key] !== undefined);
     if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router's network already sets; change the network instead`);
-    const merged = { ...routerFunctionOptions, ...fn.options };
+    const merged: Record<string, string> = { ...routerFunctionOptions, ...fn.options };
+    // A function that uses a cache runs in the cache's network, unless it already runs in that same one.
+    for (const cacheName of fn.caches) {
+      const cache = [...cacheDecls.values()].find((c) => c.name === cacheName)!;
+      const differs = NETWORK_OPTION_KEYS.some((key) => (merged[key] !== undefined || cache.network[key] !== undefined) && merged[key] !== cache.network[key]);
+      if (merged.vpc !== undefined && differs) {
+        throw new Error(`${cache.file}:${cache.line}: "${fn.name}" uses cache "${cache.name}", which is in a different network than the one it runs in; give the router and the cache the same network`);
+      }
+      for (const key of NETWORK_OPTION_KEYS) if (cache.network[key] !== undefined) merged[key] = cache.network[key]!;
+    }
     fn.options = Object.keys(merged).length ? merged : undefined;
   }
 
@@ -957,6 +1014,7 @@ function analyzeEntry(entryPath: string): AppModel {
     databases: [...databases.values()],
     registries: [...registries.values()],
     streams: [...streams.values()],
+    caches: [...cacheDecls.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };
@@ -976,6 +1034,8 @@ function analyzeEntry(entryPath: string): AppModel {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
         noteSecretRef(decl);
         noteBusValue(node, decl);
+        const cache = cacheDecls.get(decl);
+        if (cache) cacheUses?.add(cache.name);
         // `@policy(...)` is not a use of the store.
         const decorator = node.getFirstAncestorByKind(SyntaxKind.Decorator);
         if (decorator && isPolicyDecorator(decorator)) continue;
@@ -1480,6 +1540,7 @@ function analyzeEntry(entryPath: string): AppModel {
       events: [],
       policies: [],
       publishes: [],
+      caches: [],
       envUse: { variables: {}, dynamic: [] },
       include: [],
       passRequest: false,
@@ -1488,11 +1549,14 @@ function analyzeEntry(entryPath: string): AppModel {
     const tallies = new Map<string, Tally>();
     secretUses = [];
     publishUses = new Set();
+    cacheUses = new Set();
     collectUsage(fnNode, tallies, new Set());
     fn.secrets = uniqueSecrets(secretUses);
     fn.publishes = [...publishUses].sort();
+    fn.caches = [...cacheUses].sort();
     secretUses = undefined;
     publishUses = undefined;
+    cacheUses = undefined;
     const policies = readPolicies(fnNode, fn.name);
     for (const [key, allowed] of policies) {
       const tally = tallies.get(key);

@@ -84,6 +84,19 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
     CreateDomainNameCommand: () => ({ DomainNameConfigurations: [{ ApiGatewayDomainName: "d-abc.execute-api.eu-west-1.amazonaws.com" }] }),
     DescribeFunctionCommand: () => ({ ETag: "f1" }),
     PublishFunctionCommand: (input) => ({ FunctionSummary: { FunctionMetadata: { FunctionARN: `arn:aws:cloudfront::1:function/${input.Name}` } } }),
+    DescribeVpcsCommand: (input) => ({ Vpcs: input.VpcIds ? input.VpcIds.map((id: string) => ({ VpcId: id })) : [{ VpcId: "vpc-0def0001" }] }),
+    DescribeSubnetsCommand: (input) => {
+      const all = [
+        { SubnetId: "subnet-aaaa1111", AvailabilityZone: "eu-west-1a" },
+        { SubnetId: "subnet-bbbb2222", AvailabilityZone: "eu-west-1b" },
+        { SubnetId: "subnet-cccc3333", AvailabilityZone: "eu-west-1a" },
+      ];
+      return { Subnets: input.SubnetIds ? all.filter((subnet) => input.SubnetIds.includes(subnet.SubnetId)) : all };
+    },
+    DescribeSecurityGroupsCommand: (input) => {
+      const byId = input.Filters?.find((f: { Name: string }) => f.Name === "group-id")?.Values;
+      return { SecurityGroups: (byId ?? ["sg-0def4001"]).filter((id: string) => id !== "sg-0000dead").map((GroupId: string) => ({ GroupId })) };
+    },
     PutRuleCommand: (input) => ({ RuleArn: `arn:aws:events:eu-west-1:1:rule/${input.Name}` }),
     PutTargetsCommand: () => ({ FailedEntryCount: 0 }),
   };
@@ -102,12 +115,12 @@ export function fakeAws(overrides: Record<string, (input: any, attempt: number) 
     tags,
     readBundle: () => new TextEncoder().encode("export const handler = () => {};"),
     readIncluded: (spec) => (spec.include ?? []).map((name) => ({ name, data: new TextEncoder().encode(`content of ${name}`) })),
-    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client },
+    clients: { s3: client, lambda: client, iam: client, acm: client, cloudfront: client, events: client, apigateway: client, ec2: client, elasticache: client },
     dns: dns ? (provider, zone, token) => (onDns?.(provider, zone, token), dns) : undefined,
     sleep: async () => void sleeps.push(0),
     log: (message) => void logs.push(message),
   });
-  return { calls, drivers, dns, sleeps, logs, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };
+  return { calls, drivers, client, dns, sleeps, logs, names: () => calls.map((c) => c.name), of: (name: string) => calls.filter((c) => c.name === name).map((c) => c.input) };
 }
 
 export async function applyAll(config: CloudgearConfig, state: State, aws = fakeAws()) {

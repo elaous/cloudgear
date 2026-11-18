@@ -67,6 +67,7 @@ Options (the command an option applies to is in parentheses):
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
 | `--skip-env-check` | Deploy even if a variable or secret is missing (`apply`) |
 | `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
+| `--env-file <file>` | Dotenv file whose values `setup.ts` reads through `process.env` (`generate`; variables already in the shell win) |
 | `--dns-server <ip>` | Resolver for the DNS check (`check-dns`, `apply`; default: the system's) |
 | `--domain <cdn domain>` | Which CDN to invalidate when the app has several (`invalidate`) |
 | `--arn <arn>`, `--all` | What `import` adopts (see `cloudgear import`); with `dump-distributions`, `--all` means every distribution that has an alias |
@@ -1041,6 +1042,34 @@ from the entry file and following imports:
 | `store.delete(...)` | `s3:DeleteObject` |
 | `store.list(...)` | `s3:ListBucket` |
 
+### Environment variables in `setup.ts`
+
+Domains, DNS zones, bucket URIs and paths, and string options such as `region`
+MAY be read from the environment, so one `setup.ts` serves every environment:
+
+```ts
+const domain = process.env.ENV_DOMAIN!;               // also Bun.env / import.meta.env
+const dns = new DNS("gandi", `api.${domain}`, { zone: process.env.ENV_ZONE! });
+const bucket = new BlobStore("aws", "s3://web." + domain);
+```
+
+`generate` resolves these from the shell, or from `--env-file <file>`, and
+writes the resolved values to `cloudgear.prototxt`. The shell wins over the
+file, including a variable the shell sets to an empty string.
+
+It accepts string literals, templates, `+`, `??` / `||` defaults, `as` and `!`
+wrappers, and `const` variables declared in the same file (imported constants
+are not followed). An unset or empty variable is treated as unset: it takes
+the `??` / `||` default, and without one `generate` fails naming the variable
+and the line. A default never hides a left side that cannot be analyzed;
+that is an error. Anything else that cannot be known without running the code
+is rejected.
+
+`cloudgear.prototxt` holds the resolved values and is normally committed, so
+you MUST NOT read credentials into these fields, and you MUST run `generate`
+with the same variables for each environment. `--env-file` applies to
+`generate` only.
+
 `BlobStore` methods map to provider-neutral accesses (`read`, `write`,
 `delete`, `list`) in `BLOB_OPERATIONS`; `src/providers.ts` maps those to each
 provider's permissions.
@@ -1461,6 +1490,326 @@ remote read, cloudgear warns, keeps the local copy as
 
 All of them need `--state` or `CLOUDGEAR_STATE`.
 
+## Databases: `@cloudgear/database`
+
+`Database` declares a managed Postgres database. Constructing it does nothing;
+`cloudgear apply` creates it, or adopts the one that already has the name.
+Neon is the first provider.
+
+```ts
+import { Database } from "@cloudgear/database";
+
+new Database("neon", "tranquilo-app", { region: "aws-us-east-1", postgres: 17 });
+```
+
+| Option | Meaning |
+| --- | --- |
+| `region` | Neon region id such as `aws-us-east-1`. Omit it to accept the existing project's region |
+| `postgres` | Postgres major version: 14, 15, 16 or 17 |
+| `allowDestroy` | Lets `cloudgear destroy` delete it; the default `false` makes destroy refuse |
+
+The first argument after the provider is the Neon project name, used as is.
+
+- **Credentials:** set `NEON_API_KEY` to a personal API key from the Neon
+  console. cloudgear MUST NOT store it, and reads it only from the environment.
+- **Connection string:** cloudgear never reads, prints or stores it. You MUST
+  put it where your functions read it, for example with `cloudgear secrets set`.
+- **Adopt first:** if exactly one Neon project has the name, `apply` and
+  `cloudgear import --all` (or `cloudgear import @neon.Database db.<name>`) adopt
+  it instead of creating another. Two projects with the same name is an error.
+  An adopted project whose region or Postgres version differs from the code is
+  an error, because Neon cannot change either in place. Adopting never records
+  `allowDestroy`; the next `apply` does.
+- **Destroy:** a database is deleted only if the applied config had
+  `allowDestroy: true`. `destroy` and `apply` check this before changing
+  anything, so a refusal leaves every resource as it was. To remove a
+  database, set `allowDestroy`, run `apply`, then delete the declaration and run
+  `apply` again. A project deleted in the Neon console is not handled: remove
+  its entry from `.cloudgear/state.json` by hand.
+- **Limits:** only projects in your personal Neon account are listed and
+  created; organization-owned projects are not supported yet. Calls are not
+  retried, so a rate limit stops the command without side effects and you can
+  run it again.
+
+## Image registries: `@cloudgear/registry`
+
+`Registry` declares a container image repository. Constructing it does nothing;
+`cloudgear apply` creates it, or adopts the one that already has the name. AWS
+(ECR) is the first provider.
+
+```ts
+import { Registry } from "@cloudgear/registry";
+
+new Registry("aws", "tranquilo/web", { immutableTags: true });
+```
+
+The second argument is the repository name, used as is (2-256 lowercase
+letters, digits, `.`, `_`, `-`, with `/` between words).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `scanOnPush` | `true` | Scan images for known vulnerabilities when pushed |
+| `immutableTags` | `false` | Forbid moving a tag to another image |
+| `keepUntaggedDays` | `14` | Expire untagged images after this many days (1-365); `false` leaves lifecycle policies alone |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) remove the repository and every image in it |
+
+- **Adopt first:** an existing repository is adopted, and `apply` changes only
+  the settings that differ. `cloudgear import --all` and
+  `cloudgear import @aws.ECR registry.<name>` read it without changing anything;
+  `import --arn` does not support ECR. Tags are applied only when cloudgear
+  creates the repository.
+- **Lifecycle policy:** a policy is cloudgear's if every rule's description
+  starts with `cloudgear:`. cloudgear MUST NOT replace or delete any other
+  policy. If the repository has a different one, `apply` stops before changing
+  anything and tells you to set `keepUntaggedDays: false` or delete that policy.
+- **Tag exclusions:** a repository set to `IMMUTABLE_WITH_EXCLUSION` or
+  `MUTABLE_WITH_EXCLUSION` keeps that setting; `immutableTags` does not change
+  or report it.
+- **Destroy:** the repository is deleted only if the applied config had
+  `allowDestroy: true`. `destroy`, and `apply` after you remove the
+  declaration, check that before changing anything. Deleting a repository
+  deletes its images. Import never records `allowDestroy`; the next `apply`
+  does.
+- **Cost:** ECR charges for stored image data, so the untagged-image expiry is
+  on by default.
+
+## Streams: `@cloudgear/stream`
+
+`Stream` declares a data stream. Constructing it does nothing; `cloudgear apply`
+creates it, or adopts the one that already has the name. AWS (Kinesis Data
+Streams) is the first provider.
+
+```ts
+import { Stream } from "@cloudgear/stream";
+
+new Stream("aws", "tranquilo-events", { shards: 2 });
+```
+
+The second argument is the stream name, used as is (1-128 letters, digits,
+`.`, `_`, `-`).
+
+| Option | When creating | Meaning |
+| --- | --- | --- |
+| `mode` | `"provisioned"` | `"provisioned"` (you pick the shards) or `"on-demand"` (AWS scales it) |
+| `shards` | `1` | Provisioned mode only, 1-10000 |
+| `retentionHours` | `24` | 24-8760; longer retention costs extra |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) remove the stream and its data |
+
+- **Existing streams:** the defaults apply only when cloudgear creates the
+  stream. On an existing stream, `apply` changes only the options you set, so
+  declaring `new Stream("aws", "x")` never scales down or shortens a stream
+  someone sized differently. Removing an option later leaves the stream as it
+  is. Changes run one at a time, each after the stream is `ACTIVE` again; `apply`
+  waits up to 5 minutes for that and otherwise stops so you can run it again.
+- **Shards:** Kinesis can double or halve the shard count in one step, so
+  `apply` rescales in steps (1 to 10 shards takes 1, 2, 4, 8, 10). AWS also
+  limits how often a stream can be rescaled or switched between modes; its
+  error is shown as is. `shards` on an on-demand stream is an error.
+- **Retention:** shortening it makes older records unreadable for good, so it
+  needs `allowDestroy: true` in the config.
+- **Adopt first:** an existing stream is adopted instead of recreated.
+  `cloudgear import --all` and `cloudgear import @aws.Kinesis stream.<name>` read it
+  without changing anything; `import --arn` does not support Kinesis. Import
+  never records `allowDestroy`; the next `apply` does. Tags are applied only
+  when cloudgear creates the stream.
+- **Destroy:** the stream is deleted only if the applied config had
+  `allowDestroy: true`. `destroy`, and `apply` after you remove the
+  declaration, check that before changing anything. Deleting a stream deletes
+  its data.
+- **Cost:** a stream bills every hour it exists, even when idle. As a rough
+  guide, one provisioned shard is about $11 a month and an on-demand stream
+  about $29 a month before any traffic; check current AWS pricing.
+- **No client yet:** `Stream` only provisions the stream. Reading and writing
+  records is not part of the package yet.
+
+## Networks: `@cloudgear/network`
+
+`Network` names an existing VPC. cloudgear never creates, changes or deletes
+VPCs, subnets or security groups. Pass it to the router to run every function
+inside that VPC, for example to reach a private database or cache:
+
+```ts
+import { Network } from "@cloudgear/network";
+
+const network = new Network("aws");                        // the region's default VPC
+// const network = new Network("aws", { vpc: "vpc-0abc1234", subnets: ["subnet-..."], securityGroups: ["sg-..."] });
+
+new FunctionRouter("aws", { authenticated: "iam", network }).url("GET", "/items", "./api/items.ts");
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `vpc` | the default VPC | An existing VPC id |
+| `subnets` | one subnet per availability zone | Subnet ids inside the VPC (at most 16) |
+| `securityGroups` | the VPC's default security group | Security group ids in the VPC (at most 5) |
+
+`subnets` and `securityGroups` need a `vpc`. Without a `network`, functions run
+outside any VPC, as before.
+
+- **No outbound internet.** A Lambda in a VPC cannot reach the internet, or AWS
+  services without an endpoint, unless its subnets route through a NAT gateway
+  or the VPC has endpoints. The default VPC has only public subnets, and a
+  Lambda there still has no internet, even if a NAT gateway exists; you need
+  private subnets routed to one, named with `subnets`. cloudgear MUST NOT
+  create any of this. Check that every function on the router can live without
+  outbound calls before you set `network`. A NAT gateway is per availability
+  zone and costs roughly $33 a month each before traffic; check current AWS
+  pricing.
+- **Default security group.** The VPC's default security group lets its members
+  reach each other, which is what a cache or database in the same group needs.
+  If you changed it, name your own with `securityGroups`.
+- **What `apply` does.** It looks the VPC, subnets and groups up first, so a
+  wrong id fails before anything is created. It then sets the function's VPC
+  configuration and attaches `AWSLambdaVPCAccessExecutionRole` to the
+  function's role, which Lambda needs; that includes an imported role. Removing
+  `network` clears the configuration and detaches that policy only from roles
+  cloudgear created. A route's own `options` MUST NOT set `vpc`, `subnets` or
+  `security_groups` when the router has a `network`.
+- **Subnets.** Without `subnets`, cloudgear takes one subnet per ordinary
+  availability zone, the one with the most free addresses, and logs which. In a
+  VPC that mixes public and private subnets that choice is arbitrary, so name
+  the subnets you want.
+- **Later applies.** `apply` looks the network up again whenever a function's
+  configuration changes, so a subnet or security group added since the last
+  apply can change the function's VPC configuration without the plan showing
+  it.
+- **Permissions.** The deploying identity needs `ec2:DescribeVpcs`,
+  `ec2:DescribeSubnets` and `ec2:DescribeSecurityGroups`, and
+  `iam:AttachRolePolicy` and `iam:DetachRolePolicy` for the VPC access policy.
+- **Limits.** The network is router-wide. `cloudgear import` records the VPC
+  an imported function runs in; if the config has no `network`, `apply` takes it
+  out of that VPC. After a function in a VPC is deleted,
+  AWS can hold its network interfaces for a while, which delays deleting the
+  subnets or groups it used.
+
+## Caches: `@cloudgear/cache`
+
+`Cache` declares a managed in-memory cache. Constructing it does nothing;
+`cloudgear apply` creates it, or adopts the one that already has the name. AWS
+(ElastiCache) is the first provider.
+
+```ts
+import { Cache } from "@cloudgear/cache";
+
+const cache = new Cache("aws", "sessions");
+
+export async function handler() {
+  const [host, port] = [cache.host, cache.port];   // from CLOUDGEAR_CACHE_SESSIONS
+  // connect with the Redis or Memcached client you use
+}
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `engine` | `"valkey"` | `"valkey"` or `"redis"` (same protocol) or `"memcached"` |
+| `size` | `"micro"` | One node: `"micro"`, `"small"` or `"medium"` (`cache.t4g.*`) |
+| `network` | the default VPC | A `Network` from `@cloudgear/network` |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) remove the cache and its data |
+
+Assign the cache to a variable: cloudgear finds the functions that use it by
+following references to that variable.
+
+- **Functions that use it.** Each function whose code reaches `cache` runs in
+  the cache's network, with `CLOUDGEAR_CACHE_<NAME>` set to `host:port`, filled
+  in once the cache exists. Other functions are not touched. If the router's
+  `network` differs from the cache's, or one function uses caches in different
+  networks, `generate` stops.
+- **No outbound internet** for those functions; see Networks above. cloudgear
+  does not create a NAT gateway.
+- **Access.** The cache and the functions share the network's security groups
+  (the VPC's default group unless you name some), which let their members reach
+  each other. The cache has no password and no TLS, and encrypts data at rest.
+  Anything else in those groups can reach it.
+- **Creating takes minutes.** `apply` waits up to 20 minutes; if it gives up,
+  run it again and it adopts the cache and keeps waiting. A single node has no
+  replica, so a failure or maintenance loses its contents.
+- **Adopt first.** An existing cache is adopted. A different node type, or
+  valkey or redis against memcached, is an error, because AWS cannot change
+  that in place; valkey and redis are not told apart. `cloudgear import --all`
+  and `cloudgear import @aws.ElastiCache cache.<name>` read it without changing
+  anything and never record `allowDestroy`. cloudgear does not check which
+  network an adopted cache lives in, so give the cache the network it already
+  uses. The network cannot change after the first apply.
+- **Destroy.** The cache is deleted only if the applied config had
+  `allowDestroy: true`, and `destroy` checks that before changing anything. It
+  waits up to 20 minutes for the cache to go and then deletes the subnet group
+  cloudgear made for it; if it gives up, run it again, because a second run
+  waits for the delete already under way. If a cache is replaced, the functions
+  that use it are updated with the new endpoint, even when the same apply also
+  changes their code.
+- **Cost.** A cache bills every hour it exists, even idle. As a rough guide the
+  smallest node is about $9 to $12 a month; check current AWS pricing.
+- **Permissions.** On top of the Networks list, the deploying identity needs the
+  ElastiCache create, describe and delete actions for replication groups, cache
+  clusters and subnet groups.
+
+## Instances: `@cloudgear/instance`
+
+`Instance` declares a virtual machine. Constructing it does nothing;
+`cloudgear apply` starts it, or adopts the one that already has the name. AWS
+(EC2) is the first provider.
+
+```ts
+import { Instance } from "@cloudgear/instance";
+
+new Instance("aws", "worker", { size: "small", keyName: "ops", userData: "#!/bin/sh\nyum -y update\n" });
+```
+
+The instance is tagged `Name` with `<project>-<name>`, and that tag is how
+cloudgear finds it again.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `size` | `"micro"` | `"micro"`, `"small"` or `"medium"` (`t4g.*`, arm64) |
+| `image` | latest Amazon Linux 2023 (arm64) | An AMI id; use an arm64 image |
+| `diskGb` | the image's own size | Root volume size, 1-16384 GB; encrypted `gp3` |
+| `keyName` | none | An existing key pair, to log in with SSH |
+| `profile` | none | An existing instance profile name |
+| `userData` | none | A script run at first boot, up to 16 KB |
+| `network` | the default VPC | A `Network` from `@cloudgear/network` |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) terminate the instance |
+
+- **Network.** The instance goes in a subnet of the network (the next one is
+  tried if a zone does not offer the type) and uses the network's security
+  groups (the VPC's default group unless you name some). Whether it gets a
+  public address follows the subnet. cloudgear opens no ports; with the default
+  group, only members of that group can reach it. Instance metadata requires
+  IMDSv2. With `diskGb` set, the root volume is an encrypted `gp3`; without it
+  the volume follows the image and your account's defaults.
+- **Fixed at creation.** `size`, `image`, `diskGb`, `keyName`, `profile`,
+  `userData` and the network apply only when the instance is created. Changing
+  one stops `apply` with an error: use a new name to replace the instance.
+- **`userData` is not secret.** It is written to the generated config and the
+  state, and anyone who can describe the instance can read it. You MUST NOT put
+  credentials in it, and MUST NOT build it from environment variables that hold
+  secrets.
+- **Adopt first.** `apply` takes over an instance with that name only if
+  cloudgear started it, which makes a retry after a crash safe. An instance it
+  did not start is an error, so a foreign instance with the same `Name` is never
+  terminated by mistake; adopt it on purpose with `cloudgear import --all` or
+  `cloudgear import @aws.EC2 instance.<name>`, which read it without changing
+  anything, record its real network, and never record `allowDestroy`. A
+  different size or image, or two instances with the name, is an error. A
+  stopped or stopping instance is left alone. If a managed instance is
+  terminated outside cloudgear, `apply` says so instead of starting a new one;
+  remove its entry from `.cloudgear/state.json` to start again.
+- **Starting.** `apply` waits up to 5 minutes for it to run; if it gives up, run
+  it again and it adopts the instance.
+- **Destroy.** The instance is terminated only if the applied config had
+  `allowDestroy: true`, and `destroy` checks that before changing anything.
+  Terminating deletes its root volume.
+- **Cost.** An instance bills every hour it runs, plus its disk and, when its
+  subnet gives it a public address, the public IPv4 address. As a rough guide a
+  `t4g.micro` is about $6 a month plus about $3.60 for the address; check
+  current AWS pricing.
+- **Permissions.** On top of the Networks list, the deploying identity needs
+  `ec2:RunInstances`, `ec2:DescribeInstances`, `ec2:TerminateInstances`,
+  `ec2:CreateTags`, and `ssm:GetParameter` for the image lookup. `diskGb` also
+  needs `ec2:DescribeImages`, and `kms:CreateGrant`,
+  `kms:GenerateDataKeyWithoutPlaintext`, `kms:DescribeKey`, `kms:Decrypt` and
+  `kms:ReEncrypt*` when the account's default EBS key is customer-managed.
+  `profile` needs `iam:PassRole`.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1673,6 +2022,12 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/cdn` | `Cert` and `CDN` |
 | `@cloudgear/dns` | `DNS` and its Gandi and Route 53 drivers |
 | `@cloudgear/events` | `EventBus` and `on` |
+| `@cloudgear/database` | `Database` (Neon) |
+| `@cloudgear/registry` | `Registry` (ECR) |
+| `@cloudgear/stream` | `Stream` (Kinesis) |
+| `@cloudgear/network` | `Network` (existing VPC) |
+| `@cloudgear/cache` | `Cache` (ElastiCache) |
+| `@cloudgear/instance` | `Instance` (EC2) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -1713,6 +2068,20 @@ Where each moving part lives, since several are called across packages:
 | `StateStore`, `LocalStateStore`, `holdLock` | `src/deploy/state-store.ts` | `src/cli.ts` |
 | `S3StateStore`, `parseS3Location` (remote state, lock) | `src/deploy/state-s3.ts` | `createStateStore`; `src/statecmd.ts` (`cloudgear state`) |
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
+| `Database` | `packages/database/index.ts` | apps; `src/analyze/app.ts` |
+| `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
+| `Registry` | `packages/registry/index.ts` | apps; `src/analyze/app.ts` |
+| ECR repository driver | `src/deploy/aws/ecr.ts` | `awsDrivers` |
+| `Stream` | `packages/stream/index.ts` | apps; `src/analyze/app.ts` |
+| Kinesis stream driver | `src/deploy/aws/kinesis.ts` | `awsDrivers` |
+| `Network` | `packages/network/index.ts` | apps; `src/analyze/app.ts` (`readNetworkOption`) |
+| VPC lookup (`resolveNetwork`) | `src/deploy/aws/network.ts` | the Lambda and ElastiCache drivers |
+| `Cache` | `packages/cache/index.ts` | apps; `src/analyze/app.ts` |
+| ElastiCache driver | `src/deploy/aws/elasticache.ts` | `awsDrivers` |
+| `Instance` | `packages/instance/index.ts` | apps; `src/analyze/app.ts` |
+| EC2 instance driver | `src/deploy/aws/instance.ts` | `awsDrivers` |
+| `OUTPUT_REFERENCE` (env filled from a resource's output) | `src/deploy/plan.ts` | `environment()` in the Lambda driver |
+| `destroyAllowed`, `withoutAllowDestroy` | `src/deploy/protect.ts` | the Neon, ECR and Kinesis drivers |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |
 | event driver (`eventbridge`, `memory`), `memoryEvents` | `packages/events/driver.ts`, `packages/events/drivers/` | `EventBus.publish` |
 | EventBridge bus and rule deployers | `src/deploy/aws/eventbus.ts`, `schedule.ts` | `awsDrivers` |

@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BlobStore } from "@cloudgear/blob";
+import { Cache } from "@cloudgear/cache";
 import { debug, timed } from "@cloudgear/debug";
 import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { decodeConfig, encodeConfig, type AttachedOriginSpec, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
 import { configHash, envReportPath, type EnvReport, type EnvSource } from "./envreport";
-import { fitName, sanitizeName } from "./names";
+import { cacheIdFor, fitName, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
 
 // Set by the Lambda runtime or every Node program.
@@ -20,6 +21,7 @@ export interface GenerateOptions {
   project?: string;
   invokers?: string[];
   reservedConcurrency?: number;
+  setupEnv?: Record<string, string | undefined>;
 }
 
 const MAX_INCLUDED_BYTES = 250 * 1024 * 1024;
@@ -27,7 +29,7 @@ const WARN_INCLUDED_BYTES = 40 * 1024 * 1024;
 const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
-  const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry));
+  const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry, options.setupEnv));
   debug("generate", "analyzed", () => ({
     provider: model.provider,
     region: model.region,
@@ -72,6 +74,27 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     const clash = envVars.get(envVar);
     if (clash) throw new Error(`BlobStores "${clash}" and "${resource.name}" map to the same env var ${envVar}; rename one`);
     envVars.set(envVar, resource.name);
+  }
+
+  const cacheEnvVars = new Map<string, string>();
+  const cacheIds = new Map<string, string>();
+  for (const cache of model.caches) {
+    const envVar = Cache.envVarFor(cache.name);
+    const clash = cacheEnvVars.get(envVar);
+    if (clash) throw new Error(`Caches "${clash}" and "${cache.name}" map to the same env var ${envVar}; rename one`);
+    cacheEnvVars.set(envVar, cache.name);
+    const id = cacheIdFor(project, cache.name);
+    const same = cacheIds.get(id);
+    if (same) throw new Error(`Caches "${same}" and "${cache.name}" both deploy as "${id}"; rename one`);
+    cacheIds.set(id, cache.name);
+  }
+
+  const instanceNames = new Map<string, string>();
+  for (const instance of model.instances) {
+    const physical = fitName(`${project}-${sanitizeName(instance.name)}`, 128);
+    const clash = instanceNames.get(physical);
+    if (clash) throw new Error(`Instances "${clash}" and "${instance.name}" both deploy as "${physical}"; rename one`);
+    instanceNames.set(physical, instance.name);
   }
 
   const physicalNames = new Map<string, string>();
@@ -172,6 +195,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       env: [
         ...usedResources.map((resource) => ({ key: BlobStore.envVarFor(resource), value_from: resource })),
         ...fn.publishes.map((bus) => ({ key: EventBus.envVarFor(bus), value_from: busResource(bus) })),
+        ...fn.caches.map((cache) => ({ key: Cache.envVarFor(cache), value_from: `cache.${cache}`, output: "endpoint" })),
       ],
       reserved_concurrency: reservedConcurrency,
       options: fn.options,
@@ -206,6 +230,84 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         source: `${fromConfig(bus.file)}:${bus.line}`,
         region: undefined,
         options: undefined,
+      })),
+    ).concat(
+      model.registries.map((registry) => ({
+        name: `registry.${registry.name}`,
+        type: capability(registry.provider, "registry").type,
+        physical_name: registry.name,
+        dry: false,
+        source: `${fromConfig(registry.file)}:${registry.line}`,
+        region: undefined,
+        options: {
+          ...(registry.scanOnPush !== undefined ? { scan_on_push: String(registry.scanOnPush) } : {}),
+          ...(registry.immutableTags !== undefined ? { immutable_tags: String(registry.immutableTags) } : {}),
+          ...(registry.keepUntaggedDays !== undefined ? { keep_untagged_days: registry.keepUntaggedDays === false ? "off" : String(registry.keepUntaggedDays) } : {}),
+          ...(registry.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
+      model.caches.map((cache) => ({
+        name: `cache.${cache.name}`,
+        type: capability(cache.provider, "cache").type,
+        physical_name: cacheIdFor(project, cache.name),
+        dry: false,
+        source: `${fromConfig(cache.file)}:${cache.line}`,
+        region: undefined,
+        options: {
+          ...(cache.engine !== undefined ? { engine: cache.engine } : {}),
+          ...(cache.size !== undefined ? { size: cache.size } : {}),
+          ...cache.network,
+          ...(cache.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
+      model.instances.map((instance) => ({
+        name: `instance.${instance.name}`,
+        type: capability(instance.provider, "instance").type,
+        physical_name: fitName(`${project}-${sanitizeName(instance.name)}`, 128),
+        dry: false,
+        source: `${fromConfig(instance.file)}:${instance.line}`,
+        region: undefined,
+        options: {
+          ...(instance.size !== undefined ? { size: instance.size } : {}),
+          ...(instance.image !== undefined ? { image: instance.image } : {}),
+          ...(instance.diskGb !== undefined ? { disk_gb: String(instance.diskGb) } : {}),
+          ...(instance.keyName !== undefined ? { key_name: instance.keyName } : {}),
+          ...(instance.profile !== undefined ? { profile: instance.profile } : {}),
+          ...(instance.userData !== undefined ? { user_data: instance.userData } : {}),
+          ...instance.network,
+          ...(instance.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
+      model.streams.map((stream) => ({
+        name: `stream.${stream.name}`,
+        type: capability(stream.provider, "stream").type,
+        physical_name: stream.name,
+        dry: false,
+        source: `${fromConfig(stream.file)}:${stream.line}`,
+        region: undefined,
+        options: {
+          ...(stream.mode !== undefined ? { mode: stream.mode } : {}),
+          ...(stream.shards !== undefined ? { shards: String(stream.shards) } : {}),
+          ...(stream.retentionHours !== undefined ? { retention_hours: String(stream.retentionHours) } : {}),
+          ...(stream.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
+      model.databases.map((db) => ({
+        name: `db.${db.name}`,
+        type: `@${db.provider}.Database`,
+        physical_name: db.name,
+        dry: false,
+        source: `${fromConfig(db.file)}:${db.line}`,
+        region: undefined,
+        options: {
+          ...(db.region !== undefined ? { region: db.region } : {}),
+          ...(db.postgres !== undefined ? { pg_version: String(db.postgres) } : {}),
+          ...(db.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
       })),
     ),
     function: functions,

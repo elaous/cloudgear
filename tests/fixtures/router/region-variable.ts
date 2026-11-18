@@ -1,6 +1,7 @@
 import { FunctionRouter } from "@cloudgear/functions";
 
-const region = "eu-west-1";
+declare function compute(): string;
+const region = compute();
 
 export async function f() {
   return {};

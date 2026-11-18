@@ -103,7 +103,7 @@ export interface FunctionSpec {
   bundle: { path: string; sha256: string };
   permission: { resource: string; path: string; action: string[] }[];
   // The named resource's physical name becomes the value.
-  env: { key: string; value?: string; value_from?: string }[];
+  env: { key: string; value?: string; value_from?: string; output?: string }[];
   reserved_concurrency: number;
   options?: Options;
   schedule?: string[];
@@ -227,7 +227,7 @@ export function decodeConfig(text: string): CloudgearConfig {
         action: (p.action ?? []).map(String),
       })),
       env: (f.env ?? []).map((e: Record<string, any>) =>
-        e.value_from !== undefined ? { key: str(e, "key"), value_from: str(e, "value_from") } : { key: str(e, "key"), value: String(e.value ?? "") },
+        e.value_from !== undefined ? { key: str(e, "key"), value_from: str(e, "value_from"), ...(e.output ? { output: String(e.output) } : {}) } : { key: str(e, "key"), value: String(e.value ?? "") },
       ),
       reserved_concurrency: Number(f.reserved_concurrency ?? 0),
       ...(f.schedule?.length ? { schedule: f.schedule.map(String) } : {}),

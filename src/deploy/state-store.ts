@@ -224,13 +224,13 @@ export async function holdLock(store: StateStore, request: LockRequest, options:
   return { release, signal: controller.signal, interrupt };
 }
 
-// Resolves false on anything but yes, and when interrupted.
 export interface AskStreams {
   input: NodeJS.ReadableStream;
   output: NodeJS.WritableStream;
   terminal?: boolean;
 }
 
+// Resolves false on anything but yes, and when interrupted.
 export function ask(question: string, lock?: Pick<LockHandle, "signal" | "interrupt">, streams?: AskStreams): Promise<boolean> {
   if (lock?.signal.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {

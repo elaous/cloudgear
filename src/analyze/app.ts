@@ -14,11 +14,18 @@ import {
 import { assertPolicyDocument, assertPolicyName, broadStatements, type PolicyDocument } from "@cloudgear/iam";
 import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
+import { Database, type PostgresVersion } from "@cloudgear/database";
+import { Cache, type CacheEngine, type CacheSize } from "@cloudgear/cache";
+import { Instance, type InstanceSize } from "@cloudgear/instance";
+import { Network } from "@cloudgear/network";
+import { Registry } from "@cloudgear/registry";
+import { Stream, type StreamMode } from "@cloudgear/stream";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { ANY_METHOD, METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
+import { configString, type SetupEnv } from "./configvalue";
 
 export interface AnalyzedResource {
   kind: "BlobStore";
@@ -96,6 +103,7 @@ export interface AnalyzedFunction {
   policies: PolicyModel[];
   events: EventTriggerModel[];
   publishes: string[];
+  caches: string[];
   include: { rel: string; abs: string }[];
   passRequest: boolean;
   responseKind?: "helper" | "writer";
@@ -148,6 +156,65 @@ export interface EdgeModel {
   api?: { provider: string; domain: string; certificate?: string; via?: "cloudfront"; method_routing?: boolean; options?: Record<string, string> };
 }
 
+export interface AnalyzedDatabase {
+  name: string;
+  provider: string;
+  region?: string;
+  postgres?: number;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
+export interface AnalyzedRegistry {
+  name: string;
+  provider: string;
+  scanOnPush?: boolean;
+  immutableTags?: boolean;
+  keepUntaggedDays?: number | false;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
+export interface AnalyzedInstance {
+  name: string;
+  provider: string;
+  size?: InstanceSize;
+  image?: string;
+  diskGb?: number;
+  keyName?: string;
+  profile?: string;
+  userData?: string;
+  network: Record<string, string>;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
+export interface AnalyzedCache {
+  name: string;
+  provider: string;
+  engine?: CacheEngine;
+  size?: CacheSize;
+  // The vpc, subnets and security_groups option values; "default" VPC when no network was given.
+  network: Record<string, string>;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
+export interface AnalyzedStream {
+  name: string;
+  provider: string;
+  mode?: StreamMode;
+  shards?: number;
+  retentionHours?: number;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
 export interface AppModel extends EdgeModel {
   provider: string;
   region?: string;
@@ -157,10 +224,22 @@ export interface AppModel extends EdgeModel {
   resources: AnalyzedResource[];
   optionalEnv: string[];
   buses: AnalyzedBus[];
+  databases: AnalyzedDatabase[];
+  registries: AnalyzedRegistry[];
+  streams: AnalyzedStream[];
+  caches: AnalyzedCache[];
+  instances: AnalyzedInstance[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
 
+const NETWORK_OPTION_KEYS = ["vpc", "subnets", "security_groups"];
+const NETWORK_OPTIONS = ["vpc", "subnets", "securityGroups"];
+const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
+const INSTANCE_OPTIONS = ["size", "image", "diskGb", "keyName", "profile", "userData", "network", "allowDestroy"];
+const CACHE_OPTIONS = ["engine", "size", "network", "allowDestroy"];
+const STREAM_OPTIONS = ["mode", "shards", "retentionHours", "allowDestroy"];
+const REGISTRY_OPTIONS = ["scanOnPush", "immutableTags", "keepUntaggedDays", "allowDestroy"];
 const QUERY_NAME = /^[A-Za-z0-9_.:/-]+$/;
 const QUERY_VALUE = /^[A-Za-z0-9_.:/-]*$/;
 const DIRECTIVE = /^cloudgear:\s*(.+)$/;
@@ -169,7 +248,19 @@ const PERMISSIONS = { Get: "read", Put: "write", Delete: "delete", List: "list" 
 const permissionName = (access: BlobAccess) => `permissions.${Object.entries(PERMISSIONS).find(([, a]) => a === access)![0]}`;
 const ALL_ACCESS = [...new Set(Object.values(BLOB_OPERATIONS).flat())] as BlobAccess[];
 
-export function analyzeApp(entryPath: string): AppModel {
+let setupEnv: SetupEnv = process.env;
+
+export function analyzeApp(entryPath: string, env: SetupEnv = process.env): AppModel {
+  const previous = setupEnv;
+  setupEnv = env;
+  try {
+    return analyzeEntry(entryPath);
+  } finally {
+    setupEnv = previous;
+  }
+}
+
+function analyzeEntry(entryPath: string): AppModel {
   const entry = path.resolve(entryPath);
   const tsConfigFilePath = findUp(path.dirname(entry), "tsconfig.json");
   const project = new Project(
@@ -211,7 +302,7 @@ export function analyzeApp(entryPath: string): AppModel {
   for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/blob", "BlobStore"))) {
     const [providerArg, uriArg, optionsArg] = expr.getArguments();
     const provider = stringLiteral(providerArg, `${where(expr)}: BlobStore provider`);
-    const uri = stringLiteral(uriArg, `${where(expr)}: BlobStore URI`);
+    const uri = configString(uriArg, `${where(expr)}: BlobStore URI`, setupEnv);
     const storePath = readStorePath(optionsArg, where(expr));
     const storeRegion = readRegion(optionsArg, `${where(expr)}: BlobStore`);
     const storeOptions = readOptionsMap(optionsArg, "options", `${where(expr)}: BlobStore`);
@@ -289,6 +380,148 @@ export function analyzeApp(entryPath: string): AppModel {
       file: relative(expr.getSourceFile().getFilePath()),
       line: expr.getStartLineNumber(),
     });
+  }
+  const databases = new Map<string, AnalyzedDatabase>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/database", "Database"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Database provider`);
+    if (provider !== "neon") throw new Error(`${at}: Database provider must be "neon"`);
+    const name = configString(nameArg, `${at}: Database name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !DATABASE_OPTIONS.includes(key)) throw new Error(`${at}: unknown Database option "${key}" (supported: ${DATABASE_OPTIONS.join(", ")})`);
+      }
+    }
+    const region = readStringOption(optionsArg, "region", `${at}: Database options`);
+    const postgres = readNumberOption(optionsArg, "postgres", `${at}: Database options`);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", `${at}: Database options`) ?? false;
+    try {
+      new Database(provider, name, { ...(region !== undefined ? { region } : {}), ...(postgres !== undefined ? { postgres: postgres as PostgresVersion } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = databases.get(name);
+    if (declared) throw new Error(`${at}: Database "${name}" is also declared at ${declared.file}:${declared.line}; declare each database once`);
+    databases.set(name, { name, provider, region, postgres, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  const registries = new Map<string, AnalyzedRegistry>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/registry", "Registry"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Registry provider`);
+    if (provider !== "aws") throw new Error(`${at}: Registry provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Registry name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !REGISTRY_OPTIONS.includes(key)) throw new Error(`${at}: unknown Registry option "${key}" (supported: ${REGISTRY_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Registry options`;
+    const scanOnPush = readBooleanOption(optionsArg, "scanOnPush", where_);
+    const immutableTags = readBooleanOption(optionsArg, "immutableTags", where_);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    const daysNode = optionValue(optionsArg, "keepUntaggedDays", where_);
+    const keepUntaggedDays = daysNode?.getKind() === SyntaxKind.FalseKeyword ? (false as const) : readNumberOption(optionsArg, "keepUntaggedDays", where_);
+    try {
+      new Registry(provider, name, { ...(scanOnPush !== undefined ? { scanOnPush } : {}), ...(immutableTags !== undefined ? { immutableTags } : {}), ...(keepUntaggedDays !== undefined ? { keepUntaggedDays } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = registries.get(name);
+    if (declared) throw new Error(`${at}: Registry "${name}" is also declared at ${declared.file}:${declared.line}; declare each repository once`);
+    registries.set(name, { name, provider, scanOnPush, immutableTags, keepUntaggedDays, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  const streams = new Map<string, AnalyzedStream>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/stream", "Stream"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Stream provider`);
+    if (provider !== "aws") throw new Error(`${at}: Stream provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Stream name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !STREAM_OPTIONS.includes(key)) throw new Error(`${at}: unknown Stream option "${key}" (supported: ${STREAM_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Stream options`;
+    const mode = readStringOption(optionsArg, "mode", where_) as StreamMode | undefined;
+    const shards = readNumberOption(optionsArg, "shards", where_);
+    const retentionHours = readNumberOption(optionsArg, "retentionHours", where_);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    try {
+      new Stream(provider, name, { ...(mode !== undefined ? { mode } : {}), ...(shards !== undefined ? { shards } : {}), ...(retentionHours !== undefined ? { retentionHours } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = streams.get(name);
+    if (declared) throw new Error(`${at}: Stream "${name}" is also declared at ${declared.file}:${declared.line}; declare each stream once`);
+    streams.set(name, { name, provider, mode, shards, retentionHours, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  const cacheDecls = new Map<Node, AnalyzedCache>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/cache", "Cache"))) {
+    const at = where(expr);
+    const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
+    if (!decl || decl.getInitializer() !== expr) throw new Error(`${at}: assign new Cache(...) to a variable so the functions that use it can be traced`);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Cache provider`);
+    if (provider !== "aws") throw new Error(`${at}: Cache provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Cache name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !CACHE_OPTIONS.includes(key)) throw new Error(`${at}: unknown Cache option "${key}" (supported: ${CACHE_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Cache options`;
+    const engine = readStringOption(optionsArg, "engine", where_) as CacheEngine | undefined;
+    const size = readStringOption(optionsArg, "size", where_) as CacheSize | undefined;
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    const network = readNetworkOption(optionsArg, at);
+    try {
+      new Cache(provider, name, { ...(engine !== undefined ? { engine } : {}), ...(size !== undefined ? { size } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = [...cacheDecls.values()].find((c) => c.name === name);
+    if (declared) throw new Error(`${at}: Cache "${name}" is also declared at ${declared.file}:${declared.line}; declare each cache once`);
+    cacheDecls.set(decl, { name, provider, engine, size, network: Object.keys(network).length ? network : { vpc: "default" }, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
+  let cacheUses: Set<string> | undefined;
+
+  const instances = new Map<string, AnalyzedInstance>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/instance", "Instance"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Instance provider`);
+    if (provider !== "aws") throw new Error(`${at}: Instance provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Instance name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !INSTANCE_OPTIONS.includes(key)) throw new Error(`${at}: unknown Instance option "${key}" (supported: ${INSTANCE_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Instance options`;
+    const size = readStringOption(optionsArg, "size", where_) as InstanceSize | undefined;
+    const image = readStringOption(optionsArg, "image", where_);
+    const diskGb = readNumberOption(optionsArg, "diskGb", where_);
+    const keyName = readStringOption(optionsArg, "keyName", where_);
+    const profile = readStringOption(optionsArg, "profile", where_);
+    const userData = readStringOption(optionsArg, "userData", where_);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    const network = readNetworkOption(optionsArg, at);
+    try {
+      new Instance(provider, name, { ...(size !== undefined ? { size } : {}), ...(image !== undefined ? { image } : {}), ...(diskGb !== undefined ? { diskGb } : {}), ...(keyName !== undefined ? { keyName } : {}), ...(profile !== undefined ? { profile } : {}), ...(userData !== undefined ? { userData } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = instances.get(name);
+    if (declared) throw new Error(`${at}: Instance "${name}" is also declared at ${declared.file}:${declared.line}; declare each instance once`);
+    instances.set(name, { name, provider, size, image, diskGb, keyName, profile, userData, network: Object.keys(network).length ? network : { vpc: "default" }, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
   }
   const usedBuses = new Map<string, AnalyzedBus>();
   const useBus = (bus: AnalyzedBus, _at: string) => {
@@ -613,6 +846,44 @@ export function analyzeApp(entryPath: string): AppModel {
     return ref;
   }
 
+  // `network: vpc` where vpc is a `new Network(...)`; becomes the function options vpc, subnets and security_groups.
+  function readNetworkOption(options: Node | undefined, at: string): Record<string, string> {
+    if (!options || !Node.isObjectLiteralExpression(options)) return {};
+    const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "network");
+    if (!prop) return {};
+    const named = Node.isPropertyAssignment(prop) ? prop.getInitializer() : Node.isShorthandPropertyAssignment(prop) ? prop.getNameNode() : undefined;
+    let expr = named && unwrapLiteral(named);
+    if (expr && Node.isIdentifier(expr)) {
+      const symbol = Node.isShorthandPropertyAssignment(prop) ? prop.getValueSymbol() : expr.getSymbol();
+      const decl = resolveSymbol(symbol)?.getDeclarations()[0];
+      const constant = decl && Node.isVariableDeclaration(decl) && decl.getVariableStatement()?.getDeclarationKind() === "const";
+      const init = constant ? decl.getInitializer() : undefined;
+      expr = init && unwrapLiteral(init);
+    }
+    if (!expr || !Node.isNewExpression(expr) || !isClass(expr, "@cloudgear/network", "Network")) {
+      throw new Error(`${at}: network must be a Network declared in your project (const vpc = new Network("aws", { vpc: "vpc-..." }))`);
+    }
+    const here = `${where(expr)}: Network`;
+    const [providerArg, networkOptions] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${here} provider`);
+    if (provider !== "aws") throw new Error(`${here} provider must be "aws"`);
+    if (networkOptions && Node.isObjectLiteralExpression(networkOptions)) {
+      for (const p of networkOptions.getProperties()) {
+        const key = Node.isSpreadAssignment(p) ? undefined : propName(p);
+        if (key !== undefined && !NETWORK_OPTIONS.includes(key)) throw new Error(`${here}: unknown option "${key}" (supported: ${NETWORK_OPTIONS.join(", ")})`);
+      }
+    }
+    const vpc = readStringOption(networkOptions, "vpc", `${here} options`);
+    const subnets = readStringArrayOption(networkOptions, "subnets", `${here} options`);
+    const securityGroups = readStringArrayOption(networkOptions, "securityGroups", `${here} options`);
+    try {
+      new Network(provider, { ...(vpc !== undefined ? { vpc } : {}), ...(subnets ? { subnets } : {}), ...(securityGroups ? { securityGroups } : {}) });
+    } catch (err) {
+      throw new Error(`${here}: ${(err as Error).message}`);
+    }
+    return { vpc: vpc ?? "default", ...(subnets ? { subnets: subnets.join(",") } : {}), ...(securityGroups ? { security_groups: securityGroups.join(",") } : {}) };
+  }
+
   function readEnvOption(options: Node | undefined, at: string): SecretBindingModel[] {
     if (!options || !Node.isObjectLiteralExpression(options)) return [];
     const prop = options.getProperties().find((p) => !Node.isSpreadAssignment(p) && propName(p) === "env");
@@ -640,7 +911,9 @@ export function analyzeApp(entryPath: string): AppModel {
   const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerSecrets = readEnvOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerPolicies = readPolicyOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
-  const routerFunctionOptions = readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`);
+  const routerNetwork = readNetworkOption(router.getArguments()[1], where(router));
+  const routerNetworkKeys = Object.keys(routerNetwork);
+  const routerFunctionOptions = mergeNetwork(readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`), routerNetwork, where(router));
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
   const responseKindOf = (prop: Node): "helper" | "writer" | undefined => {
@@ -738,7 +1011,18 @@ export function analyzeApp(entryPath: string): AppModel {
   for (const fn of functions.values()) {
     fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
     fn.policies = uniquePolicies([...routerPolicies, ...fn.policies]);
-    const merged = { ...routerFunctionOptions, ...fn.options };
+    const overridden = routerNetworkKeys.find((key) => fn.options?.[key] !== undefined);
+    if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router's network already sets; change the network instead`);
+    const merged: Record<string, string> = { ...routerFunctionOptions, ...fn.options };
+    // A function that uses a cache runs in the cache's network, unless it already runs in that same one.
+    for (const cacheName of fn.caches) {
+      const cache = [...cacheDecls.values()].find((c) => c.name === cacheName)!;
+      const differs = NETWORK_OPTION_KEYS.some((key) => (merged[key] !== undefined || cache.network[key] !== undefined) && merged[key] !== cache.network[key]);
+      if (merged.vpc !== undefined && differs) {
+        throw new Error(`${cache.file}:${cache.line}: "${fn.name}" uses cache "${cache.name}", which is in a different network than the one it runs in; give the router and the cache the same network`);
+      }
+      for (const key of NETWORK_OPTION_KEYS) if (cache.network[key] !== undefined) merged[key] = cache.network[key]!;
+    }
     fn.options = Object.keys(merged).length ? merged : undefined;
   }
 
@@ -776,6 +1060,11 @@ export function analyzeApp(entryPath: string): AppModel {
     resources: [...resources.values()],
     optionalEnv: readOptionalEnv(router.getArguments()[1], `${where(router)}: FunctionRouter`),
     buses: [...usedBuses.values()],
+    databases: [...databases.values()],
+    registries: [...registries.values()],
+    streams: [...streams.values()],
+    caches: [...cacheDecls.values()],
+    instances: [...instances.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };
@@ -795,6 +1084,8 @@ export function analyzeApp(entryPath: string): AppModel {
         if (Node.isVariableDeclaration(decl) && decl.getNameNode() === node) continue;
         noteSecretRef(decl);
         noteBusValue(node, decl);
+        const cache = cacheDecls.get(decl);
+        if (cache) cacheUses?.add(cache.name);
         // `@policy(...)` is not a use of the store.
         const decorator = node.getFirstAncestorByKind(SyntaxKind.Decorator);
         if (decorator && isPolicyDecorator(decorator)) continue;
@@ -901,7 +1192,7 @@ export function analyzeApp(entryPath: string): AppModel {
       const zone = readStringOption(optionsArg, "zone", `${at}: DNS options`);
       const token = readSecretToken(optionsArg, at);
       try {
-        const parsed = new DNS(provider, stringLiteral(domainArg, `${at}: DNS domain`), zone ? { zone } : {});
+        const parsed = new DNS(provider, configString(domainArg, `${at}: DNS domain`, setupEnv), zone ? { zone } : {});
         return { provider, domain: parsed.domain, zone: parsed.zone, ...(token ? { token } : {}) };
       } catch (err) {
         throw new Error(`${at}: ${(err as Error).message}`);
@@ -1299,6 +1590,7 @@ export function analyzeApp(entryPath: string): AppModel {
       events: [],
       policies: [],
       publishes: [],
+      caches: [],
       envUse: { variables: {}, dynamic: [] },
       include: [],
       passRequest: false,
@@ -1307,11 +1599,14 @@ export function analyzeApp(entryPath: string): AppModel {
     const tallies = new Map<string, Tally>();
     secretUses = [];
     publishUses = new Set();
+    cacheUses = new Set();
     collectUsage(fnNode, tallies, new Set());
     fn.secrets = uniqueSecrets(secretUses);
     fn.publishes = [...publishUses].sort();
+    fn.caches = [...cacheUses].sort();
     secretUses = undefined;
     publishUses = undefined;
+    cacheUses = undefined;
     const policies = readPolicies(fnNode, fn.name);
     for (const [key, allowed] of policies) {
       const tally = tallies.get(key);
@@ -1574,14 +1869,61 @@ function readOptionalEnv(options: Node | undefined, at: string): string[] {
   });
 }
 
+function unwrapLiteral(node: Node): Node {
+  return Node.isAsExpression(node) || Node.isParenthesizedExpression(node) || Node.isNonNullExpression(node) || Node.isSatisfiesExpression(node) ? unwrapLiteral(node.getExpression()) : node;
+}
+
+function optionValue(options: Node | undefined, name: string, at: string): Node | undefined {
+  if (!options) return undefined;
+  if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at} must be an object literal`);
+  for (const prop of options.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread cannot be analyzed`);
+    if (propName(prop) !== name) continue;
+    const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : undefined;
+    if (!value) throw new Error(`${at}: ${name} must be a literal`);
+    return unwrapLiteral(value);
+  }
+  return undefined;
+}
+
+function readNumberOption(options: Node | undefined, name: string, at: string): number | undefined {
+  const value = optionValue(options, name, at);
+  if (!value) return undefined;
+  if (!Node.isNumericLiteral(value)) throw new Error(`${at}: ${name} must be a number literal, got: ${value.getText()}`);
+  return value.getLiteralValue();
+}
+
+function readStringArrayOption(options: Node | undefined, name: string, at: string): string[] | undefined {
+  const value = optionValue(options, name, at);
+  if (!value) return undefined;
+  if (!Node.isArrayLiteralExpression(value)) throw new Error(`${at}: ${name} must be an array of strings`);
+  return value.getElements().map((item) => configString(item, `${at}: ${name}`, setupEnv));
+}
+
+function mergeNetwork(options: Record<string, string> | undefined, network: Record<string, string>, at: string): Record<string, string> | undefined {
+  if (!Object.keys(network).length) return options;
+  const clash = Object.keys(network).find((key) => options?.[key] !== undefined);
+  if (clash) throw new Error(`${at}: give the network option or functionOptions.${clash}, not both`);
+  return { ...options, ...network };
+}
+
+function readBooleanOption(options: Node | undefined, name: string, at: string): boolean | undefined {
+  const value = optionValue(options, name, at);
+  if (!value) return undefined;
+  if (value.getKind() === SyntaxKind.TrueKeyword) return true;
+  if (value.getKind() === SyntaxKind.FalseKeyword) return false;
+  throw new Error(`${at}: ${name} must be true or false, got: ${value.getText()}`);
+}
+
 function readStringOption(options: Node | undefined, name: string, at: string): string | undefined {
   if (!options) return undefined;
   if (!Node.isObjectLiteralExpression(options)) throw new Error(`${at} must be an object literal`);
   for (const prop of options.getProperties()) {
     if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread cannot be analyzed`);
     if (propName(prop) === name) {
-      if (!Node.isPropertyAssignment(prop)) throw new Error(`${at}: ${name} must be a string literal`);
-      return stringLiteral(prop.getInitializer(), `${at}: ${name}`);
+      const value = Node.isPropertyAssignment(prop) ? prop.getInitializer() : Node.isShorthandPropertyAssignment(prop) ? prop.getNameNode() : undefined;
+      if (!value) throw new Error(`${at}: ${name} must be a string literal`);
+      return configString(value, `${at}: ${name}`, setupEnv);
     }
   }
   return undefined;
@@ -1693,7 +2035,7 @@ function readStorePath(options: Node | undefined, at: string): string {
     }
     if (Node.isPropertyAssignment(prop) && propName(prop) === "path") {
       try {
-        return normalizeBlobPath(stringLiteral(prop.getInitializer(), `${at}: BlobStore path`));
+        return normalizeBlobPath(configString(prop.getInitializer(), `${at}: BlobStore path`, setupEnv));
       } catch (err) {
         throw new Error(`${at}: ${(err as Error).message}`);
       }

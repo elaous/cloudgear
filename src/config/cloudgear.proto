@@ -177,4 +177,6 @@ message Env {
     string value = 2;
     string value_from = 3;
   }
+  // With value_from: use this output of the resource (for example "endpoint") instead of its name; filled in when the function is applied.
+  string output = 4;
 }

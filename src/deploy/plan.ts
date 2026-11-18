@@ -136,6 +136,15 @@ const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
   invokers: ["invokers"],
 };
 
+// A value filled in from another resource's outputs when the function is applied.
+export const OUTPUT_REFERENCE = "@output:";
+
+function outputReference(resources: Map<string, { type: string; name: string }>, name: string, output: string): string {
+  const resource = resources.get(name);
+  if (!resource) throw new Error(`cloudgear config references unknown resource "${name}"`);
+  return `${OUTPUT_REFERENCE}${stateKey(resource)}#${output}`;
+}
+
 // Omit empty options so older state still matches.
 function optionsSpec(options?: Record<string, string>): { options?: Record<string, string> } {
   return options && Object.keys(options).length ? { options } : {};
@@ -176,7 +185,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       ...(fn.route.length ? {} : { scheduled_only: true as const }),
       invokers: config.authenticated === "iam" ? [...config.invoker].sort() : [],
       env: Object.fromEntries(
-        fn.env.map((e) => [e.key, e.value_from !== undefined ? physicalOf(e.value_from) : (e.value ?? "")]),
+        fn.env.map((e) => [e.key, e.value_from !== undefined ? (e.output ? outputReference(resources, e.value_from, e.output) : physicalOf(e.value_from)) : (e.value ?? "")]),
       ),
       permissions: fn.permission.map((p) => ({
         type: resources.get(p.resource)?.type ?? "",
@@ -195,7 +204,8 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       dry: false,
       spec: spec as unknown as Record<string, unknown>,
       source: fn,
-      deps: [...new Set(fn.permission.map((p) => p.resource))].flatMap((name) => {
+      ...(Object.values(spec.env).some((value) => value.startsWith(OUTPUT_REFERENCE)) ? { refresh: true } : {}),
+      deps: [...new Set([...fn.permission.map((p) => p.resource), ...fn.env.flatMap((e) => (e.output && e.value_from ? [e.value_from] : []))])].flatMap((name) => {
         const resource = resources.get(name);
         return resource ? [stateKey(resource)] : [];
       }),
@@ -417,7 +427,7 @@ export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
       actions.push({ ...base, op: "replace", changes: ["physical_name"] });
     } else {
       const changes = entry.kind === "function" ? functionChanges(current.spec, entry.spec) : specChanged(current.spec, entry.spec) ? ["spec"] : [];
-      if (!changes.length && entry.refresh && entry.deps.some((dep) => churned.has(dep))) changes.push("dependencies");
+      if (entry.refresh && entry.deps.some((dep) => churned.has(dep))) changes.push("dependencies");
       actions.push({ ...base, op: changes.length ? "update" : "noop", changes });
     }
     const last = actions[actions.length - 1]!;

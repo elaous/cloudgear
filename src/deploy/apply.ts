@@ -16,6 +16,8 @@ export interface Driver {
   create(entry: DesiredEntry, context: DriverContext): Promise<Record<string, string>>;
   update(entry: DesiredEntry, current: StateEntry, changes: string[], context: DriverContext): Promise<Record<string, string>>;
   delete(current: StateEntry, context: DriverContext): Promise<void>;
+  // A reason to refuse deleting; checked for every delete before anything runs.
+  protect?(current: StateEntry): string | undefined;
   // Drivers without this lookup cannot import.
   adopt?(entry: DesiredEntry, context: DriverContext, hint?: AdoptHint): Promise<Adopted | undefined>;
 }
@@ -153,6 +155,13 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
         break;
     }
   };
+
+  const refusals = actions.flatMap((action) => {
+    if ((action.op !== "delete" && action.op !== "replace") || !action.current) return [];
+    const reason = drivers[action.type]?.protect?.(action.current);
+    return reason ? [reason] : [];
+  });
+  if (refusals.length) throw new Error(`Nothing was changed. ${refusals.join("\n")}`);
 
   for (const action of actions) {
     if (options.shouldStop?.()) throw new ApplyInterrupted();

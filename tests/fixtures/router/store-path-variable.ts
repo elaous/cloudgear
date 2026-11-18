@@ -1,7 +1,8 @@
 import { FunctionRouter } from "@cloudgear/functions";
 import { BlobStore } from "@cloudgear/blob";
 
-const prefix = "x/";
+declare function compute(): string;
+const prefix = compute();
 const store = new BlobStore("aws", "://b", { path: prefix });
 
 export async function f() {

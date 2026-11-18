@@ -49,6 +49,13 @@ export function assertPolicyDocument(document: unknown, name = "policy"): assert
   if (JSON.stringify(document).length > MAX_POLICY_CHARS) throw new Error(`The document of ${name} is over IAM's ${MAX_POLICY_CHARS} characters`);
 }
 
+// True when `*` or `?` appears before the first "/" of the resource part, so object keys under one bucket do not count.
+function hasArnWildcard(arn: string): boolean {
+  const fields = arn.split(":");
+  const resourcePart = fields.slice(5).join(":").split("/")[0] ?? "";
+  return /[*?]/.test([...fields.slice(0, 5), resourcePart].join(":"));
+}
+
 // What a reader of a `plan` should look at twice: Allow statements that name every action or every resource.
 export function broadStatements(document: PolicyDocument): string[] {
   const statements = Array.isArray(document.Statement) ? document.Statement : [document.Statement];
@@ -58,7 +65,11 @@ export function broadStatements(document: PolicyDocument): string[] {
     if (s.Effect !== "Allow") continue;
     const many = (value: unknown) => (Array.isArray(value) ? value : [value]);
     if (many(s.Action).includes("*")) found.push(`statement ${index} allows every action ("Action": "*")`);
-    if (many(s.Resource).includes("*")) found.push(`statement ${index} applies to every resource ("Resource": "*")`);
+    const resources = many(s.Resource);
+    if (resources.includes("*")) found.push(`statement ${index} applies to every resource ("Resource": "*")`);
+    for (const resource of resources) {
+      if (typeof resource === "string" && resource !== "*" && hasArnWildcard(resource)) found.push(`statement ${index} uses a wildcard in the ARN "${resource}" outside the object path`);
+    }
   }
   return found;
 }

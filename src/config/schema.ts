@@ -1,3 +1,4 @@
+import { assertS3BucketName } from "@cloudgear/blob";
 import { assertSecretName, parseSecretPath } from "@cloudgear/secrets";
 import { encodePrototxt, parsePrototxt, type ProtoMessage } from "./prototxt";
 
@@ -250,6 +251,7 @@ export function decodeConfig(text: string): CloudgearConfig {
       ...optionsFrom(f),
     })),
   };
+  for (const r of config.resource) if (r.type === "@aws.S3") assertS3BucketName(r.physical_name);
   return config;
 }
 

@@ -312,6 +312,13 @@ describe("analyzeApp", () => {
     expect(model.warnings[0]).toMatch(/BlobStore "clients" uses its raw client\(\); granting every operation on it/);
   });
 
+  test("warns that jwtAuth without a cert or CDN leaves protected routes publicly callable", () => {
+    expect(analyzeApp(fixture("none-with-jwt.ts")).warnings).toEqual([
+      expect.stringMatching(/authenticated is "none"/),
+      expect.stringMatching(/jwtAuth never runs; routes that are not \{ public: true \} are publicly callable without a token/),
+    ]);
+  });
+
   test("warns when authenticate cannot reach functions because URLs are public", () => {
     const model = analyzeApp(fixture("none-with-authenticate.ts"));
     expect(model.warnings).toEqual([

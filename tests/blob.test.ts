@@ -24,6 +24,10 @@ describe("parseBlobUri", () => {
     expect(() => parseBlobUri("aws", "myblob")).toThrow(/Invalid blob URI/);
     expect(() => parseBlobUri("aws", "://a/b")).toThrow(/Invalid blob URI/);
   });
+
+  test.each(["s3://*", "s3://prod-*", "s3://a?b", "s3://Upper", "s3://ab", "s3://-lead"])("rejects the aws bucket name in %s", (uri) => {
+    expect(() => parseBlobUri("aws", uri)).toThrow(/Invalid S3 bucket name/);
+  });
 });
 
 describe("BlobStore", () => {
@@ -53,7 +57,7 @@ describe("BlobStore", () => {
       ...new MemoryBlobDriver(),
       put: async (key, _data, contentType) => void puts.push([key, contentType]),
     } as BlobDriver;
-    const store = new BlobStore("aws", "://ct", { driver });
+    const store = new BlobStore("aws", "://content-bucket", { driver });
     await store.put("t", "x");
     await store.put("j", { a: 1 });
     await store.put("b", new Uint8Array(1));
@@ -93,7 +97,7 @@ describe("BlobStore", () => {
     await new BlobStore("gcp", "gs://regional", { region: "eu-west-1" }).exists("k");
     await new BlobStore("gcp", "gs://plain").exists("k");
     expect(seen).toEqual(["eu-west-1", undefined]);
-    expect(new BlobStore("aws", "://r", { region: "eu-west-1" }).region).toBe("eu-west-1");
+    expect(new BlobStore("aws", "://region-bucket", { region: "eu-west-1" }).region).toBe("eu-west-1");
   });
 
   test("fails clearly for a provider with no driver, and retries after a failure", async () => {
@@ -221,7 +225,7 @@ describe("BlobStore path prefix", () => {
   });
 
   test("grant is a runtime no-op", () => {
-    expect(grant(new BlobStore("aws", "://g"), "read", "write")).toBeUndefined();
+    expect(grant(new BlobStore("aws", "://grant-bucket"), "read", "write")).toBeUndefined();
   });
 });
 
@@ -243,10 +247,10 @@ describe("BlobStore.client()", () => {
 
   test("a driver you pass in can carry a client, and one without says so", async () => {
     const marker = { send: async () => ({}) };
-    const withClient = new BlobStore("aws", "://x", { driver: Object.assign(new MemoryBlobDriver(), { client: marker }) });
+    const withClient = new BlobStore("aws", "://client-bucket", { driver: Object.assign(new MemoryBlobDriver(), { client: marker }) });
     expect(await withClient.client()).toBe(marker as never);
     process.env.CLOUDGEAR_BLOB_DRIVER = "memory";
-    await expect(new BlobStore("aws", "://y").client()).rejects.toThrow(/has no client/);
+    await expect(new BlobStore("aws", "://plain-bucket").client()).rejects.toThrow(/has no client/);
   });
 });
 

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { GetObjectCommandOutput, PutObjectCommandOutput } from "@aws-sdk/client-s3";
+import { S3_BUCKET_NAME } from "@cloudgear/blob";
 import { debug } from "@cloudgear/debug";
 import { parseState, serializeState, writeFileAtomic, type State } from "./state";
 import { readRemoteMarker, MARKER_FILE, type LockRequest, type Release, type StateStore } from "./state-store";
@@ -35,15 +36,13 @@ export interface S3StateStoreOptions {
 export const STATE_CHANGED = "state changed remotely since it was read";
 export const STATE_DELETED = "state was deleted remotely since it was read";
 
-const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
-
 export function parseS3Location(url: string): S3Location {
   const match = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?$/.exec(url);
   if (!match) throw new Error(`State location "${url}" must look like s3://<bucket>/<prefix>`);
   const [, scheme, bucket = "", rawPath = "", query = ""] = match;
   if (scheme!.toLowerCase() !== "s3") throw new Error(`State location "${url}" must use the s3:// scheme, not ${scheme}://`);
   if (!bucket) throw new Error(`State location "${url}" has no bucket; expected s3://<bucket>/<prefix>`);
-  if (!BUCKET.test(bucket)) throw new Error(`State location "${url}" has an invalid bucket name "${bucket}"`);
+  if (!S3_BUCKET_NAME.test(bucket)) throw new Error(`State location "${url}" has an invalid bucket name "${bucket}"`);
   const segments = rawPath.split("/").slice(1);
   if (segments.at(-1) === "") segments.pop();
   for (const segment of segments) {

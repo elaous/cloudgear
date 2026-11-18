@@ -907,7 +907,8 @@ resource at a time.
   `GOOGLE_APPLICATION_CREDENTIALS` at a service account file) before `apply`.
 - **Project.** A resource lives in the project named by its `project` option,
   else `GOOGLE_CLOUD_PROJECT`, else the project of your credentials. With none
-  of them `apply` stops before calling GCP.
+  of them `apply` stops before creating anything, and shows why the lookup
+  failed when your credentials could not be loaded.
 - **Buckets.** `new BlobStore("gcp", "gs://assets", { options: { ... } })`:
 
 | Option | Default | Meaning |
@@ -918,8 +919,12 @@ resource at a time.
 | `versioning` | `false` | Keep old object versions |
 
   A new bucket is private: uniform bucket-level access is on and public access is
-  prevented. cloudgear labels it with its tags. Bucket names are global, so
-  creating one that exists fails and points at `cloudgear import`.
+  prevented. cloudgear labels it with its tags, converted to GCP's label rules
+  (lowercase letters, digits, `_` and `-`); two tags that become the same label,
+  or a tag starting with `goog`, stop `apply` with an error. Bucket names are
+  global, so creating one that exists fails and points at `cloudgear import`.
+  Changing `versioning` or `storage_class` updates the bucket; changing
+  `location` or `project` is an error.
 - **Import and delete.** As with S3, `cloudgear import` only records a bucket;
   `apply` and `destroy` never change or delete an imported one. A bucket cloudgear
   created is deleted only if it is empty, and never has its objects removed.

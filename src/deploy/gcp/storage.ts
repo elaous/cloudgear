@@ -56,12 +56,17 @@ export function gcsDriver(deps: GcpDeps): Driver {
       if (before !== after) {
         throw new Error(`Bucket "${entry.physical_name}" cannot move from ${before} to ${after}; destroy it (after emptying it) and apply again`);
       }
-      const wanted = optionsOf(entry.spec).versioning === "true";
-      const had = optionsOf(current.spec).versioning === "true";
-      if (wanted !== had) {
-        const project = current.outputs.project || (await projectFor(entry.spec, entry.physical_name));
-        await deps.storage(project).bucket(entry.physical_name).setMetadata({ versioning: { enabled: wanted } });
+      const wantedOptions = optionsOf(entry.spec);
+      const hadOptions = optionsOf(current.spec);
+      const project = current.outputs.project || (await projectFor(entry.spec, entry.physical_name));
+      // A bucket cannot move between projects, so a different project is an error, not a silent record.
+      if (wantedOptions.project && current.outputs.project && wantedOptions.project !== current.outputs.project) {
+        throw new Error(`Bucket "${entry.physical_name}" is in project ${current.outputs.project} and cannot move to ${wantedOptions.project}`);
       }
+      const patch: Record<string, unknown> = {};
+      if ((wantedOptions.versioning === "true") !== (hadOptions.versioning === "true")) patch.versioning = { enabled: wantedOptions.versioning === "true" };
+      if (wantedOptions.storage_class && wantedOptions.storage_class !== hadOptions.storage_class) patch.storageClass = wantedOptions.storage_class;
+      if (Object.keys(patch).length) await deps.storage(project).bucket(entry.physical_name).setMetadata(patch);
       return {};
     },
 

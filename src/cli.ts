@@ -528,9 +528,13 @@ const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, re
     const { Storage } = await import("@google-cloud/storage");
     const { GoogleAuth } = await import("google-auth-library");
     const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+    const clients = new Map<string, StorageLike>();
     return gcpDrivers({
-      storage: (project) => new Storage({ projectId: project, authClient: auth }) as unknown as StorageLike,
-      defaultProject: () => auth.getProjectId().catch(() => undefined),
+      storage: (project) => {
+        if (!clients.has(project)) clients.set(project, new Storage({ projectId: project, authClient: auth }) as unknown as StorageLike);
+        return clients.get(project)!;
+      },
+      defaultProject: () => auth.getProjectId(),
       labels: tags,
       log: (message) => console.log(`cloudgear: ${message}`),
     });

@@ -36,7 +36,7 @@ describe("provider of a resource type", () => {
 
   test("options and reserved environment names follow the resource's provider", () => {
     expect(() => validateOptions("gcp", "@gcp.GCS", { versioning: "true" }, "x")).not.toThrow();
-    expect(() => validateOptions("gcp", "@gcp.GCS", { tracing: "Active" }, "x")).toThrow(/unknown option "tracing" for @gcp.GCS \(supported: versioning\)/);
+    expect(() => validateOptions("gcp", "@gcp.GCS", { tracing: "Active" }, "x")).toThrow(/unknown option "tracing" for @gcp.GCS \(supported: versioning, project, location, storage_class\)/);
     expect(() => validateOptions("gcp", "@gcp.CloudFunction", { "env.K_SERVICE": "x" }, "x")).toThrow(/not a usable environment variable name/);
     expect(() => validateOptions("gcp", "@gcp.CloudFunction", { "env.AWS_REGION": "x" }, "x")).not.toThrow();
     expect(() => validateOptions("aws", "@aws.Lambda", { "env.AWS_REGION": "x" }, "x")).toThrow(/not a usable environment variable name/);
@@ -94,7 +94,7 @@ describe("a GCP function with an AWS bucket and a GCS bucket", () => {
   test("options are validated against each resource's own provider", async () => {
     const { config } = await generated(fixture("gcp-function-aws-store.ts"));
     expect(config.resource.map((r) => r.options)).toEqual([{ versioning: "true" }, { versioning: "true" }]);
-    await expect(generated(fixture("gcs-bad-option.ts"))).rejects.toThrow(/unknown option "tracing" for @gcp\.GCS \(supported: versioning\)/);
+    await expect(generated(fixture("gcs-bad-option.ts"))).rejects.toThrow(/unknown option "tracing" for @gcp\.GCS \(supported: versioning, project, location, storage_class\)/);
   });
 
   test("a CDN on AWS may serve a site while the functions are on GCP", async () => {
@@ -131,14 +131,14 @@ describe("a GCP function with an AWS bucket and a GCS bucket", () => {
     expect(text).toContain("+ @gcp.CloudFunction getReport");
   });
 
-  test("apply stops before doing anything when a provider has no deployers", async () => {
+  test("apply stops before doing anything when the plan holds a type no driver handles", async () => {
     const { dir, configPath } = await generated(fixture("gcp-function-aws-store.ts"));
     const proc = Bun.spawnSync(["bun", path.join(import.meta.dir, "..", "src", "cli.ts"), "apply", "--auto-approve", "--config", configPath], {
       cwd: dir,
       env: { ...process.env, AWS_REGION: "eu-west-1" },
     });
     expect(proc.exitCode).toBe(1);
-    expect(proc.stderr.toString()).toMatch(/Provider "gcp" has no deploy drivers yet; the config can be planned but not applied/);
+    expect(proc.stderr.toString()).toMatch(/Nothing was changed\. cloudgear cannot deploy @gcp\.CloudFunction yet/);
     expect(fs.existsSync(path.join(dir, ".cloudgear", "state.json"))).toBe(false);
   });
 

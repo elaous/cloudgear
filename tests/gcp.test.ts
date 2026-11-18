@@ -97,6 +97,27 @@ describe("project and labels", () => {
     await expect(resolveProject({ defaultProject: async () => { throw new Error("no credentials"); }, env: {} }, undefined, "x")).rejects.toThrow(/has no GCP project/);
   });
 
+  test("a credentials failure is shown with the missing-project message, and the real environment is read by default", async () => {
+    await expect(resolveProject({ defaultProject: async () => { throw new Error("Could not load the default credentials"); }, env: {} }, undefined, "Bucket \"assets\"")).rejects.toThrow(/has no GCP project.*\(looking it up failed: Could not load the default credentials\)/);
+    const saved = process.env.GOOGLE_CLOUD_PROJECT;
+    process.env.GOOGLE_CLOUD_PROJECT = "from-process-env";
+    try {
+      expect(await resolveProject({ defaultProject: async () => "adc" }, undefined, "x")).toBe("from-process-env");
+    } finally {
+      if (saved === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
+      else process.env.GOOGLE_CLOUD_PROJECT = saved;
+    }
+  });
+
+  test("tags that become the same label, or use the reserved prefix, are errors", () => {
+    expect(() => labelsFrom({ Env: "a", env: "b" }, "r")).toThrow(/Tags "Env" and "env" both become the GCP label "env"; rename one/);
+    expect(() => labelsFrom({ "a:b": "1", a_b: "2" }, "r")).toThrow(/both become the GCP label "a_b"/);
+    expect(() => labelsFrom({ cloudgear_resource: "x" }, "r")).toThrow(/Tags "cloudgear_resource" and "cloudgear:resource" both become/);
+    expect(() => labelsFrom({ googtag: "x" }, "r")).toThrow(/GCP reserves the "goog" prefix/);
+    expect(() => labelsFrom({ "123": "x" }, "r")).toThrow(/cannot become a GCP label/);
+    expect(labelsFrom({ a: "1", a_: "2" }, "r")).toMatchObject({ a: "1", a_: "2" });
+  });
+
   test("tags become valid GCP labels", () => {
     const labels = labelsFrom({ "cloudgear:project": "My App!", "9bad": "x", Author: "Sam Aouar" }, "assets");
     expect(labels).toEqual({ "cloudgear_project": "my_app_", bad: "x", author: "sam_aouar", "cloudgear_resource": "assets" });
@@ -153,6 +174,27 @@ describe("gcs driver", () => {
     await applyConfig(configWith({ project: "my-proj-123", versioning: "false" }), state, gcs.drivers);
     expect(gcs.buckets.get("assets")!.versioning).toBe(false);
     await expect(applyConfig(configWith({ project: "my-proj-123", location: "EU" }), state, gcs.drivers)).rejects.toThrow(/cannot move from US to EU; destroy it \(after emptying it\)/);
+  });
+
+  test("storage class changes are applied, a project change is refused, and both are never recorded without happening", async () => {
+    const gcs = fakeGcs();
+    const state = emptyState();
+    await applyConfig(configWith({ project: "my-proj-123", storage_class: "STANDARD" }), state, gcs.drivers);
+    await applyConfig(configWith({ project: "my-proj-123", storage_class: "COLDLINE", versioning: "true" }), state, gcs.drivers);
+    const patch = gcs.calls.filter((c) => c.op === "set");
+    expect(patch).toHaveLength(1);
+    expect(patch[0]!.input).toEqual({ versioning: { enabled: true }, storageClass: "COLDLINE" });
+    await expect(applyConfig(configWith({ project: "other-proj-456", storage_class: "COLDLINE", versioning: "true" }), state, gcs.drivers)).rejects.toThrow(/is in project my-proj-123 and cannot move to other-proj-456/);
+    expect(gcs.calls.filter((c) => c.op === "set")).toHaveLength(1);
+  });
+
+  test("destroy finds the project again when the state has none recorded", async () => {
+    const gcs = fakeGcs({ assets: {} });
+    const state = emptyState();
+    state.entries[KEY] = { kind: "resource", type: "@gcp.GCS", name: "assets", physical_name: "assets", spec: { physical_name: "assets", region: "", options: { project: "my-proj-123" } }, outputs: {}, deps: [] } as never;
+    await applyConfig(empty(), state, gcs.drivers);
+    expect(gcs.calls[0]).toMatchObject({ project: "my-proj-123", op: "delete" });
+    expect(gcs.buckets.size).toBe(0);
   });
 
   test("delete removes an empty bucket, tolerates a missing one and refuses a bucket with objects", async () => {

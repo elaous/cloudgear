@@ -89,6 +89,14 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     cacheIds.set(id, cache.name);
   }
 
+  const instanceNames = new Map<string, string>();
+  for (const instance of model.instances) {
+    const physical = fitName(`${project}-${sanitizeName(instance.name)}`, 128);
+    const clash = instanceNames.get(physical);
+    if (clash) throw new Error(`Instances "${clash}" and "${instance.name}" both deploy as "${physical}"; rename one`);
+    instanceNames.set(physical, instance.name);
+  }
+
   const physicalNames = new Map<string, string>();
   for (const fn of model.functions) {
     const physical = fitName(`${project}-${sanitizeName(fn.name)}`, 64);
@@ -251,6 +259,25 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
           ...(cache.size !== undefined ? { size: cache.size } : {}),
           ...cache.network,
           ...(cache.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
+      model.instances.map((instance) => ({
+        name: `instance.${instance.name}`,
+        type: capability(instance.provider, "instance").type,
+        physical_name: fitName(`${project}-${sanitizeName(instance.name)}`, 128),
+        dry: false,
+        source: `${fromConfig(instance.file)}:${instance.line}`,
+        region: undefined,
+        options: {
+          ...(instance.size !== undefined ? { size: instance.size } : {}),
+          ...(instance.image !== undefined ? { image: instance.image } : {}),
+          ...(instance.diskGb !== undefined ? { disk_gb: String(instance.diskGb) } : {}),
+          ...(instance.keyName !== undefined ? { key_name: instance.keyName } : {}),
+          ...(instance.profile !== undefined ? { profile: instance.profile } : {}),
+          ...(instance.userData !== undefined ? { user_data: instance.userData } : {}),
+          ...instance.network,
+          ...(instance.allowDestroy ? { allow_destroy: "true" } : {}),
         },
       })),
     ).concat(

@@ -20,6 +20,7 @@ export interface ProviderProfile {
   registry?: { type: string };
   stream?: { type: string };
   cache?: { type: string };
+  instance?: { type: string };
 }
 
 const oneOf =
@@ -85,6 +86,18 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           ...NETWORK_RULES,
         },
       },
+      "@aws.EC2": {
+        keys: {
+          size: oneOf("micro", "small", "medium"),
+          image: (v) => (/^ami-[0-9a-f]{8,17}$/.test(v) ? undefined : 'must be an AMI id such as "ami-0123456789abcdef0"'),
+          disk_gb: integerBetween(1, 16384),
+          key_name: (v) => (/^[\x20-\x7E]{1,255}$/.test(v) ? undefined : "must be a key pair name"),
+          profile: (v) => (/^[\w+=,.@-]{1,128}$/.test(v) ? undefined : "must be an instance profile name"),
+          user_data: (v) => (new TextEncoder().encode(v).length <= 16384 ? undefined : "must be at most 16384 bytes"),
+          allow_destroy: oneOf("true"),
+          ...NETWORK_RULES,
+        },
+      },
       "@aws.Kinesis": {
         keys: {
           mode: oneOf("provisioned", "on-demand"),
@@ -104,6 +117,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     registry: { type: "@aws.ECR" },
     stream: { type: "@aws.Kinesis" },
     cache: { type: "@aws.ElastiCache" },
+    instance: { type: "@aws.EC2" },
     blobStore: {
       type: "@aws.S3",
       actions: {
@@ -144,9 +158,9 @@ export function profileOfType(type: string): ProviderProfile {
   return providerProfile(providerOfType(type));
 }
 
-export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry" | "stream" | "cache">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
+export function capability<K extends "cdn" | "api" | "schedule" | "events" | "registry" | "stream" | "cache" | "instance">(provider: string, name: K): NonNullable<ProviderProfile[K]> {
   const found = providerProfile(provider)[name];
-  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : name === "stream" ? "a stream" : name === "cache" ? "a cache" : "schedules"} yet`);
+  if (!found) throw new Error(`Provider "${provider}" does not support ${name === "cdn" ? "a CDN" : name === "api" ? "an API domain" : name === "events" ? "an event bus" : name === "registry" ? "an image registry" : name === "stream" ? "a stream" : name === "cache" ? "a cache" : name === "instance" ? "an instance" : "schedules"} yet`);
   return found as NonNullable<ProviderProfile[K]>;
 }
 

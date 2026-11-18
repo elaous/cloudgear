@@ -1743,6 +1743,73 @@ following references to that variable.
   ElastiCache create, describe and delete actions for replication groups, cache
   clusters and subnet groups.
 
+## Instances: `@cloudgear/instance`
+
+`Instance` declares a virtual machine. Constructing it does nothing;
+`cloudgear apply` starts it, or adopts the one that already has the name. AWS
+(EC2) is the first provider.
+
+```ts
+import { Instance } from "@cloudgear/instance";
+
+new Instance("aws", "worker", { size: "small", keyName: "ops", userData: "#!/bin/sh\nyum -y update\n" });
+```
+
+The instance is tagged `Name` with `<project>-<name>`, and that tag is how
+cloudgear finds it again.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `size` | `"micro"` | `"micro"`, `"small"` or `"medium"` (`t4g.*`, arm64) |
+| `image` | latest Amazon Linux 2023 (arm64) | An AMI id; use an arm64 image |
+| `diskGb` | the image's own size | Root volume size, 1-16384 GB; encrypted `gp3` |
+| `keyName` | none | An existing key pair, to log in with SSH |
+| `profile` | none | An existing instance profile name |
+| `userData` | none | A script run at first boot, up to 16 KB |
+| `network` | the default VPC | A `Network` from `@cloudgear/network` |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) terminate the instance |
+
+- **Network.** The instance goes in a subnet of the network (the next one is
+  tried if a zone does not offer the type) and uses the network's security
+  groups (the VPC's default group unless you name some). Whether it gets a
+  public address follows the subnet. cloudgear opens no ports; with the default
+  group, only members of that group can reach it. Instance metadata requires
+  IMDSv2. With `diskGb` set, the root volume is an encrypted `gp3`; without it
+  the volume follows the image and your account's defaults.
+- **Fixed at creation.** `size`, `image`, `diskGb`, `keyName`, `profile`,
+  `userData` and the network apply only when the instance is created. Changing
+  one stops `apply` with an error: use a new name to replace the instance.
+- **`userData` is not secret.** It is written to the generated config and the
+  state, and anyone who can describe the instance can read it. You MUST NOT put
+  credentials in it, and MUST NOT build it from environment variables that hold
+  secrets.
+- **Adopt first.** `apply` takes over an instance with that name only if
+  cloudgear started it, which makes a retry after a crash safe. An instance it
+  did not start is an error, so a foreign instance with the same `Name` is never
+  terminated by mistake; adopt it on purpose with `cloudgear import --all` or
+  `cloudgear import @aws.EC2 instance.<name>`, which read it without changing
+  anything, record its real network, and never record `allowDestroy`. A
+  different size or image, or two instances with the name, is an error. A
+  stopped or stopping instance is left alone. If a managed instance is
+  terminated outside cloudgear, `apply` says so instead of starting a new one;
+  remove its entry from `.cloudgear/state.json` to start again.
+- **Starting.** `apply` waits up to 5 minutes for it to run; if it gives up, run
+  it again and it adopts the instance.
+- **Destroy.** The instance is terminated only if the applied config had
+  `allowDestroy: true`, and `destroy` checks that before changing anything.
+  Terminating deletes its root volume.
+- **Cost.** An instance bills every hour it runs, plus its disk and, when its
+  subnet gives it a public address, the public IPv4 address. As a rough guide a
+  `t4g.micro` is about $6 a month plus about $3.60 for the address; check
+  current AWS pricing.
+- **Permissions.** On top of the Networks list, the deploying identity needs
+  `ec2:RunInstances`, `ec2:DescribeInstances`, `ec2:TerminateInstances`,
+  `ec2:CreateTags`, and `ssm:GetParameter` for the image lookup. `diskGb` also
+  needs `ec2:DescribeImages`, and `kms:CreateGrant`,
+  `kms:GenerateDataKeyWithoutPlaintext`, `kms:DescribeKey`, `kms:Decrypt` and
+  `kms:ReEncrypt*` when the account's default EBS key is customer-managed.
+  `profile` needs `iam:PassRole`.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1960,6 +2027,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/stream` | `Stream` (Kinesis) |
 | `@cloudgear/network` | `Network` (existing VPC) |
 | `@cloudgear/cache` | `Cache` (ElastiCache) |
+| `@cloudgear/instance` | `Instance` (EC2) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -2010,6 +2078,8 @@ Where each moving part lives, since several are called across packages:
 | VPC lookup (`resolveNetwork`) | `src/deploy/aws/network.ts` | the Lambda and ElastiCache drivers |
 | `Cache` | `packages/cache/index.ts` | apps; `src/analyze/app.ts` |
 | ElastiCache driver | `src/deploy/aws/elasticache.ts` | `awsDrivers` |
+| `Instance` | `packages/instance/index.ts` | apps; `src/analyze/app.ts` |
+| EC2 instance driver | `src/deploy/aws/instance.ts` | `awsDrivers` |
 | `OUTPUT_REFERENCE` (env filled from a resource's output) | `src/deploy/plan.ts` | `environment()` in the Lambda driver |
 | `destroyAllowed`, `withoutAllowDestroy` | `src/deploy/protect.ts` | the Neon, ECR and Kinesis drivers |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |

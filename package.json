@@ -54,6 +54,7 @@
     "@cloudgear/events": "workspace:*",
     "@cloudgear/functions": "workspace:*",
     "@cloudgear/iam": "workspace:*",
+    "@cloudgear/instance": "workspace:*",
     "@cloudgear/network": "workspace:*",
     "@cloudgear/registry": "workspace:*",
     "@cloudgear/secrets": "workspace:*",

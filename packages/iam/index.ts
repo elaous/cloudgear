@@ -49,11 +49,9 @@ export function assertPolicyDocument(document: unknown, name = "policy"): assert
   if (JSON.stringify(document).length > MAX_POLICY_CHARS) throw new Error(`The document of ${name} is over IAM's ${MAX_POLICY_CHARS} characters`);
 }
 
-// True when `*` or `?` appears before the first "/" of the resource part, so object keys under one bucket do not count.
-function hasArnWildcard(arn: string): boolean {
-  const fields = arn.split(":");
-  const resourcePart = fields.slice(5).join(":").split("/")[0] ?? "";
-  return /[*?]/.test([...fields.slice(0, 5), resourcePart].join(":"));
+// Only S3 ARNs: other services use wildcards legitimately.
+function hasBucketWildcard(arn: string): boolean {
+  return arn.startsWith("arn:aws:s3:::") && /[*?]/.test(arn.slice("arn:aws:s3:::".length).split("/")[0]!);
 }
 
 // What a reader of a `plan` should look at twice: Allow statements that name every action or every resource.
@@ -68,7 +66,7 @@ export function broadStatements(document: PolicyDocument): string[] {
     const resources = many(s.Resource);
     if (resources.includes("*")) found.push(`statement ${index} applies to every resource ("Resource": "*")`);
     for (const resource of resources) {
-      if (typeof resource === "string" && resource !== "*" && hasArnWildcard(resource)) found.push(`statement ${index} uses a wildcard in the ARN "${resource}" outside the object path`);
+      if (typeof resource === "string" && resource !== "*" && hasBucketWildcard(resource)) found.push(`statement ${index} names a wildcard bucket in "${resource}"`);
     }
   }
   return found;

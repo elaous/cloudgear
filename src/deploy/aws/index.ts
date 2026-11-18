@@ -1,3 +1,4 @@
+import { assertS3BucketName } from "@cloudgear/blob";
 import {
   AttachRolePolicyCommand,
   CreateRoleCommand,
@@ -715,6 +716,7 @@ export function policyDocument(spec: FunctionComparable, secrets?: SecretContext
       return [{ Effect: "Allow", Action: p.actions, Resource: `arn:aws:events:${secrets.region}:${secrets.account}:event-bus/${p.physical_name}` }];
     }
     if (p.type !== "@aws.S3") throw new Error(`No IAM mapping for permissions on ${p.type}`);
+    assertS3BucketName(p.physical_name);
     const bucketArn = `arn:aws:s3:::${p.physical_name}`;
     const prefix = p.path ?? "";
     const bucketActions = p.actions.filter((a) => a === "s3:ListBucket");

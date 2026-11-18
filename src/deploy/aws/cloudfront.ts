@@ -1,3 +1,4 @@
+import { assertS3BucketName } from "@cloudgear/blob";
 import { createHash } from "node:crypto";
 import {
   CreateDistributionCommand,
@@ -107,6 +108,7 @@ export function cloudFrontDriver(deps: CloudFrontDeps): Driver {
   async function putBucketStatements(spec: CdnComparable, distributionArn: string) {
     const policy = await readBucketPolicy(spec.bucket, spec.bucket_region);
     const id = tag(spec.domain);
+    assertS3BucketName(spec.bucket);
     const objectArn = `arn:aws:s3:::${spec.bucket}/${spec.path}*`;
     const condition = { StringEquals: { "AWS:SourceArn": distributionArn } };
     const statements = policy.Statement.filter((s: { Sid?: string }) => !s.Sid?.startsWith(`cloudgear-cdn-${id}`));

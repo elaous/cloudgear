@@ -71,6 +71,15 @@ describe("wildcard ARNs", () => {
     expect(broadStatements(allow("arn:aws:s3:::ok/uploads/*"))).toEqual([]);
   });
 
+  test.each([
+    "arn:aws:secretsmanager:eu-west-1:123456789012:secret:name-??????",
+    "arn:aws:secretsmanager:eu-west-1:123456789012:secret:name-*",
+    "arn:aws:logs:eu-west-1:123456789012:log-group:name:*",
+    "arn:aws:lambda:eu-west-1:123456789012:function:name:*",
+  ])("a wildcard in %s is not flagged", (arn) => {
+    expect(broadStatements(allow(arn))).toEqual([]);
+  });
+
   test("the decoder refuses an S3 resource whose physical name is a wildcard", () => {
     const text = (physical_name: string) => encodeConfig(baseConfig({ resource: [{ name: "b", type: "@aws.S3", physical_name, dry: false, source: "" }], function: [] }));
     expect(() => decodeConfig(text("*"))).toThrow(/Invalid S3 bucket name/);

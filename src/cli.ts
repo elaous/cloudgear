@@ -8,6 +8,8 @@ import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
 import { decodeConfig, type CloudgearConfig } from "./config/schema";
 import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
+import { gcpDrivers } from "./deploy/gcp";
+import type { StorageLike } from "./deploy/gcp/storage";
 import { neonApiKey, neonDrivers } from "./deploy/neon";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
@@ -522,6 +524,17 @@ async function drivers(actions: PlannedAction[], config: CloudgearConfig, config
 
 const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags) => Promise<Drivers>> = {
   aws: awsDeployers,
+  gcp: async (_config, _configPath, _region, tags) => {
+    const { Storage } = await import("@google-cloud/storage");
+    const { GoogleAuth } = await import("google-auth-library");
+    const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+    return gcpDrivers({
+      storage: (project) => new Storage({ projectId: project, authClient: auth }) as unknown as StorageLike,
+      defaultProject: () => auth.getProjectId().catch(() => undefined),
+      labels: tags,
+      log: (message) => console.log(`cloudgear: ${message}`),
+    });
+  },
   neon: async () => neonDrivers({ apiKey: neonApiKey(), log: (message) => console.log(`cloudgear: ${message}`) }),
 };
 

@@ -38,6 +38,7 @@ import { ECRClient } from "@aws-sdk/client-ecr";
 import { ElastiCacheClient } from "@aws-sdk/client-elasticache";
 import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
 import { KinesisClient } from "@aws-sdk/client-kinesis";
+import { SSMClient } from "@aws-sdk/client-ssm";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
@@ -57,6 +58,7 @@ import { cloudFrontDriver } from "./cloudfront";
 import { scheduleDriver } from "./schedule";
 import { ecrDriver } from "./ecr";
 import { elastiCacheDriver } from "./elasticache";
+import { instanceDriver } from "./instance";
 import { kinesisDriver } from "./kinesis";
 import { resolveNetwork, type ResolvedNetwork } from "./network";
 import { eventBusDriver, eventRuleDriver } from "./eventbus";
@@ -69,7 +71,7 @@ export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
   readIncluded?: (fn: FunctionSpec) => { name: string; data: Uint8Array }[];
-  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient; ecr?: SendClient; kinesis?: SendClient; ec2?: SendClient; elasticache?: SendClient };
+  clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient; ecr?: SendClient; kinesis?: SendClient; ec2?: SendClient; elasticache?: SendClient; ssm?: SendClient };
   // Entry's own zone, so removals still clean up.
   dns?: (provider: string, zone: string, token?: SecretRefSpec) => DnsDriver | Promise<DnsDriver>;
   // Also tags each resource with its logical name.
@@ -123,6 +125,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   const apigateway = withDebug("apigateway", options.clients?.apigateway ?? new ApiGatewayV2Client({ region: options.region }));
   const ecr = withDebug("ecr", options.clients?.ecr ?? new ECRClient({ region: options.region }));
   const ec2 = withDebug("ec2", options.clients?.ec2 ?? new EC2Client({ region: options.region }));
+  const ssm = withDebug("ssm", options.clients?.ssm ?? new SSMClient({ region: options.region }));
   const elasticache = withDebug("elasticache", options.clients?.elasticache ?? new ElastiCacheClient({ region: options.region }));
   const kinesis = withDebug("kinesis", options.clients?.kinesis ?? new KinesisClient({ region: options.region }));
   const events = withDebug("events", options.clients?.events ?? new EventBridgeClient({ region: options.region }));
@@ -378,6 +381,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     "@aws.EventBus": eventBusDriver({ events, lambda, log, tags: tagger }),
     "@aws.ECR": ecrDriver({ ecr, log, tags: tagger }),
     "@aws.Kinesis": kinesisDriver({ kinesis, log, tags: tagger, sleep }),
+    "@aws.EC2": instanceDriver({ ec2, ssm, region: options.region, log, tags: tagger, sleep }),
     "@aws.ElastiCache": elastiCacheDriver({ elasticache, ec2, region: options.region, log, tags: tagger, sleep }),
     "@aws.EventRule": eventRuleDriver({ events, lambda, log, tags: tagger }),
     "@aws.Certificate": certificateDriver({ tags: tagger, acm: acmFor, region: options.region, dns: requireDns, sleep, log }),

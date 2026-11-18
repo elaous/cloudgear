@@ -29,6 +29,7 @@
         "@cloudgear/events": "workspace:*",
         "@cloudgear/functions": "workspace:*",
         "@cloudgear/iam": "workspace:*",
+        "@cloudgear/instance": "workspace:*",
         "@cloudgear/network": "workspace:*",
         "@cloudgear/registry": "workspace:*",
         "@cloudgear/secrets": "workspace:*",
@@ -129,6 +130,10 @@
     },
     "packages/iam": {
       "name": "@cloudgear/iam",
+      "version": "0.1.0",
+    },
+    "packages/instance": {
+      "name": "@cloudgear/instance",
       "version": "0.1.0",
     },
     "packages/network": {
@@ -271,6 +276,8 @@
     "@cloudgear/functions": ["@cloudgear/functions@workspace:packages/functions"],
 
     "@cloudgear/iam": ["@cloudgear/iam@workspace:packages/iam"],
+
+    "@cloudgear/instance": ["@cloudgear/instance@workspace:packages/instance"],
 
     "@cloudgear/network": ["@cloudgear/network@workspace:packages/network"],
 

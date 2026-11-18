@@ -254,6 +254,25 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
         },
       })),
     ).concat(
+      model.instances.map((instance) => ({
+        name: `instance.${instance.name}`,
+        type: capability(instance.provider, "instance").type,
+        physical_name: fitName(`${project}-${sanitizeName(instance.name)}`, 128),
+        dry: false,
+        source: `${fromConfig(instance.file)}:${instance.line}`,
+        region: undefined,
+        options: {
+          ...(instance.size !== undefined ? { size: instance.size } : {}),
+          ...(instance.image !== undefined ? { image: instance.image } : {}),
+          ...(instance.diskGb !== undefined ? { disk_gb: String(instance.diskGb) } : {}),
+          ...(instance.keyName !== undefined ? { key_name: instance.keyName } : {}),
+          ...(instance.profile !== undefined ? { profile: instance.profile } : {}),
+          ...(instance.userData !== undefined ? { user_data: instance.userData } : {}),
+          ...instance.network,
+          ...(instance.allowDestroy ? { allow_destroy: "true" } : {}),
+        },
+      })),
+    ).concat(
       model.streams.map((stream) => ({
         name: `stream.${stream.name}`,
         type: capability(stream.provider, "stream").type,

@@ -1743,6 +1743,57 @@ following references to that variable.
   ElastiCache create, describe and delete actions for replication groups, cache
   clusters and subnet groups.
 
+## Instances: `@cloudgear/instance`
+
+`Instance` declares a virtual machine. Constructing it does nothing;
+`cloudgear apply` starts it, or adopts the one that already has the name. AWS
+(EC2) is the first provider.
+
+```ts
+import { Instance } from "@cloudgear/instance";
+
+new Instance("aws", "worker", { size: "small", keyName: "ops", userData: "#!/bin/sh\nyum -y update\n" });
+```
+
+The instance is tagged `Name` with `<project>-<name>`, and that tag is how
+cloudgear finds it again.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `size` | `"micro"` | `"micro"`, `"small"` or `"medium"` (`t4g.*`, arm64) |
+| `image` | latest Amazon Linux 2023 (arm64) | An AMI id; use an arm64 image |
+| `diskGb` | the image's own size | Root volume size, 1-16384 GB; encrypted `gp3` |
+| `keyName` | none | An existing key pair, to log in with SSH |
+| `profile` | none | An existing instance profile name |
+| `userData` | none | A script run at first boot, up to 16 KB |
+| `network` | the default VPC | A `Network` from `@cloudgear/network` |
+| `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) terminate the instance |
+
+- **Network.** The instance goes in one subnet of the network and uses its
+  security groups (the VPC's default group unless you name some). Whether it
+  gets a public address follows the subnet. cloudgear opens no ports; with the
+  default group, only members of that group can reach it. Instance metadata
+  requires IMDSv2.
+- **Fixed at creation.** `size`, `image`, `diskGb`, `keyName`, `profile`,
+  `userData` and the network apply only when the instance is created. Changing
+  one stops `apply` with an error: use a new name to replace the instance.
+- **Adopt first.** An instance already running, pending or stopped with that
+  name is adopted. A different size or image is an error, and two instances
+  with the same name is an error. A stopped instance stays stopped.
+  `cloudgear import --all` and `cloudgear import @aws.EC2 instance.<name>` read
+  it without changing anything and never record `allowDestroy`.
+- **Starting.** `apply` waits up to 5 minutes for it to run; if it gives up, run
+  it again and it adopts the instance.
+- **Destroy.** The instance is terminated only if the applied config had
+  `allowDestroy: true`, and `destroy` checks that before changing anything.
+  Terminating deletes its root volume.
+- **Cost.** An instance bills every hour it runs, plus its disk. As a rough
+  guide a `t4g.micro` is about $6 a month; check current AWS pricing.
+- **Permissions.** On top of the Networks list, the deploying identity needs
+  `ec2:RunInstances`, `ec2:DescribeInstances`, `ec2:DescribeImages`,
+  `ec2:TerminateInstances`, `ec2:CreateTags`, `ssm:GetParameter` for the image
+  lookup, and `iam:PassRole` when you set `profile`.
+
 ## Policies: `@cloudgear/iam`
 
 `cloudgear` writes one inline policy on each function's role, from the permissions
@@ -1960,6 +2011,7 @@ deployed functions. They are private and not published yet.
 | `@cloudgear/stream` | `Stream` (Kinesis) |
 | `@cloudgear/network` | `Network` (existing VPC) |
 | `@cloudgear/cache` | `Cache` (ElastiCache) |
+| `@cloudgear/instance` | `Instance` (EC2) |
 | `@cloudgear/secrets` | `SecretStore` |
 | `@cloudgear/core` | One import for the decorators and helpers, plus `guard` |
 | `@cloudgear/debug` | `CG_DEBUG` logging |
@@ -2010,6 +2062,8 @@ Where each moving part lives, since several are called across packages:
 | VPC lookup (`resolveNetwork`) | `src/deploy/aws/network.ts` | the Lambda and ElastiCache drivers |
 | `Cache` | `packages/cache/index.ts` | apps; `src/analyze/app.ts` |
 | ElastiCache driver | `src/deploy/aws/elasticache.ts` | `awsDrivers` |
+| `Instance` | `packages/instance/index.ts` | apps; `src/analyze/app.ts` |
+| EC2 instance driver | `src/deploy/aws/instance.ts` | `awsDrivers` |
 | `OUTPUT_REFERENCE` (env filled from a resource's output) | `src/deploy/plan.ts` | `environment()` in the Lambda driver |
 | `destroyAllowed`, `withoutAllowDestroy` | `src/deploy/protect.ts` | the Neon, ECR and Kinesis drivers |
 | `EventBus`, `on` | `packages/events/index.ts` | apps; `src/analyze/app.ts` |

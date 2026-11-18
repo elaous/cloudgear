@@ -16,6 +16,7 @@ import { scanEnvUse, type EnvUse } from "./envuse";
 import { assertBusName, assertEventSource, assertEventType } from "@cloudgear/events";
 import { Database, type PostgresVersion } from "@cloudgear/database";
 import { Cache, type CacheEngine, type CacheSize } from "@cloudgear/cache";
+import { Instance, type InstanceSize } from "@cloudgear/instance";
 import { Network } from "@cloudgear/network";
 import { Registry } from "@cloudgear/registry";
 import { Stream, type StreamMode } from "@cloudgear/stream";
@@ -176,6 +177,21 @@ export interface AnalyzedRegistry {
   line: number;
 }
 
+export interface AnalyzedInstance {
+  name: string;
+  provider: string;
+  size?: InstanceSize;
+  image?: string;
+  diskGb?: number;
+  keyName?: string;
+  profile?: string;
+  userData?: string;
+  network: Record<string, string>;
+  allowDestroy: boolean;
+  file: string;
+  line: number;
+}
+
 export interface AnalyzedCache {
   name: string;
   provider: string;
@@ -212,6 +228,7 @@ export interface AppModel extends EdgeModel {
   registries: AnalyzedRegistry[];
   streams: AnalyzedStream[];
   caches: AnalyzedCache[];
+  instances: AnalyzedInstance[];
   functions: AnalyzedFunction[];
   warnings: string[];
 }
@@ -219,6 +236,7 @@ export interface AppModel extends EdgeModel {
 const NETWORK_OPTION_KEYS = ["vpc", "subnets", "security_groups"];
 const NETWORK_OPTIONS = ["vpc", "subnets", "securityGroups"];
 const DATABASE_OPTIONS = ["region", "postgres", "allowDestroy"];
+const INSTANCE_OPTIONS = ["size", "image", "diskGb", "keyName", "profile", "userData", "network", "allowDestroy"];
 const CACHE_OPTIONS = ["engine", "size", "network", "allowDestroy"];
 const STREAM_OPTIONS = ["mode", "shards", "retentionHours", "allowDestroy"];
 const REGISTRY_OPTIONS = ["scanOnPush", "immutableTags", "keepUntaggedDays", "allowDestroy"];
@@ -474,6 +492,37 @@ function analyzeEntry(entryPath: string): AppModel {
   }
   let cacheUses: Set<string> | undefined;
 
+  const instances = new Map<string, AnalyzedInstance>();
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/instance", "Instance"))) {
+    const at = where(expr);
+    const [providerArg, nameArg, optionsArg] = expr.getArguments();
+    const provider = stringLiteral(providerArg, `${at}: Instance provider`);
+    if (provider !== "aws") throw new Error(`${at}: Instance provider must be "aws"`);
+    const name = configString(nameArg, `${at}: Instance name`, setupEnv);
+    if (optionsArg && Node.isObjectLiteralExpression(optionsArg)) {
+      for (const prop of optionsArg.getProperties()) {
+        const key = Node.isSpreadAssignment(prop) ? undefined : propName(prop);
+        if (key !== undefined && !INSTANCE_OPTIONS.includes(key)) throw new Error(`${at}: unknown Instance option "${key}" (supported: ${INSTANCE_OPTIONS.join(", ")})`);
+      }
+    }
+    const where_ = `${at}: Instance options`;
+    const size = readStringOption(optionsArg, "size", where_) as InstanceSize | undefined;
+    const image = readStringOption(optionsArg, "image", where_);
+    const diskGb = readNumberOption(optionsArg, "diskGb", where_);
+    const keyName = readStringOption(optionsArg, "keyName", where_);
+    const profile = readStringOption(optionsArg, "profile", where_);
+    const userData = readStringOption(optionsArg, "userData", where_);
+    const allowDestroy = readBooleanOption(optionsArg, "allowDestroy", where_) ?? false;
+    const network = readNetworkOption(optionsArg, at);
+    try {
+      new Instance(provider, name, { ...(size !== undefined ? { size } : {}), ...(image !== undefined ? { image } : {}), ...(diskGb !== undefined ? { diskGb } : {}), ...(keyName !== undefined ? { keyName } : {}), ...(profile !== undefined ? { profile } : {}), ...(userData !== undefined ? { userData } : {}), allowDestroy });
+    } catch (err) {
+      throw new Error(`${at}: ${(err as Error).message}`);
+    }
+    const declared = instances.get(name);
+    if (declared) throw new Error(`${at}: Instance "${name}" is also declared at ${declared.file}:${declared.line}; declare each instance once`);
+    instances.set(name, { name, provider, size, image, diskGb, keyName, profile, userData, network: Object.keys(network).length ? network : { vpc: "default" }, allowDestroy, file: relative(expr.getSourceFile().getFilePath()), line: expr.getStartLineNumber() });
+  }
   const usedBuses = new Map<string, AnalyzedBus>();
   const useBus = (bus: AnalyzedBus, _at: string) => {
     if (!usedBuses.has(bus.name)) usedBuses.set(bus.name, bus);
@@ -1015,6 +1064,7 @@ function analyzeEntry(entryPath: string): AppModel {
     registries: [...registries.values()],
     streams: [...streams.values()],
     caches: [...cacheDecls.values()],
+    instances: [...instances.values()],
     functions: [...functions.values()],
     warnings: [...new Set(warnings)],
   };

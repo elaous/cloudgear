@@ -189,6 +189,12 @@ describe("aws drivers", () => {
     ]);
   });
 
+  test.each(["*", "prod-*"])("policyDocument refuses the wildcard bucket %s from state", (physical_name) => {
+    expect(() =>
+      policyDocument({ permissions: [{ type: "@aws.S3", physical_name, path: "", actions: ["s3:GetObject"] }] } as unknown as FunctionComparable),
+    ).toThrow(/Invalid S3 bucket name/);
+  });
+
   test("policyDocument refuses resource types it has no mapping for", () => {
     expect(() =>
       policyDocument({ permissions: [{ type: "@gcp.Storage", physical_name: "x", actions: [] }] } as unknown as FunctionComparable),

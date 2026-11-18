@@ -71,6 +71,18 @@ describe("cloudgear CLI", () => {
     expect(res.err).toMatch(/Invalid invoker "not-an-arn"/);
   });
 
+  test.each([["*"], ["prod-*"]])("import refuses the wildcard physical id %s", (physical) => {
+    const res = run("import", "cloudgear-example-archive", physical!);
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/Invalid S3 bucket name/);
+  });
+
+  test("import refuses a wildcard bucket ARN", () => {
+    const res = run("import", "--arn", "arn:aws:s3:::*");
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/Invalid S3 bucket name/);
+  });
+
   test("import refuses to replace a resource cloudgear manages", () => {
     const statePath = path.join(dir, ".cloudgear/state.json");
     const state = JSON.parse(fs.readFileSync(statePath, "utf8"));

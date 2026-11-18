@@ -903,12 +903,12 @@ function analyzeEntry(entryPath: string): AppModel {
   if (authenticated === "none") {
     warnings.push(`${where(router)}: authenticated is "none"; deployed functions can be invoked by anyone with their URL`);
   }
-  if (authenticated === "none" && hasOption(router.getArguments()[1], "authenticate")) {
+  const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
+  if (authenticated === "none" && !jwtSettings && hasOption(router.getArguments()[1], "authenticate")) {
     warnings.push(
       `${where(router)}: authenticate is set but authenticated is "none"; deployed functions will not receive the caller's identity`,
     );
   }
-  const jwtSettings = readJwtAuth(router.getArguments()[1], where(router));
   const routerSecrets = readEnvOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerPolicies = readPolicyOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerNetwork = readNetworkOption(router.getArguments()[1], where(router));
@@ -1038,6 +1038,11 @@ function analyzeEntry(entryPath: string): AppModel {
   warnModuleLevelUse();
   const edge = analyzeEdge();
   const verifying = !!jwtSettings && !!edge.api;
+  if (authenticated === "none" && jwtSettings && !verifying) {
+    warnings.push(
+      `${where(router)}: authenticated is "none" and no cert or CDN fronts the router, so jwtAuth never runs; routes that are not { public: true } are publicly callable without a token`,
+    );
+  }
   if (verifying) {
     for (const fn of functions.values()) {
       const flags = fn.routes.map((r) => publicRoutes.get(`${r.method} ${r.path}`) ?? false);

@@ -43,6 +43,12 @@ export async function createBlobDriver(provider: BlobProvider, location: string,
   return factory(location, options);
 }
 
+export const S3_BUCKET_NAME = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+
+export function assertS3BucketName(name: string): void {
+  if (!S3_BUCKET_NAME.test(name)) throw new Error(`Invalid S3 bucket name "${name}": use 3-63 lowercase letters, digits, dots and hyphens`);
+}
+
 export function parseBlobUri(provider: BlobProvider, uri: string): string {
   const match = /^([a-z0-9]*):\/\/([^/]+)$/.exec(uri);
   if (!match) throw new Error(`Invalid blob URI "${uri}", expected "://name" or "${URI_SCHEMES[provider]}://name"`);
@@ -50,5 +56,6 @@ export function parseBlobUri(provider: BlobProvider, uri: string): string {
   if (scheme && scheme !== URI_SCHEMES[provider]) {
     throw new Error(`Blob URI "${uri}" uses scheme "${scheme}", provider "${provider}" expects "${URI_SCHEMES[provider]}"`);
   }
+  if (provider === "aws") assertS3BucketName(name!);
   return name!;
 }

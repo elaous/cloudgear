@@ -8,7 +8,7 @@ import {
   type BlobProvider,
 } from "./driver";
 
-export { registerBlobDriver, parseBlobUri, URI_SCHEMES } from "./driver";
+export { assertS3BucketName, registerBlobDriver, parseBlobUri, S3_BUCKET_NAME, URI_SCHEMES } from "./driver";
 export type { BlobData, BlobDriver, BlobDriverFactory, BlobDriverOptions, BlobProvider } from "./driver";
 
 // The client `client()` returns for each provider.

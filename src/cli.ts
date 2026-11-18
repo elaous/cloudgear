@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { assertS3BucketName } from "@cloudgear/blob";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -371,6 +372,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         if (first && arnType && arnType !== "@aws.S3") throw new Error(`${values.arn} is not a bucket ARN, but "${first}" is a bucket`);
         const given = values.arn ?? second;
         const physical = given?.startsWith("arn:") ? bucketOfArn(given) : (given ?? bucket.physical_name);
+        assertS3BucketName(physical);
         state.entries[stateKey(bucket)] = {
           kind: "resource",
           type: bucket.type,
@@ -459,6 +461,7 @@ function bucketOfArn(arn: string, bucketOnly = false): string {
   if (bucketOnly && parsed?.service === "s3" && parsed.resource.includes("/") && !parsed.region) throw new Error(`"${arn}" names an object, not a bucket`);
   const name = parsed?.service === "s3" && !parsed.region ? /^([^/]+)/.exec(parsed.resource)?.[1] : undefined;
   if (!name) throw new Error(`"${arn}" is not an S3 bucket ARN${parsed?.resource.startsWith("accesspoint/") ? " (an access point's ARN does not name the bucket)" : ""}`);
+  assertS3BucketName(name);
   return name;
 }
 

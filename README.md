@@ -1769,30 +1769,46 @@ cloudgear finds it again.
 | `network` | the default VPC | A `Network` from `@cloudgear/network` |
 | `allowDestroy` | `false` | Lets a delete (`destroy`, or removing the declaration) terminate the instance |
 
-- **Network.** The instance goes in one subnet of the network and uses its
-  security groups (the VPC's default group unless you name some). Whether it
-  gets a public address follows the subnet. cloudgear opens no ports; with the
-  default group, only members of that group can reach it. Instance metadata
-  requires IMDSv2.
+- **Network.** The instance goes in a subnet of the network (the next one is
+  tried if a zone does not offer the type) and uses the network's security
+  groups (the VPC's default group unless you name some). Whether it gets a
+  public address follows the subnet. cloudgear opens no ports; with the default
+  group, only members of that group can reach it. Instance metadata requires
+  IMDSv2. With `diskGb` set, the root volume is an encrypted `gp3`; without it
+  the volume follows the image and your account's defaults.
 - **Fixed at creation.** `size`, `image`, `diskGb`, `keyName`, `profile`,
   `userData` and the network apply only when the instance is created. Changing
   one stops `apply` with an error: use a new name to replace the instance.
-- **Adopt first.** An instance already running, pending or stopped with that
-  name is adopted. A different size or image is an error, and two instances
-  with the same name is an error. A stopped instance stays stopped.
-  `cloudgear import --all` and `cloudgear import @aws.EC2 instance.<name>` read
-  it without changing anything and never record `allowDestroy`.
+- **`userData` is not secret.** It is written to the generated config and the
+  state, and anyone who can describe the instance can read it. You MUST NOT put
+  credentials in it, and MUST NOT build it from environment variables that hold
+  secrets.
+- **Adopt first.** `apply` takes over an instance with that name only if
+  cloudgear started it, which makes a retry after a crash safe. An instance it
+  did not start is an error, so a foreign instance with the same `Name` is never
+  terminated by mistake; adopt it on purpose with `cloudgear import --all` or
+  `cloudgear import @aws.EC2 instance.<name>`, which read it without changing
+  anything, record its real network, and never record `allowDestroy`. A
+  different size or image, or two instances with the name, is an error. A
+  stopped or stopping instance is left alone. If a managed instance is
+  terminated outside cloudgear, `apply` says so instead of starting a new one;
+  remove its entry from `.cloudgear/state.json` to start again.
 - **Starting.** `apply` waits up to 5 minutes for it to run; if it gives up, run
   it again and it adopts the instance.
 - **Destroy.** The instance is terminated only if the applied config had
   `allowDestroy: true`, and `destroy` checks that before changing anything.
   Terminating deletes its root volume.
-- **Cost.** An instance bills every hour it runs, plus its disk. As a rough
-  guide a `t4g.micro` is about $6 a month; check current AWS pricing.
+- **Cost.** An instance bills every hour it runs, plus its disk and, when its
+  subnet gives it a public address, the public IPv4 address. As a rough guide a
+  `t4g.micro` is about $6 a month plus about $3.60 for the address; check
+  current AWS pricing.
 - **Permissions.** On top of the Networks list, the deploying identity needs
-  `ec2:RunInstances`, `ec2:DescribeInstances`, `ec2:DescribeImages`,
-  `ec2:TerminateInstances`, `ec2:CreateTags`, `ssm:GetParameter` for the image
-  lookup, and `iam:PassRole` when you set `profile`.
+  `ec2:RunInstances`, `ec2:DescribeInstances`, `ec2:TerminateInstances`,
+  `ec2:CreateTags`, and `ssm:GetParameter` for the image lookup. `diskGb` also
+  needs `ec2:DescribeImages`, and `kms:CreateGrant`,
+  `kms:GenerateDataKeyWithoutPlaintext`, `kms:DescribeKey`, `kms:Decrypt` and
+  `kms:ReEncrypt*` when the account's default EBS key is customer-managed.
+  `profile` needs `iam:PassRole`.
 
 ## Policies: `@cloudgear/iam`
 

@@ -5,8 +5,8 @@ import type { DesiredEntry } from "../plan";
 import { destroyAllowed, withoutAllowDestroy } from "../protect";
 import type { StateEntry } from "../state";
 import type { SendClient } from "./index";
-import { NETWORK_KEYS, resolveNetwork } from "./network";
-import { tagList, type Tagger } from "./tags";
+import { NETWORK_KEYS, resolveNetwork, type ResolvedNetwork } from "./network";
+import { TAG_PREFIX, tagList, type Tagger } from "./tags";
 
 export interface InstanceDeps {
   ec2: SendClient;
@@ -35,7 +35,13 @@ interface Live {
   privateIp?: string;
   publicIp?: string;
   publicDns?: string;
+  vpcId?: string;
+  subnetId?: string;
+  securityGroupIds?: string[];
+  createdByCloudgear: boolean;
 }
+
+const MANAGED_TAG = `${TAG_PREFIX}managed-by`;
 
 const optionsOf = (spec: Record<string, unknown>): Record<string, string> => (spec.options ?? {}) as Record<string, string>;
 const typeFor = (spec: Record<string, unknown>): string => INSTANCE_TYPES[optionsOf(spec).size ?? "micro"]!;
@@ -43,6 +49,9 @@ const named = (err: unknown, ...names: string[]): boolean => names.includes((err
 
 const outputsOf = (live: Live): Record<string, string> => ({
   instance_id: live.id,
+  vpc_id: live.vpcId ?? "",
+  subnet_id: live.subnetId ?? "",
+  security_group_ids: (live.securityGroupIds ?? []).join(","),
   image_id: live.image ?? "",
   zone: live.zone ?? "",
   private_ip: live.privateIp ?? "",
@@ -71,6 +80,10 @@ export function instanceDriver(deps: InstanceDeps): Driver {
     privateIp: instance.PrivateIpAddress,
     publicIp: instance.PublicIpAddress,
     publicDns: instance.PublicDnsName || undefined,
+    vpcId: instance.VpcId,
+    subnetId: instance.SubnetId,
+    securityGroupIds: (instance.SecurityGroups ?? []).map((group: { GroupId: string }) => group.GroupId),
+    createdByCloudgear: ((instance.Tags ?? []) as { Key: string; Value: string }[]).some((tag) => tag.Key === MANAGED_TAG && tag.Value === "cloudgear"),
   });
 
   async function findByName(name: string): Promise<Live | undefined> {
@@ -96,6 +109,11 @@ export function instanceDriver(deps: InstanceDeps): Driver {
       const live = await findById(id);
       if (wanted === "terminated" && (!live || live.state === "terminated")) return live;
       if (wanted === "running") {
+        // EC2 can take a few seconds to show an instance that was just started.
+        if (!live && attempt < 12) {
+          await deps.sleep(WAIT_MS);
+          continue;
+        }
         if (!live || live.state === "terminated" || live.state === "shutting-down") throw new Error(`Instance ${id} ended up ${live?.state ?? "gone"} while starting; check the console for the reason`);
         if (live.state === "running") return live;
       }
@@ -111,56 +129,80 @@ export function instanceDriver(deps: InstanceDeps): Driver {
     return value;
   }
 
-  async function ensure(entry: DesiredEntry): Promise<Record<string, string>> {
+  async function start(entry: DesiredEntry, options: Record<string, string>, network: ResolvedNetwork): Promise<string> {
+    const name = entry.physical_name;
+    const imageId = await imageFor(options);
+    let blockDevices: { DeviceName: string; Ebs: Record<string, unknown> }[] | undefined;
+    if (options.disk_gb) {
+      const image = ((await deps.ec2.send(new DescribeImagesCommand({ ImageIds: [imageId] }))).Images ?? [])[0] as { RootDeviceName?: string } | undefined;
+      if (!image?.RootDeviceName) throw new Error(`Image ${imageId} has no root device to size; leave diskGb out`);
+      blockDevices = [{ DeviceName: image.RootDeviceName, Ebs: { VolumeSize: Number(options.disk_gb), VolumeType: "gp3", DeleteOnTermination: true, Encrypted: true } }];
+    }
+    // The Name tag is how the instance is found again, so no other tag may use it.
+    const tags = [{ Key: "Name", Value: name }, ...(deps.tags ? tagList(deps.tags(entry.name)).filter((tag) => tag.Key !== "Name") : [])];
+    // Not every zone offers every type; the next subnet is tried when one does not.
+    let lastError: unknown;
+    for (const subnetId of network.subnetIds) {
+      try {
+        const started = await deps.ec2.send(
+          new RunInstancesCommand({
+            ImageId: imageId,
+            InstanceType: typeFor(entry.spec) as never,
+            MinCount: 1,
+            MaxCount: 1,
+            SubnetId: subnetId,
+            SecurityGroupIds: network.securityGroupIds,
+            MetadataOptions: { HttpTokens: "required" },
+            TagSpecifications: [
+              { ResourceType: "instance", Tags: tags },
+              { ResourceType: "volume", Tags: tags },
+            ],
+            ...(blockDevices ? { BlockDeviceMappings: blockDevices as never } : {}),
+            ...(options.key_name ? { KeyName: options.key_name } : {}),
+            ...(options.profile ? { IamInstanceProfile: { Name: options.profile } } : {}),
+            ...(options.user_data ? { UserData: Buffer.from(options.user_data, "utf8").toString("base64") } : {}),
+          }),
+        );
+        const id = started.Instances?.[0]?.InstanceId as string | undefined;
+        if (!id) throw new Error(`Starting instance "${name}" returned no instance`);
+        deps.log(`started instance ${name} (${id})`);
+        return id;
+      } catch (err) {
+        if (!named(err, "Unsupported", "InsufficientInstanceCapacity")) throw err;
+        lastError = err;
+      }
+    }
+    throw lastError;
+  }
+
+  // `current` is set when cloudgear already manages the instance.
+  async function ensure(entry: DesiredEntry, current?: StateEntry): Promise<Record<string, string>> {
     const name = entry.physical_name;
     const options = optionsOf(entry.spec);
     // Looked up first so a wrong network fails before anything is created.
     const network = await resolveNetwork({ ec2: deps.ec2, region: deps.region, log: deps.log }, Object.fromEntries(NETWORK_KEYS.flatMap((key) => (options[key] !== undefined ? [[key, options[key]!]] : []))));
     if (!network) throw new Error(`Instance "${entry.name}" has no network; this is a bug in the generated config`);
-    let live = await findByName(name);
+    const recorded = current?.outputs.instance_id;
+    let live = recorded ? await findById(recorded) : await findByName(name);
+    if (recorded && (!live || live.state === "terminated")) {
+      throw new Error(`Instance "${name}" (${recorded}) no longer exists; remove its entry from .cloudgear/state.json to start a new one`);
+    }
     if (live) {
+      if (!recorded && !live.createdByCloudgear) {
+        throw new Error(`An instance named "${name}" (${live.id}) exists that cloudgear did not start; run \`cloudgear import\` to adopt it, or use another name`);
+      }
       const problems = differences(live, entry.spec);
       if (problems.length) throw new Error(`Instance "${name}" already exists but its ${problems.join(" and ")}; AWS cannot change that without replacing it, so use a new name`);
       deps.log(`adopted existing instance ${name}`);
       // Stopped on purpose; cloudgear does not start it.
       if (live.state === "stopped" || live.state === "stopping") {
         deps.log(`instance ${name} is ${live.state}; leaving it as it is`);
-        return { ...outputsOf(live), vpc_id: network.vpcId, subnet_id: network.subnetIds[0]!, security_group_ids: network.securityGroupIds.join(",") };
+        return outputsOf(live);
       }
     } else {
-      const imageId = await imageFor(options);
-      let blockDevices: { DeviceName: string; Ebs: Record<string, unknown> }[] | undefined;
-      if (options.disk_gb) {
-        const image = ((await deps.ec2.send(new DescribeImagesCommand({ ImageIds: [imageId] }))).Images ?? [])[0] as { RootDeviceName?: string } | undefined;
-        if (!image?.RootDeviceName) throw new Error(`Image ${imageId} has no root device to size; leave diskGb out`);
-        blockDevices = [{ DeviceName: image.RootDeviceName, Ebs: { VolumeSize: Number(options.disk_gb), VolumeType: "gp3", DeleteOnTermination: true, Encrypted: true } }];
-      }
-      const tags = [{ Key: "Name", Value: name }, ...(deps.tags ? tagList(deps.tags(entry.name)) : [])];
-      const started = await deps.ec2.send(
-        new RunInstancesCommand({
-          ImageId: imageId,
-          InstanceType: typeFor(entry.spec) as never,
-          MinCount: 1,
-          MaxCount: 1,
-          SubnetId: network.subnetIds[0],
-          SecurityGroupIds: network.securityGroupIds,
-          MetadataOptions: { HttpTokens: "required" },
-          TagSpecifications: [
-            { ResourceType: "instance", Tags: tags },
-            { ResourceType: "volume", Tags: tags },
-          ],
-          ...(blockDevices ? { BlockDeviceMappings: blockDevices as never } : {}),
-          ...(options.key_name ? { KeyName: options.key_name } : {}),
-          ...(options.profile ? { IamInstanceProfile: { Name: options.profile } } : {}),
-          ...(options.user_data ? { UserData: Buffer.from(options.user_data, "utf8").toString("base64") } : {}),
-        }),
-      );
-      const id = started.Instances?.[0]?.InstanceId as string | undefined;
-      if (!id) throw new Error(`Starting instance "${name}" returned no instance`);
-      deps.log(`started instance ${name} (${id})`);
-      live = { id, state: "pending" };
+      live = { id: await start(entry, options, network), state: "pending", createdByCloudgear: true };
     }
-    return { ...outputsOf((await waitFor(live.id, "running"))!), vpc_id: network.vpcId, subnet_id: network.subnetIds[0]!, security_group_ids: network.securityGroupIds.join(",") };
+    return outputsOf((await waitFor(live.id, "running"))!);
   }
 
   return {
@@ -171,7 +213,7 @@ export function instanceDriver(deps: InstanceDeps): Driver {
       // An imported entry records no options until its first apply.
       const changed = current.spec.options ? FIXED_OPTIONS.filter((key) => before[key] !== after[key]) : [];
       if (changed.length) throw new Error(`Instance "${entry.physical_name}": ${changed.join(", ")} only apply when an instance is created; use a new name to replace it`);
-      return ensure(entry);
+      return ensure(entry, current);
     },
     protect: refusal,
     async delete(current) {

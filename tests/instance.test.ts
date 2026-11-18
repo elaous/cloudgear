@@ -30,10 +30,14 @@ interface Vm {
   busy: number;
   type: string;
   image: string;
+  // False for an instance somebody else started.
+  owned?: boolean;
+  tags?: { Key: string; Value: string }[];
 }
 
-function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean } = {}) {
+function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean; hiddenFor?: number; unsupported?: string[]; noRoot?: boolean; extraTags?: Record<string, string> } = {}) {
   const vms = new Map<string, Vm>(initial.map((vm) => [vm.id, vm]));
+  let hidden = opts.hiddenFor ?? 0;
   const base = fakeAws();
   const calls: { name: string; input: any }[] = [];
   const sleeps: number[] = [];
@@ -46,6 +50,10 @@ function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean }
     InstanceType: vm.type,
     ImageId: vm.image,
     Placement: { AvailabilityZone: "eu-west-1a" },
+    VpcId: "vpc-0def0001",
+    SubnetId: "subnet-aaaa1111",
+    SecurityGroups: [{ GroupId: "sg-0def4001" }],
+    Tags: vm.tags ?? (vm.owned === false ? [] : [{ Key: "cloudgear:managed-by", Value: "cloudgear" }]),
     PrivateIpAddress: "10.0.0.5",
     PublicIpAddress: state === "running" ? "203.0.113.7" : undefined,
     PublicDnsName: state === "running" ? "ec2-203-0-113-7.compute.amazonaws.com" : "",
@@ -71,6 +79,10 @@ function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean }
         case "DescribeInstancesCommand": {
           let found: Vm[];
           if (input.InstanceIds) {
+            if (hidden > 0) {
+              hidden--;
+              throw err("InvalidInstanceID.NotFound");
+            }
             found = input.InstanceIds.map((id: string) => vms.get(id)).filter(Boolean) as Vm[];
             if (!found.length) throw err("InvalidInstanceID.NotFound");
           } else {
@@ -81,7 +93,9 @@ function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean }
           return { Reservations: found.map((vm) => ({ Instances: [view(vm, settle(vm))] })) };
         }
         case "RunInstancesCommand": {
-          const vm: Vm = { id: `i-0${vms.size + 1}`.padEnd(10, "0"), name: input.TagSpecifications[0].Tags.find((t: { Key: string }) => t.Key === "Name").Value, state: "pending", busy: 2, type: input.InstanceType, image: input.ImageId };
+          if (opts.unsupported?.includes(input.SubnetId)) throw err("Unsupported");
+          const vm: Vm = {
+            tags: input.TagSpecifications[0].Tags, id: `i-0${vms.size + 1}`.padEnd(10, "0"), name: input.TagSpecifications[0].Tags.find((t: { Key: string }) => t.Key === "Name").Value, state: "pending", busy: 2, type: input.InstanceType, image: input.ImageId };
           vms.set(vm.id, vm);
           return { Instances: [{ InstanceId: vm.id }] };
         }
@@ -93,7 +107,7 @@ function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean }
           return {};
         }
         case "DescribeImagesCommand":
-          return { Images: [{ RootDeviceName: "/dev/xvda" }] };
+          return { Images: [opts.noRoot ? {} : { RootDeviceName: "/dev/xvda" }] };
       }
       throw new Error(`unexpected ${name}`);
     },
@@ -107,7 +121,7 @@ function fakeFleet(initial: Vm[] = [], opts: { stuck?: boolean; dies?: boolean }
   };
   const drivers = awsDrivers({
     region: "eu-west-1",
-    tags: { "cloudgear:project": "app" },
+    tags: { "cloudgear:project": "app", "cloudgear:managed-by": "cloudgear", ...(opts.extraTags ?? {}) },
     readBundle: () => new Uint8Array(),
     clients: { ec2, ssm },
     sleep: async (ms) => void sleeps.push(ms),
@@ -163,7 +177,7 @@ describe("ec2 driver", () => {
     await applyConfig(configWith(), state, fleet.drivers);
     const run = fleet.calls.find((c) => c.name === "RunInstancesCommand")!.input;
     expect(run).toMatchObject({ ImageId: "ami-0latest01", InstanceType: "t4g.micro", MinCount: 1, MaxCount: 1, SubnetId: "subnet-aaaa1111", SecurityGroupIds: ["sg-0def4001"], MetadataOptions: { HttpTokens: "required" } });
-    expect(run.TagSpecifications[0].Tags).toEqual(expect.arrayContaining([{ Key: "Name", Value: "app-worker" }, { Key: "cloudgear:project", Value: "app" }]));
+    expect(run.TagSpecifications[0].Tags).toEqual(expect.arrayContaining([{ Key: "Name", Value: "app-worker" }, { Key: "cloudgear:project", Value: "app" }, { Key: "cloudgear:managed-by", Value: "cloudgear" }]));
     expect("BlockDeviceMappings" in run).toBe(false);
     expect(fleet.sleeps.length).toBeGreaterThan(0);
     expect(state.entries[KEY]!.outputs).toMatchObject({ image_id: "ami-0latest01", private_ip: "10.0.0.5", public_ip: "203.0.113.7", vpc_id: "vpc-0def0001", subnet_id: "subnet-aaaa1111" });
@@ -282,6 +296,75 @@ describe("ec2 driver", () => {
     expect(mismatch!.spec).toEqual({ physical_name: "app-worker" });
     expect(mismatch!.notes![0]).toMatch(/type is t4g.micro \(config: t4g.medium\)/);
     expect(await fakeFleet().drivers["@aws.EC2"]!.adopt!(entry!, { entry: () => undefined })).toBeUndefined();
+  });
+});
+
+describe("safety and edge cases", () => {
+  const owned = { id: "i-0000000a", name: "app-worker", state: "running", busy: 0, type: "t4g.micro", image: "ami-0abc1234" };
+
+  test("an instance that is not visible right after it starts is waited for", async () => {
+    const fleet = fakeFleet([], { hiddenFor: 3 });
+    const state = emptyState();
+    await applyConfig(configWith(), state, fleet.drivers);
+    expect(state.entries[KEY]!.outputs.instance_id).toBeTruthy();
+    expect(fleet.names().filter((n) => n === "RunInstancesCommand")).toHaveLength(1);
+    const gone = fakeFleet([], { hiddenFor: 999 });
+    await expect(applyConfig(configWith(), emptyState(), gone.drivers)).rejects.toThrow(/ended up gone while starting/);
+  });
+
+  test("apply never takes over an instance cloudgear did not start, but import can", async () => {
+    const foreign = { ...owned, owned: false };
+    const fleet = fakeFleet([foreign]);
+    await expect(applyConfig(configWith(), emptyState(), fleet.drivers)).rejects.toThrow(/exists that cloudgear did not start; run `cloudgear import` to adopt it/);
+    expect(fleet.names()).not.toContain("RunInstancesCommand");
+
+    const state = emptyState();
+    expect((await adoptEntries(plan(configWith(), state), state, fleet.drivers, () => true)).adopted).toHaveLength(1);
+    expect(state.entries[KEY]!.outputs).toMatchObject({ instance_id: "i-0000000a", vpc_id: "vpc-0def0001", subnet_id: "subnet-aaaa1111", security_group_ids: "sg-0def4001" });
+  });
+
+  test("an instance that disappeared is reported, not silently started again", async () => {
+    const fleet = fakeFleet();
+    const state = emptyState();
+    await applyConfig(configWith(), state, fleet.drivers);
+    [...fleet.vms.values()][0]!.state = "terminated";
+    await expect(applyConfig(configWith({ allow_destroy: "true" }), state, fleet.drivers)).rejects.toThrow(/no longer exists; remove its entry from .cloudgear\/state.json/);
+    expect(fleet.names().filter((n) => n === "RunInstancesCommand")).toHaveLength(1);
+  });
+
+  test("another subnet is tried when a zone does not offer the instance type", async () => {
+    const fleet = fakeFleet([], { unsupported: ["subnet-aaaa1111"] });
+    await applyConfig(configWith(), emptyState(), fleet.drivers);
+    expect(fleet.calls.filter((c) => c.name === "RunInstancesCommand").map((c) => c.input.SubnetId)).toEqual(["subnet-aaaa1111", "subnet-bbbb2222"]);
+    const none = fakeFleet([], { unsupported: ["subnet-aaaa1111", "subnet-bbbb2222"] });
+    await expect(applyConfig(configWith(), emptyState(), none.drivers)).rejects.toThrow(/Unsupported/);
+  });
+
+  test("a user tag named Name cannot clash with the one cloudgear finds the instance by", async () => {
+    const fleet = fakeFleet([], { extraTags: { Name: "something else" } });
+    await applyConfig(configWith(), emptyState(), fleet.drivers);
+    const tags = fleet.calls.find((c) => c.name === "RunInstancesCommand")!.input.TagSpecifications[0].Tags as { Key: string; Value: string }[];
+    expect(tags.filter((t) => t.Key === "Name")).toEqual([{ Key: "Name", Value: "app-worker" }]);
+  });
+
+  test("an image without a root device cannot be sized", async () => {
+    const fleet = fakeFleet([], { noRoot: true });
+    await expect(applyConfig(configWith({ disk_gb: "30" }), emptyState(), fleet.drivers)).rejects.toThrow(/has no root device to size; leave diskGb out/);
+    expect(fleet.names()).not.toContain("RunInstancesCommand");
+  });
+
+  test("replacing a protected instance by changing its physical name is refused before anything changes", async () => {
+    const fleet = fakeFleet();
+    const state = emptyState();
+    await applyConfig(configWith(), state, fleet.drivers);
+    const renamed = baseConfig({ resource: [{ ...resource(), physical_name: "app-other" }], function: [] });
+    await expect(applyConfig(renamed, state, fleet.drivers)).rejects.toThrow(/Nothing was changed/);
+    expect([...fleet.vms.values()].every((vm) => vm.state === "running")).toBe(true);
+  });
+
+  test("names that become the same physical name are rejected", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "instance-"));
+    await expect(generate({ entry: fixture("collide"), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "app" })).rejects.toThrow(/Instances "a b" and "a.b" both deploy as "app-a-b"/);
   });
 });
 

@@ -89,6 +89,14 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     cacheIds.set(id, cache.name);
   }
 
+  const instanceNames = new Map<string, string>();
+  for (const instance of model.instances) {
+    const physical = fitName(`${project}-${sanitizeName(instance.name)}`, 128);
+    const clash = instanceNames.get(physical);
+    if (clash) throw new Error(`Instances "${clash}" and "${instance.name}" both deploy as "${physical}"; rename one`);
+    instanceNames.set(physical, instance.name);
+  }
+
   const physicalNames = new Map<string, string>();
   for (const fn of model.functions) {
     const physical = fitName(`${project}-${sanitizeName(fn.name)}`, 64);

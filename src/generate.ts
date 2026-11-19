@@ -8,7 +8,7 @@ import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type Secret
 import { bundleFunction } from "./build/bundle";
 import { decodeConfig, encodeConfig, type AttachedOriginSpec, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
 import { configHash, envReportPath, type EnvReport, type EnvSource } from "./envreport";
-import { cacheIdFor, fitName, sanitizeName } from "./names";
+import { cacheIdFor, fitName, gcpFunctionIdFor, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
 
 // Set by the Lambda runtime or every Node program.
@@ -27,6 +27,8 @@ export interface GenerateOptions {
 const MAX_INCLUDED_BYTES = 250 * 1024 * 1024;
 const WARN_INCLUDED_BYTES = 40 * 1024 * 1024;
 const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
+
+const functionPhysicalName = (provider: string, project: string, name: string): string => (provider === "gcp" ? gcpFunctionIdFor(project, name) : fitName(`${project}-${sanitizeName(name)}`, 64));
 
 export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
   const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry, options.setupEnv));
@@ -99,7 +101,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   const physicalNames = new Map<string, string>();
   for (const fn of model.functions) {
-    const physical = fitName(`${project}-${sanitizeName(fn.name)}`, 64);
+    const physical = functionPhysicalName(model.provider, project, fn.name);
     const clash = physicalNames.get(physical);
     if (clash) throw new Error(`Functions "${clash}" and "${fn.name}" both deploy as "${physical}"; rename one`);
     physicalNames.set(physical, fn.name);
@@ -177,7 +179,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
     functions.push({
       name: fn.name,
       type: profile.function.type,
-      physical_name: fitName(`${project}-${sanitizeName(fn.name)}`, 64),
+      physical_name: functionPhysicalName(model.provider, project, fn.name),
       runtime: profile.function.runtime,
       memory_mb: profile.function.memoryMb,
       timeout_s: profile.function.timeoutS,

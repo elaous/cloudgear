@@ -108,6 +108,8 @@ export interface FunctionRouterOptions {
   credentials?: AwsCredentialsProvider;
   // Literal only: generate reads it; defaults to --region or AWS_REGION.
   region?: string;
+  // GCP only: the project the functions deploy to; defaults to GOOGLE_CLOUD_PROJECT or the credentials' project.
+  project?: string;
   // Return null for 401; `public` routes skip it.
   authenticate?: Authenticator;
   // Also serves Cert's domain routes via API Gateway; skips `authenticate`.

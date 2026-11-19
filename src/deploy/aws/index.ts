@@ -44,6 +44,7 @@ import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
 import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { DriverContext, Drivers } from "../apply";
+import { resolveOutputReferences } from "../environment";
 import { OUTPUT_REFERENCE, type DesiredEntry, type FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
 import type { FunctionSpec, SecretRefSpec } from "../../config/schema";
@@ -347,19 +348,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     );
   }
 
-  // Values that point at another resource's output are filled in from state; without a context they stay as written.
   function environment(spec: FunctionComparable, context?: DriverContext) {
-    const resolved = Object.fromEntries(
-      Object.entries(spec.env).map(([key, value]) => {
-        if (!context || !value.startsWith(OUTPUT_REFERENCE)) return [key, value];
-        const at = value.lastIndexOf("#");
-        const stateEntry = value.slice(OUTPUT_REFERENCE.length, at);
-        const found = context.entry(stateEntry)?.outputs[value.slice(at + 1)];
-        if (found === undefined || found === "") throw new Error(`${stateEntry} has no ${value.slice(at + 1)} yet, so ${key} cannot be set; apply it first`);
-        return [key, found];
-      }),
-    );
-    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...resolved, ...environmentOptions(spec.options) } };
+    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...resolveOutputReferences(spec.env, context), ...environmentOptions(spec.options) } };
   }
 
   const networkFor = (spec: FunctionComparable) => resolveNetwork({ ec2, region: options.region, log }, spec.options);

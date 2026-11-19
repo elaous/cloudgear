@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { analyzeApp } from "../src/analyze/app";
+import { adoptEntries } from "../src/deploy/adopt";
 import { apply, type Drivers } from "../src/deploy/apply";
 import { gcpDrivers } from "../src/deploy/gcp";
 import { serviceAccountIdFor } from "../src/deploy/gcp/functions";
@@ -29,15 +30,20 @@ interface Live {
   memory: string;
   timeout: number;
   invokers: string[];
+  runInvokers: string[];
   email: string;
+  labels: Record<string, string>;
+  deploying: number;
 }
 
-function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; propagationFailures?: number; polls?: number; functions?: Record<string, Partial<Live>> } = {}) {
+const OWNED = { cloudgear_resource: "foo", "cloudgear_managed-by": "cloudgear", cloudgear_service_account: "created" };
+
+function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; propagationFailures?: number; polls?: number; functions?: Record<string, Partial<Live>>; neverFinish?: boolean; failOn?: (method: string, url: string) => Error | undefined } = {}) {
   const calls: { method: string; url: string; body?: any }[] = [];
   const uploads: { url: string; headers: Record<string, string>; text: string }[] = [];
   const sleeps: number[] = [];
   const accounts = new Set<string>(opts.existingAccounts ?? []);
-  const live = new Map<string, Live>(Object.entries(opts.functions ?? {}).map(([name, f]) => [name, { state: "ACTIVE", env: {}, memory: "256M", timeout: 60, invokers: [], email: SA, ...f }]));
+  const live = new Map<string, Live>(Object.entries(opts.functions ?? {}).map(([name, f]) => [name, { state: "ACTIVE", env: {}, memory: "256Mi", timeout: 60, invokers: [], runInvokers: [], email: SA, labels: {}, deploying: 0, ...f }]));
   const operations = new Map<string, { polls: number; error?: string }>();
   let failures = opts.propagationFailures ?? 0;
   let ops = 0;
@@ -50,6 +56,8 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
   const http: GcpHttp = {
     async request(method, url, body?: any) {
       calls.push({ method, url, ...(body !== undefined ? { body } : {}) });
+      const injected = opts.failOn?.(method, url);
+      if (injected) throw injected;
       const iam = url.match(/^https:\/\/iam\.googleapis\.com\/v1\/projects\/([^/]+)\/serviceAccounts(?:\/(.+))?$/);
       if (iam) {
         if (method === "POST") {
@@ -65,7 +73,7 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
       if (op) {
         const found = operations.get(op[1]!)!;
         found.polls--;
-        return found.polls > 0 ? { name: op[1], done: false } : { name: op[1], done: true, ...(found.error ? { error: { message: found.error } } : {}) };
+        return found.polls > 0 || opts.neverFinish ? { name: op[1], done: false } : { name: op[1], done: true, ...(found.error ? { error: { message: found.error } } : {}) };
       }
       if (url.endsWith(":generateUploadUrl")) return { uploadUrl: "https://storage.example/upload/abc", storageSource: { bucket: "gcf-sources", object: "abc.zip", generation: "7" } };
       const create = url.match(/\/functions\?functionId=(.+)$/);
@@ -76,15 +84,17 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
         }
         const id = create[1]!;
         const full = `projects/my-proj-123/locations/us-central1/functions/${id}`;
-        live.set(full, { state: opts.failBuild ? "FAILED" : "ACTIVE", env: body.serviceConfig.environmentVariables, memory: body.serviceConfig.availableMemory, timeout: body.serviceConfig.timeoutSeconds, invokers: [], email: body.serviceConfig.serviceAccountEmail });
+        live.set(full, { state: opts.failBuild ? "FAILED" : "ACTIVE", env: body.serviceConfig.environmentVariables, memory: body.serviceConfig.availableMemory, timeout: body.serviceConfig.timeoutSeconds, invokers: [], runInvokers: [], email: body.serviceConfig.serviceAccountEmail, labels: body.labels, deploying: 0 });
         return startOperation(opts.failBuild);
       }
-      const iamPolicy = url.match(/\/functions\/([^/:?]+):(getIamPolicy|setIamPolicy)$/);
+      const iamPolicy = url.match(/\/(functions|services)\/([^/:?]+):(getIamPolicy|setIamPolicy)(\?.*)?$/);
       if (iamPolicy) {
-        const found = [...live.entries()].find(([n]) => n.endsWith(`/${iamPolicy[1]}`))?.[1];
+        const found = [...live.entries()].find(([n]) => n.endsWith(`/${iamPolicy[2]}`))?.[1];
         if (!found) throw fail(404, "Function not found");
-        if (iamPolicy[2] === "getIamPolicy") return { etag: "e1", bindings: found.invokers.length ? [{ role: "roles/cloudfunctions.invoker", members: found.invokers }] : [] };
-        found.invokers = (body.policy.bindings.find((b: { role: string }) => b.role === "roles/cloudfunctions.invoker")?.members ?? []) as string[];
+        const key = iamPolicy[1] === "functions" ? "invokers" : "runInvokers";
+        const role = iamPolicy[1] === "functions" ? "roles/cloudfunctions.invoker" : "roles/run.invoker";
+        if (iamPolicy[3] === "getIamPolicy") return { etag: "e1", bindings: found[key].length ? [{ role, members: found[key] }] : [] };
+        found[key] = (body.policy.bindings.find((b: { role: string }) => b.role === role)?.members ?? []) as string[];
         return {};
       }
       const one = url.match(/\/(projects\/[^?]+\/functions\/[^?:]+)(\?updateMask=(.+))?$/);
@@ -92,7 +102,8 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
         const found = live.get(one[1]!);
         if (method === "GET") {
           if (!found) throw fail(404, "Function not found");
-          return { state: found.state, url: `https://app-foo-abc-uc.a.run.app`, serviceConfig: { serviceAccountEmail: found.email, uri: "https://app-foo-abc-uc.a.run.app" }, ...(found.state === "FAILED" ? { stateMessages: [{ message: "build failed" }] } : {}) };
+          const state = found.deploying > 0 ? (found.deploying--, "DEPLOYING") : found.state;
+          return { state, url: `https://app-foo-abc-uc.a.run.app`, labels: found.labels, serviceConfig: { serviceAccountEmail: found.email, uri: "https://app-foo-abc-uc.a.run.app", service: "projects/my-proj-123/locations/us-central1/services/app-foo" }, ...(found.state === "FAILED" ? { stateMessages: [{ message: "build failed" }] } : {}) };
         }
         if (method === "PATCH") {
           if (!found) throw fail(404, "Function not found");
@@ -164,6 +175,7 @@ describe("analysis", () => {
     expect(() => analyzeApp(fixture("function-aws-region"))).toThrow(/"us-east-1" is not a GCP region such as "us-central1"/);
     expect(() => analyzeApp(fixture("function-aws-project"))).toThrow(/the project option is for GCP routers/);
     expect(() => analyzeApp(fixture("function-project-clash"))).toThrow(/give the project option or functionOptions\.project, not both/);
+    expect(() => analyzeApp(fixture("function-route-project"))).toThrow(/route options of "ping" set project, which the router already sets/);
   });
 });
 
@@ -172,7 +184,8 @@ describe("cloud functions driver", () => {
     const google = fakeGoogle();
     const state = emptyState();
     await applyConfig(configWith(), state, google.drivers);
-    expect(google.calls[0]).toMatchObject({ method: "POST", url: "https://iam.googleapis.com/v1/projects/my-proj-123/serviceAccounts", body: { accountId: "cg-app-foo" } });
+    expect(google.calls[0]).toMatchObject({ method: "GET", url: `${FUNCTIONS}/${NAME}` });
+    expect(google.calls.find((c) => c.method === "POST" && c.url.includes("serviceAccounts"))).toMatchObject({ url: "https://iam.googleapis.com/v1/projects/my-proj-123/serviceAccounts", body: { accountId: "cg-app-foo" } });
     expect(google.uploads[0]!.headers).toEqual({ "content-type": "application/zip" });
     expect(google.uploads[0]!.text).toContain("index.mjs");
     expect(google.uploads[0]!.text).toContain("package.json");
@@ -180,12 +193,14 @@ describe("cloud functions driver", () => {
     const create = google.calls.find((c) => c.url.includes("functions?functionId=app-foo"))!;
     expect(create.body).toMatchObject({
       environment: "GEN_2",
-      labels: { cloudgear_project: "app", cloudgear_resource: "foo" },
+      labels: { cloudgear_project: "app", cloudgear_resource: "foo", cloudgear_service_account: "created" },
       buildConfig: { runtime: "nodejs22", entryPoint: "handler", source: { storageSource: { bucket: "gcf-sources", object: "abc.zip", generation: "7" } } },
-      serviceConfig: { availableMemory: "256M", timeoutSeconds: 60, environmentVariables: { GREETING: "hi" }, serviceAccountEmail: SA, ingressSettings: "ALLOW_ALL" },
+      serviceConfig: { availableMemory: "256Mi", timeoutSeconds: 60, environmentVariables: { GREETING: "hi" }, serviceAccountEmail: SA, ingressSettings: "ALLOW_ALL" },
     });
     expect(google.sleeps.length).toBeGreaterThan(0);
     expect(google.live.get(NAME)!.invokers).toEqual(["allUsers"]);
+    expect(google.live.get(NAME)!.runInvokers).toEqual(["allUsers"]);
+    expect(google.live.get(NAME)!.labels).toMatchObject({ cloudgear_service_account: "created" });
     expect(state.entries[KEY]!.outputs).toEqual({ name: NAME, url: "https://app-foo-abc-uc.a.run.app", project: "my-proj-123", region: "us-central1", service_account: SA, service_account_created: "true" });
     expect(plan(configWith(), state).every((a) => a.op === "noop")).toBe(true);
   });
@@ -206,7 +221,7 @@ describe("cloud functions driver", () => {
     const entry = plan(configWith({ env: [{ key: "GREETING", value: "hi" }], options: { project: "my-proj-123", max_instances: "5", "env.EXTRA": "1" }, memory_mb: 512, timeout_s: 30 }), emptyState()).find((a) => a.type === "@gcp.CloudFunction")!.desired!;
     await direct.create(entry, { entry: () => undefined });
     const create = google.calls.filter((c) => c.url.includes("functionId=")).at(-1)!;
-    expect(create.body.serviceConfig).toMatchObject({ availableMemory: "512M", timeoutSeconds: 30, maxInstanceCount: 5, environmentVariables: { GREETING: "hi", EXTRA: "1" } });
+    expect(create.body.serviceConfig).toMatchObject({ availableMemory: "512Mi", timeoutSeconds: 30, maxInstanceCount: 5, environmentVariables: { GREETING: "hi", EXTRA: "1" } });
   });
 
   test("a service account that already exists is used, and not deleted with the function", async () => {
@@ -232,6 +247,95 @@ describe("cloud functions driver", () => {
     expect(google.accounts.size).toBe(0);
   });
 
+  test("a function that already exists and was not deployed by cloudgear is never touched", async () => {
+    const google = fakeGoogle({ functions: { [NAME]: {} } });
+    await expect(applyConfig(configWith(), emptyState(), google.drivers)).rejects.toThrow(/A function named "app-foo" exists that cloudgear did not deploy; run `cloudgear import` to adopt it/);
+    expect(google.calls.every((c) => c.method === "GET")).toBe(true);
+    expect(google.uploads).toEqual([]);
+    expect(google.live.size).toBe(1);
+  });
+
+  test("a deploy an earlier apply left running is picked up, not started again", async () => {
+    const google = fakeGoogle({ functions: { [NAME]: { labels: OWNED, deploying: 2 } }, existingAccounts: [SA] });
+    const state = emptyState();
+    await applyConfig(configWith(), state, google.drivers);
+    expect(google.calls.some((c) => c.method === "POST" && (c.url.includes("functionId=") || c.url.includes("serviceAccounts")))).toBe(false);
+    expect(google.live.get(NAME)!.invokers).toEqual(["allUsers"]);
+    expect(state.entries[KEY]!.outputs).toMatchObject({ service_account: SA, service_account_created: "true" });
+  });
+
+  test("a function whose deploy failed earlier is replaced, and still owns the service account it made", async () => {
+    const google = fakeGoogle({ functions: { [NAME]: { labels: OWNED, state: "FAILED" } }, existingAccounts: [SA] });
+    const state = emptyState();
+    await applyConfig(configWith(), state, google.drivers);
+    expect(google.calls.some((c) => c.method === "DELETE" && c.url.endsWith(NAME))).toBe(true);
+    expect(google.calls.some((c) => c.url.includes("functionId=app-foo"))).toBe(true);
+    expect(state.entries[KEY]!.outputs.service_account_created).toBe("true");
+  });
+
+  test("a deploy that is still running when apply gives up is left alone for the next apply", async () => {
+    const google = fakeGoogle({ neverFinish: true });
+    await expect(applyConfig(configWith(), emptyState(), google.drivers)).rejects.toThrow(/deploying app-foo is still running after 10 minutes; it is left running, so run apply again/);
+    expect(google.calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(google.live.size).toBe(1);
+    expect(google.accounts.has(SA)).toBe(true);
+  });
+
+  test("a passing server error while waiting is retried instead of abandoning the build", async () => {
+    let failed = 0;
+    const google = fakeGoogle({ failOn: (method, url) => (method === "GET" && url.includes("/operations/") && failed++ === 0 ? new GcpApiError(503, "unavailable (HTTP 503)") : undefined) });
+    await applyConfig(configWith(), emptyState(), google.drivers);
+    expect(google.live.size).toBe(1);
+  });
+
+  test("the service account is kept when the failed function cannot be removed", async () => {
+    const google = fakeGoogle({ failBuild: "Build failed", failOn: (method, url) => (method === "DELETE" && url.includes("/functions/") ? new GcpApiError(500, "backend error (HTTP 500)") : undefined) });
+    await expect(applyConfig(configWith(), emptyState(), google.drivers)).rejects.toThrow(/deploying app-foo failed: Build failed/);
+    expect(google.accounts.has(SA)).toBe(true);
+  });
+
+  test("a policy that changed between the read and the write is retried once", async () => {
+    let writes = 0;
+    const google = fakeGoogle({ failOn: (_method, url) => (url.includes("functions/app-foo:setIamPolicy") && writes++ === 0 ? new GcpApiError(409, "etag mismatch (HTTP 409)") : undefined) });
+    await applyConfig(configWith(), emptyState(), google.drivers);
+    expect(google.live.get(NAME)!.invokers).toEqual(["allUsers"]);
+    expect(google.calls.filter((c) => c.url.includes("functions/app-foo:getIamPolicy"))).toHaveLength(2);
+    expect(google.calls.find((c) => c.url.includes("getIamPolicy"))!.url).toContain("options.requestedPolicyVersion=3");
+  });
+
+  test("max instances cannot be removed once set, a runtime change is sent, and a busy or vanished function is reported", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(configWith({ options: { project: "my-proj-123", max_instances: "5" } }), state, google.drivers);
+    await expect(applyConfig(configWith({ options: { project: "my-proj-123" }, memory_mb: 512 }), state, google.drivers)).rejects.toThrow(/max_instances cannot be removed once set/);
+
+    const runtime = fakeGoogle();
+    const second = emptyState();
+    await applyConfig(configWith(), second, runtime.drivers);
+    runtime.calls.length = 0;
+    await applyConfig(configWith({ runtime: "nodejs24", memory_mb: 512 }), second, runtime.drivers);
+    const patch = runtime.calls.find((c) => c.method === "PATCH")!;
+    expect(patch.url).toContain("buildConfig.runtime");
+    expect(patch.body.buildConfig.runtime).toBe("nodejs24");
+
+    runtime.live.get(NAME)!.deploying = 5;
+    await expect(applyConfig(configWith({ runtime: "nodejs24", memory_mb: 1024 }), second, runtime.drivers)).rejects.toThrow(/is DEPLOYING; run apply again once it has finished/);
+    runtime.live.clear();
+    await expect(applyConfig(configWith({ runtime: "nodejs24", memory_mb: 1024 }), second, runtime.drivers)).rejects.toThrow(/no longer exists; remove its entry from .cloudgear\/state.json/);
+  });
+
+  test("a function adopted with import is brought in line by the next apply", async () => {
+    const google = fakeGoogle({ functions: { [NAME]: { env: { OLD: "1" } } } });
+    const state = emptyState();
+    const config = configWith();
+    const result = await adoptEntries(plan(config, state), state, google.drivers, () => true);
+    expect(result.adopted).toHaveLength(1);
+    expect(state.entries[KEY]!.spec).toEqual({});
+    await applyConfig(config, state, google.drivers);
+    expect(google.live.get(NAME)!.env).toEqual({ GREETING: "hi" });
+    expect(google.live.get(NAME)!.invokers).toEqual(["allUsers"]);
+  });
+
   test("no region fails before any call", async () => {
     const google = fakeGoogle();
     await expect(applyConfig(configWith(), emptyState(), google.build(null))).rejects.toThrow(/Set the router's region option, --region or GOOGLE_CLOUD_REGION/);
@@ -253,7 +357,7 @@ describe("cloud functions driver", () => {
     await applyConfig(configWith({ bundle: { path: "build/foo/index.mjs", sha256: "v2" }, memory_mb: 512, env: [{ key: "GREETING", value: "yo" }] }), state, google.drivers);
     const config = google.calls.find((c) => c.method === "PATCH")!;
     expect(config.url).toBe(`${FUNCTIONS}/${NAME}?updateMask=serviceConfig.availableMemory,serviceConfig.timeoutSeconds,serviceConfig.environmentVariables`);
-    expect(config.body.serviceConfig).toMatchObject({ availableMemory: "512M", environmentVariables: { GREETING: "yo" } });
+    expect(config.body.serviceConfig).toMatchObject({ availableMemory: "512Mi", environmentVariables: { GREETING: "yo" } });
     expect(google.uploads).toHaveLength(2);
 
     await applyConfig(configWith({ bundle: { path: "build/foo/index.mjs", sha256: "v2" }, memory_mb: 512, env: [{ key: "GREETING", value: "yo" }], auth: "iam" }, "iam"), state, google.drivers);
@@ -315,6 +419,10 @@ describe("http layer", () => {
     expect(await http.request("POST", "https://x.example/a", { a: 1 })).toEqual({ ok: true });
     expect(seen).toEqual([{ url: "https://x.example/a", method: "POST", data: { a: 1 } }]);
     await expect(http.upload("https://signed.example", new Uint8Array(), {})).rejects.toThrow(/uploading the function's code failed \(HTTP 403\)/);
+    const offline = httpFor({ request: async () => ({ data: {} }) }, (async () => { throw new Error("fetch failed for https://signed.example/secret-signature"); }) as unknown as typeof fetch);
+    const failure = await offline.upload("https://signed.example/secret-signature", new Uint8Array(), {}).catch((e: Error) => e);
+    expect((failure as Error).message).toBe("uploading the function's code failed: the connection failed");
+    expect(JSON.stringify(failure)).not.toContain("secret-signature");
   });
 });
 

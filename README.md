@@ -938,13 +938,20 @@ planned, one resource at a time.
     deleted with the function.
   - The code is uploaded through Cloud Functions' own upload URL, so no bucket
     is needed. Google builds it, which takes minutes; `apply` waits up to 10
-    minutes and then asks you to run it again.
-  - `authenticated: "none"` lets anyone with the URL call it (the invoker role for
-    `allUsers`; an organization policy can forbid that). `authenticated: "iam"`
-    leaves it private; cloudgear grants no caller, and the router's `invoker`
-    list, which holds AWS principals, is not used on GCP.
-  - Function options: `project`, `max_instances`, and `env.<NAME>` variables.
-    Memory and timeout follow the provider defaults (256 MB, 60 s).
+    minutes. If it gives up, the deploy is left running: run `apply` again and it
+    picks that function up (cloudgear recognizes its own functions by their
+    labels) instead of starting another. A function named like yours that
+    cloudgear did not deploy is never touched; adopt it with `cloudgear import`.
+  - `authenticated: "none"` lets anyone with the URL call it. 2nd-generation
+    functions run on Cloud Run, so cloudgear grants `allUsers` the invoker role
+    on both the function and its Cloud Run service (an organization policy can
+    forbid that). `authenticated: "iam"` leaves it private; cloudgear grants no
+    caller, and the router's `invoker` list, which holds AWS principals, is not
+    used on GCP.
+  - Function options: `project`, `max_instances` (once set it cannot be removed,
+    only changed), and `env.<NAME>` variables. A route's own `options` MUST NOT set
+    `project` when the router does. Memory and timeout follow the provider
+    defaults (256 MiB, 60 s).
   - Only the function's own code and settings are managed. **A function does not
     get access to any bucket yet**; granting a function's service account access
     to a GCS bucket comes next, so until then a GCP function cannot read or write
@@ -955,16 +962,19 @@ planned, one resource at a time.
   - The identity needs to create and delete functions and service accounts and
     to act as the new service account (for example `roles/cloudfunctions.admin`,
     `roles/iam.serviceAccountAdmin` and `roles/iam.serviceAccountUser`).
-  - Removing a function deletes it and the service account cloudgear made. If a
-    build fails, the function and the service account made for it are removed
-    again, so a retry starts clean.
+  - Removing a function deletes it and the service account cloudgear made. When a
+    build fails outright, the function and the service account made for it are
+    removed again, unless the function could not be removed, in which case the
+    account stays because the function still uses it. A timeout or a passing error
+    cleans up nothing, so the next `apply` can resume.
 - **Tested against fakes only.** The deployers are tested against stand-ins for
   Google's storage client and for the Cloud Functions and IAM calls, not against
   real GCP. The Cloud Functions field names and routes come from Google's own
-  proto definitions. Three things I could not verify: the service account
-  creation call, the headers the code upload needs, and the invoker role used
-  for public access (`roles/cloudfunctions.invoker`). The first real `apply` is
-  the real test.
+  proto definitions. Things I could not verify: the service account
+  creation call, the Cloud Run IAM route and the invoker role used for public
+  access (`roles/cloudfunctions.invoker` and `roles/run.invoker`), and the exact
+  text of Google's errors while a new service account propagates. The first real
+  `apply` is the real test.
 
 ## `@cloudgear/core`
 

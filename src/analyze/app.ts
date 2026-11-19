@@ -1013,8 +1013,8 @@ function analyzeEntry(entryPath: string): AppModel {
   for (const fn of functions.values()) {
     fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
     fn.policies = uniquePolicies([...routerPolicies, ...fn.policies]);
-    const overridden = routerNetworkKeys.find((key) => fn.options?.[key] !== undefined);
-    if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router's network already sets; change the network instead`);
+    const overridden = [...routerNetworkKeys, ...(routerProject !== undefined ? ["project"] : [])].find((key) => fn.options?.[key] !== undefined);
+    if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router already sets; change it on the router instead`);
     const merged: Record<string, string> = { ...routerFunctionOptions, ...fn.options };
     // A function that uses a cache runs in the cache's network, unless it already runs in that same one.
     for (const cacheName of fn.caches) {

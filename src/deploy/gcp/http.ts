@@ -36,7 +36,13 @@ export function httpFor(auth: AuthLike, send: typeof fetch = fetch): GcpHttp {
       }
     },
     async upload(url, data, headers) {
-      const res = await send(url, { method: "PUT", headers, body: data });
+      let res: Response;
+      try {
+        res = await send(url, { method: "PUT", headers, body: data });
+      } catch (err) {
+        // The signed URL is a credential; keep it out of the message.
+        throw new GcpApiError(undefined, "uploading the function's code failed: the connection failed");
+      }
       if (!res.ok) throw new GcpApiError(res.status, `uploading the function's code failed (HTTP ${res.status})`);
     },
   };

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createBlobDriver } from "../packages/blob/driver";
+import { builtInBlobDriver } from "../packages/blob/driver";
 import { GcsBlobDriver, type GcsClient } from "../packages/blob/drivers/gcs";
 
 class NotFound extends Error {
@@ -81,14 +81,12 @@ describe("GCS blob driver", () => {
   });
 
   test("the gcp provider has a built-in driver, which makes no call until it is used", async () => {
-    const saved = process.env.CLOUDGEAR_BLOB_DRIVER;
-    delete process.env.CLOUDGEAR_BLOB_DRIVER;
-    try {
-      const driver = await createBlobDriver("gcp", "assets");
-      expect(driver).toBeInstanceOf(GcsBlobDriver);
-      expect(driver.client).toBeDefined();
-    } finally {
-      if (saved !== undefined) process.env.CLOUDGEAR_BLOB_DRIVER = saved;
-    }
+    // The shared registry may hold another test's driver, so the built-in loader is checked directly.
+    const factory = await builtInBlobDriver("gcp");
+    expect(factory).toBeDefined();
+    const driver = await factory!("assets", {});
+    expect(driver).toBeInstanceOf(GcsBlobDriver);
+    expect(driver.client).toBeDefined();
+    expect(await builtInBlobDriver("azure")).toBeUndefined();
   });
 });

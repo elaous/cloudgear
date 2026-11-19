@@ -882,19 +882,56 @@ in `src/providers.ts` hold each provider's types, defaults, permission
 mapping, option keys and reserved environment names.
 
 What exists today: the config, `generate` (a Cloud Functions HTTP adapter
-bundles the functions) and `plan` handle several providers. There are no GCP
-deployers, so `apply` stops before doing anything if the config uses a provider
-without deployers, and a CDN, an API domain or a schedule needs a provider that
-supports it (AWS). Access from a function to a store of another provider is not
-provisioned yet: `generate` warns, and the function gets no credentials for the
-store. A mechanism (a stored key, workload identity federation, a signed URL)
-registers under `"<function provider>-><store provider>"` in
-`CROSS_PROVIDER_ACCESS`, and a deployer per provider is added to `DEPLOYERS` in
-`src/cli.ts`. `apply` and `destroy` use the deployers of the providers in the
-planned actions, so removing the last GCP entry lets `destroy` run with AWS
-alone. The GCP adapter never trusts a caller identity sent in the request,
-because nothing authenticates callers before it runs; the router's API domain
-needs provider `aws`.
+bundles the functions) and `plan` handle several providers, and GCP has a
+deployer for buckets (see Google Cloud below). Nothing else on GCP deploys yet,
+so `apply` stops before changing anything when the plan holds a type no driver
+handles (for example `@gcp.CloudFunction`), and a CDN, an API domain or a
+schedule needs a provider that supports it (AWS). Access from a function to a
+store of another provider is not provisioned yet: `generate` warns, and the
+function gets no credentials for the store. A mechanism (a stored key, workload
+identity federation, a signed URL) registers under
+`"<function provider>-><store provider>"` in `CROSS_PROVIDER_ACCESS`, and a
+deployer per provider is added to `DEPLOYERS` in `src/cli.ts`. `apply` and
+`destroy` use the deployers of the providers in the planned actions, so removing
+the last GCP entry lets `destroy` run with AWS alone. The GCP adapter never
+trusts a caller identity sent in the request, because nothing authenticates
+callers before it runs; the router's API domain needs provider `aws`.
+
+## Google Cloud
+
+GCP support is partial. Only buckets deploy so far; the rest is planned, one
+resource at a time.
+
+- **Credentials.** cloudgear uses your Application Default Credentials and never
+  stores or prints a key. Run `gcloud auth application-default login` (or point
+  `GOOGLE_APPLICATION_CREDENTIALS` at a service account file) before `apply`.
+- **Project.** A resource lives in the project named by its `project` option,
+  else `GOOGLE_CLOUD_PROJECT`, else the project of your credentials. With none
+  of them `apply` stops before creating anything, and shows why the lookup
+  failed when your credentials could not be loaded.
+- **Buckets.** `new BlobStore("gcp", "gs://assets", { options: { ... } })`:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `project` | see above | The GCP project id |
+| `location` | `US` | A multi-region such as `US` or `EU`, or a region such as `us-central1`; cannot change later |
+| `storage_class` | `STANDARD` | `STANDARD`, `NEARLINE`, `COLDLINE` or `ARCHIVE` |
+| `versioning` | `false` | Keep old object versions |
+
+  A new bucket is private: uniform bucket-level access is on and public access is
+  prevented. cloudgear labels it with its tags, converted to GCP's label rules
+  (lowercase letters, digits, `_` and `-`); two tags that become the same label,
+  or a tag starting with `goog`, stop `apply` with an error. Bucket names are
+  global, so creating one that exists fails and points at `cloudgear import`.
+  Changing `versioning` or `storage_class` updates the bucket; changing
+  `location` or `project` is an error.
+- **Import and delete.** As with S3, `cloudgear import` only records a bucket;
+  `apply` and `destroy` never change or delete an imported one. A bucket cloudgear
+  created is deleted only if it is empty, and never has its objects removed.
+- **Permissions.** The identity needs `storage.buckets.create`, `get`, `update`
+  and `delete` (for example `roles/storage.admin` on the project).
+- **Tested against fakes only.** The deployer is tested against a stand-in for
+  Google's official storage client, not against real GCP.
 
 ## `@cloudgear/core`
 
@@ -2070,6 +2107,8 @@ Where each moving part lives, since several are called across packages:
 | `awsDrivers` | `src/deploy/aws/index.ts` | `src/cli.ts` |
 | `Database` | `packages/database/index.ts` | apps; `src/analyze/app.ts` |
 | `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
+| `gcpDrivers`, `resolveProject`, `labelsFrom` | `src/deploy/gcp/index.ts` | `src/cli.ts` |
+| GCS bucket driver | `src/deploy/gcp/storage.ts` | `gcpDrivers` |
 | `Registry` | `packages/registry/index.ts` | apps; `src/analyze/app.ts` |
 | ECR repository driver | `src/deploy/aws/ecr.ts` | `awsDrivers` |
 | `Stream` | `packages/stream/index.ts` | apps; `src/analyze/app.ts` |
@@ -2093,7 +2132,7 @@ Where each moving part lives, since several are called across packages:
 
 ## Status
 
-Early draft. Only the `aws` provider has deploy drivers (`gcp` is described and planned, see Hybrid clouds);
+Early draft. `aws` has the deploy drivers; `gcp` deploys buckets only so far (see Google Cloud and Hybrid clouds);
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has any number of

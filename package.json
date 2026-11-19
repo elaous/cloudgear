@@ -59,6 +59,8 @@
     "@cloudgear/registry": "workspace:*",
     "@cloudgear/secrets": "workspace:*",
     "@cloudgear/stream": "workspace:*",
+    "@google-cloud/storage": "^9.0.0",
+    "google-auth-library": "^11.3.4",
     "ts-morph": "^24.0.0"
   },
   "workspaces": [

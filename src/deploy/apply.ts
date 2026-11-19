@@ -156,6 +156,10 @@ export async function apply(actions: PlannedAction[], state: State, drivers: Dri
     }
   };
 
+  // A type without a driver would fail halfway; say so before anything changes.
+  const unsupported = [...new Set(actions.filter((a) => a.op !== "noop" && a.op !== "dry" && a.op !== "forget" && !drivers[a.type]).map((a) => a.type))];
+  if (unsupported.length) throw new Error(`Nothing was changed. cloudgear cannot deploy ${unsupported.join(", ")} yet`);
+
   const refusals = actions.flatMap((action) => {
     if ((action.op !== "delete" && action.op !== "replace") || !action.current) return [];
     const reason = drivers[action.type]?.protect?.(action.current);

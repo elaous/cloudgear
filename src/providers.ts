@@ -131,7 +131,14 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
   },
   gcp: {
     options: {
-      "@gcp.GCS": { keys: { versioning: oneOf("true", "false") } },
+      "@gcp.GCS": {
+        keys: {
+          versioning: oneOf("true", "false"),
+          project: (v) => (/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(v) ? undefined : 'must be a GCP project id such as "my-project-123"'),
+          location: (v) => (/^[A-Za-z][A-Za-z0-9-]{1,30}$/.test(v) ? undefined : 'must be a bucket location such as "US" or "us-central1"'),
+          storage_class: oneOf("STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"),
+        },
+      },
       "@gcp.CloudFunction": { keys: {}, prefixes: { [ENV_OPTION_PREFIX]: environmentVariable } },
     },
     reservedEnv: /^(CLOUDGEAR_|FUNCTION_|K_|GOOGLE_|GCP_|NODE_OPTIONS$|_)/,

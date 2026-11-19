@@ -14,7 +14,7 @@ export interface AdoptResult {
 }
 
 // Buckets are recorded, never changed; other resources get managed.
-const RECORD_ONLY = new Set(["@aws.S3"]);
+const RECORD_ONLY = new Set(["@aws.S3", "@gcp.GCS"]);
 
 const ARN_TYPES = new Set(["@aws.Certificate", "@aws.CloudFront", "@aws.Lambda", "@aws.Schedule", "@aws.S3"]);
 

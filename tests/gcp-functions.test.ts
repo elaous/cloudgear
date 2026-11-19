@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { analyzeApp } from "../src/analyze/app";
 import { adoptEntries } from "../src/deploy/adopt";
-import { apply, type Drivers } from "../src/deploy/apply";
+import { apply, incompleteSpec, type Drivers } from "../src/deploy/apply";
 import { gcpDrivers } from "../src/deploy/gcp";
 import { serviceAccountIdFor } from "../src/deploy/gcp/functions";
 import { desiredGrants, grantId, rolesFor } from "../src/deploy/gcp/grants";
@@ -40,7 +40,7 @@ interface Live {
 
 const OWNED = { cloudgear_resource: "foo", "cloudgear_managed-by": "cloudgear", cloudgear_service_account: "created" };
 
-function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; propagationFailures?: number; polls?: number; functions?: Record<string, Partial<Live>>; neverFinish?: boolean; failOn?: (method: string, url: string) => Error | undefined; failSetPolicy?: () => Error | undefined } = {}) {
+function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; propagationFailures?: number; polls?: number; functions?: Record<string, Partial<Live>>; neverFinish?: boolean; failOn?: (method: string, url: string) => Error | undefined; failSetPolicy?: (bucket: string) => Error | undefined } = {}) {
   const calls: { method: string; url: string; body?: any }[] = [];
   const uploads: { url: string; headers: Record<string, string>; text: string }[] = [];
   const sleeps: number[] = [];
@@ -144,7 +144,7 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
           },
           async setPolicy(policy) {
             calls.push({ method: "BUCKET", url: `set ${name}`, body: JSON.parse(JSON.stringify(policy)) });
-            const injected = opts.failSetPolicy?.();
+            const injected = opts.failSetPolicy?.(name);
             if (injected) throw injected;
             policies.set(name, JSON.parse(JSON.stringify(policy)));
             return {};
@@ -551,6 +551,84 @@ describe("bucket access", () => {
     expect(propagating.sleeps.filter((ms) => ms === 4000)).toHaveLength(2);
   });
 
+  test("a function on the project's default service account is refused clearly, without waiting", async () => {
+    const google = fakeGoogle({ functions: { [NAME]: { email: "" } } });
+    const state = emptyState();
+    const config = withAccess([READ]);
+    await adoptEntries(plan(config, state).filter((a) => a.type === "@gcp.CloudFunction"), state, google.drivers, () => true);
+    await expect(applyConfig(config, state, google.drivers)).rejects.toThrow(/runs as the project's default service account, and cloudgear will not give that shared account bucket access/);
+    expect(google.calls.some((c) => c.url === "set assets")).toBe(false);
+    expect(google.sleeps.filter((ms) => ms === 4000)).toEqual([]);
+  });
+
+  test("a permission that cannot be granted fails before anything is deployed", async () => {
+    const google = fakeGoogle();
+    await expect(applyConfig(withAccess([{ resource: "assets", path: 'a"b', action: ["storage.objects.get"] }]), emptyState(), google.drivers)).rejects.toThrow(/characters a GCS access condition cannot hold/);
+    expect(google.calls.some((c) => c.url.includes("functions") || c.url.includes("serviceAccounts"))).toBe(false);
+    expect(google.live.size).toBe(0);
+  });
+
+  test("a delete finishes even when the bucket's policy cannot be edited", async () => {
+    let denied = false;
+    const google = fakeGoogle({ failSetPolicy: () => (denied ? Object.assign(new Error("permission denied"), { code: 403 }) : undefined) });
+    const state = emptyState();
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    denied = true;
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    expect(state.entries[KEY]).toBeUndefined();
+    expect(google.accounts.size).toBe(0);
+    expect(google.logs.some((m) => m.includes(`could not remove ${SA} from assets (permission denied); remove it by hand`))).toBe(true);
+  });
+
+  test("grants made before a failure stay recorded, and the next apply finishes the rest", async () => {
+    const OTHER = { ...BUCKET, name: "other", physical_name: "other" };
+    let failOther = false;
+    const google = fakeGoogle({ failSetPolicy: (bucket) => (failOther && bucket === "other" ? new Error("quota exceeded") : undefined) });
+    const state = emptyState();
+    const config = (permission: { resource: string; path: string; action: string[] }[]) =>
+      baseConfig({ provider: "gcp", resource: [BUCKET, OTHER], function: [spec({ permission, env: [{ key: "CLOUDGEAR_BLOB_ASSETS", value_from: "assets" }] })], authenticated: "iam" });
+    await applyConfig(config([READ]), state, google.drivers);
+    failOther = true;
+    await expect(applyConfig(config([READ, { ...READ, resource: "other" }]), state, google.drivers)).rejects.toThrow(/quota exceeded/);
+    expect(JSON.parse(state.entries[KEY]!.outputs.bucket_grants!)).toEqual(["assets|roles/storage.objectViewer|"]);
+    failOther = false;
+    await applyConfig(config([READ, { ...READ, resource: "other" }]), state, google.drivers);
+    expect(JSON.parse(state.entries[KEY]!.outputs.bucket_grants!)).toEqual(["assets|roles/storage.objectViewer|", "other|roles/storage.objectViewer|"]);
+    expect(google.policies.get("other")!.bindings).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("a binding that was already there is not recorded, so it is never taken away", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    google.policies.get("assets")!.bindings.push({ role: "roles/storage.objectViewer", members: [MEMBER] });
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    expect(state.entries[KEY]!.outputs.bucket_grants).toBe("[]");
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    expect(bindingsOf(google)).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("the policy that was read is written back with its etag, version and other conditional bindings", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    const other = { role: "roles/storage.objectViewer", members: ["user:temp@example.com"], condition: { title: "temporary", expression: "request.time < timestamp('2030-01-01T00:00:00Z')" } };
+    google.policies.get("assets")!.bindings.push(other);
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    const written = google.calls.find((c) => c.url === "set assets")!.body;
+    expect(written.etag).toBe("1");
+    expect(written.version).toBe(3);
+    expect(bindingsOf(google)).toEqual([other, { role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("a long path gives a condition title within Google's length", async () => {
+    const google = fakeGoogle();
+    await applyConfig(withAccess([{ resource: "assets", path: `${"é".repeat(60)}😀${"x".repeat(60)}/`, action: ["storage.objects.get"] }]), emptyState(), google.drivers);
+    const title = bindingsOf(google)[0]!.condition!.title!;
+    expect([...title].length).toBeLessThanOrEqual(100);
+    expect(title.startsWith("cloudgear: ")).toBe(true);
+  });
+
   test("a store on another provider is not granted anything", async () => {
     const google = fakeGoogle();
     const config = baseConfig({
@@ -561,6 +639,19 @@ describe("bucket access", () => {
     });
     await applyConfig(config, emptyState(), google.drivers);
     expect(google.calls.some((c) => c.method === "BUCKET")).toBe(false);
+  });
+});
+
+describe("a function left half applied", () => {
+  test("is planned as an update even though no field differs, so it is finished", () => {
+    const config = configWith();
+    const desired = plan(config, emptyState()).find((a) => a.type === "@gcp.CloudFunction")!.desired!;
+    const state = emptyState();
+    state.entries[KEY] = { kind: "function", type: "@gcp.CloudFunction", name: "foo", physical_name: "app-foo", spec: incompleteSpec(desired.spec), outputs: { name: NAME }, deps: [] } as never;
+    const [action] = plan(config, state);
+    expect(action).toMatchObject({ op: "update", changes: ["incomplete"] });
+    state.entries[KEY]!.spec = desired.spec;
+    expect(plan(config, state)[0]!.op).toBe("noop");
   });
 });
 

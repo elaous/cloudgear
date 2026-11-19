@@ -964,6 +964,18 @@ planned, one resource at a time.
     bindings cloudgear recorded are ever removed, so other people's access on the
     same roles is left alone, and the grants are taken back before the service
     account is deleted. A store on another provider is not granted anything.
+    If a grant fails part way, the ones already made stay recorded and the next
+    `apply` finishes the rest. A binding that was already there is not recorded
+    and so is never taken away. If a bucket's policy cannot be edited while the
+    function is being deleted, cloudgear says so and carries on, so the account
+    is not left behind; remove that binding by hand.
+  - **Limits of the grants.** Overwriting an object needs the delete permission
+    in GCS, so a function that only writes can create objects but not replace
+    them; declare delete too if it needs to overwrite. Reading alone also lets
+    it list, and deleting also lets it read and overwrite, because the
+    predefined roles are broader than the permission asked for. A function that
+    runs on the project's default service account (one imported that way) is
+    refused, because cloudgear will not give a shared account bucket access.
   - Schedules, a CDN and an API domain are not available on GCP.
   - Before the first `apply`, enable the Cloud Functions, Cloud Build, Artifact
     Registry and Cloud Run APIs in the project. cloudgear does not enable APIs.

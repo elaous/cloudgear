@@ -42,10 +42,11 @@ export function desiredGrants(permissions: FunctionComparable["permissions"]): G
 }
 
 const conditionFor = (grant: Grant) =>
-  grant.path ? { title: `cloudgear: ${grant.path}`.slice(0, 100), expression: `resource.name.startsWith("projects/_/buckets/${grant.bucket}/objects/${grant.path}")` } : undefined;
+  grant.path ? { title: [...`cloudgear: ${grant.path}`].slice(0, 100).join(""), expression: `resource.name.startsWith("projects/_/buckets/${grant.bucket}/objects/${grant.path}")` } : undefined;
 
 // Adds or removes one member's binding, leaving every other binding as it is.
-export async function changeGrant(storage: StorageLike, grant: Grant, member: string, add: boolean): Promise<void> {
+// Returns whether the policy was changed: false when the member already had (or already lacked) the binding.
+export async function changeGrant(storage: StorageLike, grant: Grant, member: string, add: boolean): Promise<boolean> {
   const bucket = storage.bucket(grant.bucket);
   const condition = conditionFor(grant);
   for (let attempt = 0; ; attempt++) {
@@ -53,28 +54,28 @@ export async function changeGrant(storage: StorageLike, grant: Grant, member: st
     try {
       [policy] = await bucket.iam.getPolicy({ requestedPolicyVersion: 3 });
     } catch (err) {
-      if (!add && (err as GcpApiError).status === 404) return;
-      if (!add && (err as { code?: number }).code === 404) return;
+      if (!add && (err as GcpApiError).status === 404) return false;
+      if (!add && (err as { code?: number }).code === 404) return false;
       throw err;
     }
     const bindings = (policy.bindings ?? []).map((b) => ({ ...b, members: [...b.members] }));
     const match = bindings.find((b) => b.role === grant.role && (b.condition?.expression ?? "") === (condition?.expression ?? ""));
     if (add) {
-      if (match?.members.includes(member)) return;
+      if (match?.members.includes(member)) return false;
       if (match) match.members.push(member);
       else bindings.push({ role: grant.role, members: [member], ...(condition ? { condition } : {}) });
     } else {
-      if (!match?.members.includes(member)) return;
+      if (!match?.members.includes(member)) return false;
       match.members = match.members.filter((m) => m !== member);
     }
     const next = { ...policy, bindings: bindings.filter((b) => b.members.length), ...(condition || bindings.some((b) => b.condition) ? { version: 3 } : {}) };
     try {
       await bucket.iam.setPolicy(next);
-      return;
+      return true;
     } catch (err) {
       // Someone else changed the policy between the read and the write.
       const status = (err as { code?: number }).code ?? (err as GcpApiError).status;
-      if (attempt >= 1 || (status !== 409 && status !== 412)) throw err;
+      if (attempt >= 2 || (status !== 409 && status !== 412)) throw err;
     }
   }
 }

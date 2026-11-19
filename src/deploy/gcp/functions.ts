@@ -2,7 +2,7 @@ import { zip } from "../../build/zip";
 import type { FunctionSpec } from "../../config/schema";
 import { fitName } from "../../names";
 import { environmentOptions } from "../../providers";
-import type { Adopted, Driver, DriverContext } from "../apply";
+import { PartialApplyError, type Adopted, type Driver, type DriverContext } from "../apply";
 import { resolveOutputReferences } from "../environment";
 import type { DesiredEntry, FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
@@ -33,6 +33,16 @@ const statusOf = (err: unknown): number | undefined => {
   const e = err as { status?: number; code?: unknown };
   return e.status ?? (typeof e.code === "number" ? e.code : undefined);
 };
+
+// Some grants were made and one failed; `recorded` is what is held so far, so state can keep track of it.
+class GrantsFailed extends Error {
+  constructor(
+    readonly original: unknown,
+    readonly recorded: string,
+  ) {
+    super(original instanceof Error ? original.message : String(original));
+  }
+}
 
 // A long-running operation that finished with an error: the work definitely did not happen.
 class OperationFailed extends Error {}
@@ -92,7 +102,7 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
         return await run();
       } catch (err) {
         const status = statusOf(err);
-        if (attempt >= PROPAGATION_ATTEMPTS || (status !== 400 && status !== 403 && status !== 404) || !(err as Error).message.includes(email)) throw err;
+        if (attempt >= PROPAGATION_ATTEMPTS || (status !== 400 && status !== 403 && status !== 404) || !email || !(err as Error).message.includes(email)) throw err;
         await fns.sleep(PROPAGATION_WAIT_MS);
       }
     }
@@ -209,17 +219,32 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
   const grantsJson = (ids: string[]): string => JSON.stringify([...ids].sort());
   const previousGrants = (json: string | undefined): string[] => (json ? (JSON.parse(json) as string[]) : []);
 
-  // Gives the function's service account the bucket access its permissions ask for, and takes back what it no longer needs. Only grants cloudgear recorded are removed.
-  async function reconcileGrants(project: string, email: string, spec: FunctionComparable, previous: string | undefined): Promise<string> {
+  // Gives the function's service account the bucket access its permissions ask for, and takes back what it no longer needs.
+  // Only grants cloudgear itself added are recorded, so only those are ever removed: a binding that was already there stays.
+  async function reconcileGrants(project: string, email: string, spec: FunctionComparable, previous: string | undefined, id: string): Promise<string> {
     const want = desiredGrants(spec.permissions);
     const had = previousGrants(previous);
     if (!want.length && !had.length) return grantsJson([]);
+    if (want.length && !email) {
+      throw new Error(`Function "${id}" runs as the project's default service account, and cloudgear will not give that shared account bucket access; deploy it with its own service account instead`);
+    }
     const storage = deps.storage(project);
     const member = `serviceAccount:${email}`;
     const wantIds = new Set(want.map(grantId));
-    for (const grant of want) await retried(() => changeGrant(storage, grant, member, true), email);
-    for (const id of had) if (!wantIds.has(id)) await changeGrant(storage, parseGrant(id), member, false);
-    return grantsJson([...wantIds]);
+    const held = new Set(had);
+    try {
+      for (const grant of want) {
+        if (await retried(() => changeGrant(storage, grant, member, true), email)) held.add(grantId(grant));
+      }
+      for (const old of had) {
+        if (wantIds.has(old)) continue;
+        await changeGrant(storage, parseGrant(old), member, false);
+        held.delete(old);
+      }
+    } catch (err) {
+      throw new GrantsFailed(err, grantsJson([...held]));
+    }
+    return grantsJson([...held].filter((held_) => wantIds.has(held_)));
   }
 
   const labelsOf = (entryName: string) => labelsFrom(deps.labels, entryName);
@@ -230,6 +255,8 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
       const spec = entry.spec as unknown as FunctionComparable;
       const source = entry.source as FunctionSpec;
       const id = entry.physical_name;
+      // Checked first, so a bad permission fails before anything is deployed.
+      desiredGrants(spec.permissions);
       const project = await projectFor(entry.spec, id);
       const name = nameOf(project, id);
       let serviceAccountCreatedBefore = false;
@@ -247,9 +274,15 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
           // Left running by an earlier apply that gave up waiting.
           const live = await settled(name);
           await setPublic(name, live.service, spec.auth === "none");
-          const resumedGrants = await reconcileGrants(project, live.email, spec, undefined);
-          deps.log(`adopted function ${id}, which an earlier apply left deploying`);
-          return { name, url: live.url, project, region: region(), service_account: live.email, service_account_created: String(serviceAccountCreatedBefore), bucket_grants: resumedGrants };
+          const resumedOutputs = { name, url: live.url, project, region: region(), service_account: live.email, service_account_created: String(serviceAccountCreatedBefore) };
+          try {
+            const resumedGrants = await reconcileGrants(project, live.email, spec, undefined, id);
+            deps.log(`adopted function ${id}, which an earlier apply left deploying`);
+            return { ...resumedOutputs, bucket_grants: resumedGrants };
+          } catch (err) {
+            if (err instanceof GrantsFailed) throw new PartialApplyError(err.original, { ...resumedOutputs, bucket_grants: err.recorded });
+            throw err;
+          }
         }
       }
 
@@ -270,9 +303,17 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
         const live = await settled(name);
         // A new function is private; only a public one needs a binding.
         if (spec.auth === "none") await setPublic(name, live.service, true);
-        const bucketGrants = await reconcileGrants(project, account.email, spec, undefined);
+        const createdOutputs = { name, url: live.url, project, region: region(), service_account: account.email, service_account_created: String(serviceAccountCreated) };
+        let bucketGrants: string;
+        try {
+          bucketGrants = await reconcileGrants(project, account.email, spec, undefined, id);
+        } catch (err) {
+          // The function is deployed; state keeps it and the grants made so far, and the next apply finishes the rest.
+          if (err instanceof GrantsFailed) throw new PartialApplyError(err.original, { ...createdOutputs, bucket_grants: err.recorded });
+          throw err;
+        }
         deps.log(`deployed function ${id}`);
-        return { name, url: live.url, project, region: region(), service_account: account.email, service_account_created: String(serviceAccountCreated), bucket_grants: bucketGrants };
+        return { ...createdOutputs, bucket_grants: bucketGrants };
       } catch (err) {
         // Clean up only after a definite failure. A timeout or a passing error leaves the deploy running for the next apply to pick up.
         const definite = !started || err instanceof OperationFailed;
@@ -292,6 +333,7 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
       const spec = entry.spec as unknown as FunctionComparable;
       const source = entry.source as FunctionSpec;
       const id = entry.physical_name;
+      desiredGrants(spec.permissions);
       const project = current.outputs.project || (await projectFor(entry.spec, id));
       const wanted = optionsOf(entry.spec).project;
       if (wanted && current.outputs.project && wanted !== current.outputs.project) {
@@ -334,12 +376,15 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
         url = (await settled(name)).url || url;
       }
       if (changes.includes("auth")) await setPublic(name, live.service, spec.auth === "none");
-      const wantedGrants = grantsJson(desiredGrants(spec.permissions).map(grantId));
-      let bucketGrants = current.outputs.bucket_grants;
-      if (changes.includes("permissions") || bucketGrants !== wantedGrants) {
-        bucketGrants = await reconcileGrants(project, current.outputs.service_account || live.email, spec, current.outputs.bucket_grants);
+      // Always reconciled: it is idempotent, and after a partial failure the saved spec already holds the permissions that were not all granted.
+      let bucketGrants: string;
+      try {
+        bucketGrants = await reconcileGrants(project, current.outputs.service_account ?? live.email, spec, current.outputs.bucket_grants, id);
+      } catch (err) {
+        if (err instanceof GrantsFailed) throw new PartialApplyError(err.original, { ...current.outputs, url, bucket_grants: err.recorded });
+        throw err;
       }
-      return { url, bucket_grants: bucketGrants ?? "[]" };
+      return { url, bucket_grants: bucketGrants };
     },
 
     async delete(current: StateEntry) {
@@ -351,7 +396,14 @@ export function functionDriver(deps: GcpDeps, fns: FunctionDeps): Driver {
       const granted = previousGrants(current.outputs.bucket_grants);
       if (email && granted.length) {
         const storage = deps.storage(project);
-        for (const grantIdText of granted) await changeGrant(storage, parseGrant(grantIdText), `serviceAccount:${email}`, false);
+        for (const grantIdText of granted) {
+          try {
+            await changeGrant(storage, parseGrant(grantIdText), `serviceAccount:${email}`, false);
+          } catch (err) {
+            // The function is already gone; do not leave its account behind for a binding that cannot be edited.
+            deps.log(`could not remove ${email} from ${parseGrant(grantIdText).bucket} (${(err as Error).message}); remove it by hand`);
+          }
+        }
       }
       if (current.outputs.service_account_created === "true" && email) await removeServiceAccount(project, email);
       deps.log(`deleted function ${id}`);

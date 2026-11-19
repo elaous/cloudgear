@@ -133,12 +133,14 @@ describe("a GCP function with an AWS bucket and a GCS bucket", () => {
 
   test("apply stops before doing anything when the plan holds a type no driver handles", async () => {
     const { dir, configPath } = await generated(fixture("gcp-function-aws-store.ts"));
-    const proc = Bun.spawnSync(["bun", path.join(import.meta.dir, "..", "src", "cli.ts"), "apply", "--auto-approve", "--config", configPath], {
+    // A type no deployer handles, added by hand: apply must stop before any driver is used.
+    fs.appendFileSync(configPath, 'resource {\n  name: "mystery"\n  type: "@gcp.Mystery"\n  physical_name: "mystery"\n  dry: false\n  source: "setup.ts:1"\n}\n');
+    const proc = Bun.spawnSync(["bun", path.join(import.meta.dir, "..", "src", "cli.ts"), "apply", "--auto-approve", "--skip-env-check", "--config", configPath], {
       cwd: dir,
       env: { ...process.env, AWS_REGION: "eu-west-1" },
     });
     expect(proc.exitCode).toBe(1);
-    expect(proc.stderr.toString()).toMatch(/Nothing was changed\. cloudgear cannot deploy @gcp\.CloudFunction yet/);
+    expect(proc.stderr.toString()).toMatch(/Nothing was changed\. cloudgear cannot deploy @gcp\.Mystery yet/);
     expect(fs.existsSync(path.join(dir, ".cloudgear", "state.json"))).toBe(false);
   });
 

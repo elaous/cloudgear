@@ -139,7 +139,13 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           storage_class: oneOf("STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"),
         },
       },
-      "@gcp.CloudFunction": { keys: {}, prefixes: { [ENV_OPTION_PREFIX]: environmentVariable } },
+      "@gcp.CloudFunction": {
+        keys: {
+          project: (v) => (/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(v) ? undefined : 'must be a GCP project id such as "my-project-123"'),
+          max_instances: integerBetween(1, 1000),
+        },
+        prefixes: { [ENV_OPTION_PREFIX]: environmentVariable },
+      },
     },
     reservedEnv: /^(CLOUDGEAR_|FUNCTION_|K_|GOOGLE_|GCP_|NODE_OPTIONS$|_)/,
     function: { type: "@gcp.CloudFunction", runtime: "nodejs22", memoryMb: 256, timeoutS: 60, identity: "service-account" },

@@ -52,7 +52,7 @@ describe("analysis", () => {
 
   test("a reassignable variable and a route that overrides the network are errors", () => {
     expect(() => analyzeApp(fixture("let"))).toThrow(/network must be a Network declared in your project/);
-    expect(() => analyzeApp(fixture("route-override"))).toThrow(/route options of "ping" set vpc, which the router's network already sets/);
+    expect(() => analyzeApp(fixture("route-override"))).toThrow(/route options of "ping" set vpc, which the router already sets/);
   });
 
   test("a clash, a non-Network value, a bad id and an unknown option are errors", () => {

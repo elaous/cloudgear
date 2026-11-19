@@ -6,10 +6,11 @@ import { parseArgs } from "node:util";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { debug, errorSummary, isDebug } from "@cloudgear/debug";
 import { createDnsDriver, type DnsProvider } from "@cloudgear/dns";
-import { decodeConfig, type CloudgearConfig } from "./config/schema";
+import { decodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/schema";
 import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { gcpDrivers } from "./deploy/gcp";
+import { httpFor } from "./deploy/gcp/http";
 import type { StorageLike } from "./deploy/gcp/storage";
 import { neonApiKey, neonDrivers } from "./deploy/neon";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
@@ -527,7 +528,7 @@ async function drivers(actions: PlannedAction[], config: CloudgearConfig, config
 
 const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags) => Promise<Drivers>> = {
   aws: awsDeployers,
-  gcp: async (_config, _configPath, _region, tags) => {
+  gcp: async (config, configPath, region, tags) => {
     const { Storage } = await import("@google-cloud/storage");
     const { GoogleAuth } = await import("google-auth-library");
     const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
@@ -540,28 +541,22 @@ const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, re
       defaultProject: () => auth.getProjectId(),
       labels: tags,
       log: (message) => console.log(`cloudgear: ${message}`),
+      functions: {
+        http: httpFor(auth),
+        // Precedence: router option, then --region, then the environment.
+        region: config.region || region || process.env.GOOGLE_CLOUD_REGION || process.env.CLOUDSDK_COMPUTE_REGION,
+        sleep: (ms) => Bun.sleep(ms),
+        ...bundleReaders(path.dirname(configPath)),
+      },
     });
   },
   neon: async () => neonDrivers({ apiKey: neonApiKey(), log: (message) => console.log(`cloudgear: ${message}`) }),
 };
 
-async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {
-  // Precedence: router option, then --region, then environment.
-  const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
-  debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });
-  if (!resolvedRegion) throw new Error("Set the router's region option, --region or AWS_REGION to deploy");
-  const configDir = path.dirname(configPath);
+// Reads a function's bundle and the files it includes, checking them against the config's hash.
+function bundleReaders(configDir: string): { readBundle: (fn: FunctionSpec) => Uint8Array; readIncluded: (fn: FunctionSpec) => { name: string; data: Uint8Array }[] } {
   const verified = new Map<string, { name: string; data: Uint8Array }[]>();
-  // Credentials are read when the first record is written.
-  if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") {
-    console.warn("warning: CLOUDGEAR_DNS_DRIVER=memory is set; no real DNS records will be written");
-  }
-  return awsDrivers({
-    region: resolvedRegion,
-    tags,
-    dns: async (provider, zone, token) =>
-      createDnsDriver(provider as DnsProvider, zone, token ? { token: await readSecretRef(token, resolvedRegion) } : undefined),
-    log: (message) => console.log(`cloudgear: ${message}`),
+  return {
     readBundle: (fn) => {
       const file = path.resolve(configDir, fn.bundle.path);
       const filesDir = path.join(path.dirname(file), INCLUDED_DIR);
@@ -578,6 +573,26 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
       if (!files) throw new Error(`${fn.physical_name}: its bundle has not been verified yet`);
       return files;
     },
+  };
+}
+
+async function awsDeployers(config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags): Promise<Drivers> {
+  // Precedence: router option, then --region, then environment.
+  const resolvedRegion = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+  debug("cli", "region", { fromConfig: config.region, flag: region, env: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION, resolved: resolvedRegion });
+  if (!resolvedRegion) throw new Error("Set the router's region option, --region or AWS_REGION to deploy");
+  const configDir = path.dirname(configPath);
+  // Credentials are read when the first record is written.
+  if (process.env.CLOUDGEAR_DNS_DRIVER === "memory") {
+    console.warn("warning: CLOUDGEAR_DNS_DRIVER=memory is set; no real DNS records will be written");
+  }
+  return awsDrivers({
+    region: resolvedRegion,
+    tags,
+    dns: async (provider, zone, token) =>
+      createDnsDriver(provider as DnsProvider, zone, token ? { token: await readSecretRef(token, resolvedRegion) } : undefined),
+    log: (message) => console.log(`cloudgear: ${message}`),
+    ...bundleReaders(configDir),
   });
 }
 

@@ -882,11 +882,11 @@ in `src/providers.ts` hold each provider's types, defaults, permission
 mapping, option keys and reserved environment names.
 
 What exists today: the config, `generate` (a Cloud Functions HTTP adapter
-bundles the functions) and `plan` handle several providers, and GCP has a
-deployer for buckets (see Google Cloud below). Nothing else on GCP deploys yet,
-so `apply` stops before changing anything when the plan holds a type no driver
-handles (for example `@gcp.CloudFunction`), and a CDN, an API domain or a
-schedule needs a provider that supports it (AWS). Access from a function to a
+bundles the functions) and `plan` handle several providers, and GCP has
+deployers for buckets and functions (see Google Cloud below). Nothing else on
+GCP deploys yet, so `apply` stops before changing anything when the plan holds a
+type no driver handles, and a CDN, an API domain or a schedule needs a provider
+that supports it (AWS). Access from a function to a
 store of another provider is not provisioned yet: `generate` warns, and the
 function gets no credentials for the store. A mechanism (a stored key, workload
 identity federation, a signed URL) registers under
@@ -899,8 +899,8 @@ callers before it runs; the router's API domain needs provider `aws`.
 
 ## Google Cloud
 
-GCP support is partial. Only buckets deploy so far; the rest is planned, one
-resource at a time.
+GCP support is partial. Buckets and functions deploy so far; the rest is
+planned, one resource at a time.
 
 - **Credentials.** cloudgear uses your Application Default Credentials and never
   stores or prints a key. Run `gcloud auth application-default login` (or point
@@ -930,8 +930,51 @@ resource at a time.
   created is deleted only if it is empty, and never has its objects removed.
 - **Permissions.** The identity needs `storage.buckets.create`, `get`, `update`
   and `delete` (for example `roles/storage.admin` on the project).
-- **Tested against fakes only.** The deployer is tested against a stand-in for
-  Google's official storage client, not against real GCP.
+- **Functions.** `new FunctionRouter("gcp", { region: "us-central1", project: "my-project-123" })`
+  deploys each function as a 2nd-generation Cloud Function (Node.js 22). `region`
+  is a GCP region; `project` is optional and resolves as above.
+  - Each function runs as its own service account, `cg-<function id>`, which
+    cloudgear creates. A service account that already exists is used and is not
+    deleted with the function.
+  - The code is uploaded through Cloud Functions' own upload URL, so no bucket
+    is needed. Google builds it, which takes minutes; `apply` waits up to 10
+    minutes. If it gives up, the deploy is left running: run `apply` again and it
+    picks that function up (cloudgear recognizes its own functions by their
+    labels) instead of starting another. A function named like yours that
+    cloudgear did not deploy is never touched; adopt it with `cloudgear import`.
+  - `authenticated: "none"` lets anyone with the URL call it. 2nd-generation
+    functions run on Cloud Run, so cloudgear grants `allUsers` the invoker role
+    on both the function and its Cloud Run service (an organization policy can
+    forbid that). `authenticated: "iam"` leaves it private; cloudgear grants no
+    caller, and the router's `invoker` list, which holds AWS principals, is not
+    used on GCP.
+  - Function options: `project`, `max_instances` (once set it cannot be removed,
+    only changed), and `env.<NAME>` variables. A route's own `options` MUST NOT set
+    `project` when the router does. Memory and timeout follow the provider
+    defaults (256 MiB, 60 s).
+  - Only the function's own code and settings are managed. **A function does not
+    get access to any bucket yet**; granting a function's service account access
+    to a GCS bucket comes next, so until then a GCP function cannot read or write
+    the buckets in the same config. Schedules, a CDN and an API domain are not
+    available on GCP.
+  - Before the first `apply`, enable the Cloud Functions, Cloud Build, Artifact
+    Registry and Cloud Run APIs in the project. cloudgear does not enable APIs.
+  - The identity needs to create and delete functions and service accounts and
+    to act as the new service account (for example `roles/cloudfunctions.admin`,
+    `roles/iam.serviceAccountAdmin` and `roles/iam.serviceAccountUser`).
+  - Removing a function deletes it and the service account cloudgear made. When a
+    build fails outright, the function and the service account made for it are
+    removed again, unless the function could not be removed, in which case the
+    account stays because the function still uses it. A timeout or a passing error
+    cleans up nothing, so the next `apply` can resume.
+- **Tested against fakes only.** The deployers are tested against stand-ins for
+  Google's storage client and for the Cloud Functions and IAM calls, not against
+  real GCP. The Cloud Functions field names and routes come from Google's own
+  proto definitions. Things I could not verify: the service account
+  creation call, the Cloud Run IAM route and the invoker role used for public
+  access (`roles/cloudfunctions.invoker` and `roles/run.invoker`), and the exact
+  text of Google's errors while a new service account propagates. The first real
+  `apply` is the real test.
 
 ## `@cloudgear/core`
 
@@ -2109,6 +2152,9 @@ Where each moving part lives, since several are called across packages:
 | `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
 | `gcpDrivers`, `resolveProject`, `labelsFrom` | `src/deploy/gcp/index.ts` | `src/cli.ts` |
 | GCS bucket driver | `src/deploy/gcp/storage.ts` | `gcpDrivers` |
+| Cloud Functions driver | `src/deploy/gcp/functions.ts` | `gcpDrivers` |
+| `httpFor`, `GcpApiError` (authenticated Google API calls) | `src/deploy/gcp/http.ts` | the GCP deployers |
+| `resolveOutputReferences` | `src/deploy/environment.ts` | the Lambda and Cloud Functions drivers |
 | `Registry` | `packages/registry/index.ts` | apps; `src/analyze/app.ts` |
 | ECR repository driver | `src/deploy/aws/ecr.ts` | `awsDrivers` |
 | `Stream` | `packages/stream/index.ts` | apps; `src/analyze/app.ts` |
@@ -2132,7 +2178,7 @@ Where each moving part lives, since several are called across packages:
 
 ## Status
 
-Early draft. `aws` has the deploy drivers; `gcp` deploys buckets only so far (see Google Cloud and Hybrid clouds);
+Early draft. `aws` has the deploy drivers; `gcp` deploys buckets and functions so far (see Google Cloud and Hybrid clouds);
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has any number of

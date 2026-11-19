@@ -1,4 +1,5 @@
 import type { Drivers } from "../apply";
+import { functionDriver, type FunctionDeps } from "./functions";
 import { gcsDriver, type StorageLike } from "./storage";
 
 export interface GcpDeps {
@@ -10,6 +11,8 @@ export interface GcpDeps {
   labels?: Record<string, string>;
   log: (message: string) => void;
   env?: Record<string, string | undefined>;
+  // Present when the functions can deploy.
+  functions?: FunctionDeps;
 }
 
 // Resolves the project a resource lives in: its own option, then GOOGLE_CLOUD_PROJECT, then the credentials'.
@@ -47,5 +50,5 @@ export function labelsFrom(tags: Record<string, string> | undefined, resource: s
 }
 
 export function gcpDrivers(deps: GcpDeps): Drivers {
-  return { "@gcp.GCS": gcsDriver(deps) };
+  return { "@gcp.GCS": gcsDriver(deps), ...(deps.functions ? { "@gcp.CloudFunction": functionDriver(deps, deps.functions) } : {}) };
 }

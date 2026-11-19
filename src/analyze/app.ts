@@ -899,7 +899,9 @@ function analyzeEntry(entryPath: string): AppModel {
   const router = routers[0]!;
   const provider = stringLiteral(router.getArguments()[0], `${where(router)}: FunctionRouter provider`);
   const authenticated = readAuthenticated(router.getArguments()[1], where(router));
-  const routerRegion = readRegion(router.getArguments()[1], `${where(router)}: FunctionRouter`);
+  const routerRegion = readRegion(router.getArguments()[1], `${where(router)}: FunctionRouter`, provider);
+  const routerProject = readStringOption(router.getArguments()[1], "project", `${where(router)}: FunctionRouter options`);
+  if (routerProject !== undefined && provider !== "gcp") throw new Error(`${where(router)}: the project option is for GCP routers; it is not used with provider "${provider}"`);
   if (authenticated === "none") {
     warnings.push(`${where(router)}: authenticated is "none"; deployed functions can be invoked by anyone with their URL`);
   }
@@ -913,7 +915,7 @@ function analyzeEntry(entryPath: string): AppModel {
   const routerPolicies = readPolicyOption(router.getArguments()[1], `${where(router)}: FunctionRouter`);
   const routerNetwork = readNetworkOption(router.getArguments()[1], where(router));
   const routerNetworkKeys = Object.keys(routerNetwork);
-  const routerFunctionOptions = mergeNetwork(readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`), routerNetwork, where(router));
+  const routerFunctionOptions = withProject(mergeNetwork(readOptionsMap(router.getArguments()[1], "functionOptions", `${where(router)}: FunctionRouter`), routerNetwork, where(router)), routerProject, where(router));
   const routeOptionsOf = new Map<AnalyzedFunction, { options?: Record<string, string>; at: string }>();
   const extrasOf = new Map<AnalyzedFunction, { key: string; at: string }>();
   const responseKindOf = (prop: Node): "helper" | "writer" | undefined => {
@@ -1011,8 +1013,8 @@ function analyzeEntry(entryPath: string): AppModel {
   for (const fn of functions.values()) {
     fn.secrets = uniqueSecrets([...routerSecrets, ...fn.secrets]);
     fn.policies = uniquePolicies([...routerPolicies, ...fn.policies]);
-    const overridden = routerNetworkKeys.find((key) => fn.options?.[key] !== undefined);
-    if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router's network already sets; change the network instead`);
+    const overridden = [...routerNetworkKeys, ...(routerProject !== undefined ? ["project"] : [])].find((key) => fn.options?.[key] !== undefined);
+    if (overridden) throw new Error(`${where(router)}: the route options of "${fn.name}" set ${overridden}, which the router already sets; change it on the router instead`);
     const merged: Record<string, string> = { ...routerFunctionOptions, ...fn.options };
     // A function that uses a cache runs in the cache's network, unless it already runs in that same one.
     for (const cacheName of fn.caches) {
@@ -1854,9 +1856,16 @@ function readRouteOptions(options: Node | undefined, at: string, callerFile: str
 
 const REGION = /^[a-z]{2,5}(-[a-z]+)+-\d$/;
 
-function readRegion(options: Node | undefined, at: string): string | undefined {
+const GCP_REGION = /^[a-z]+-[a-z]+[0-9]+$/;
+
+function readRegion(options: Node | undefined, at: string, provider = "aws"): string | undefined {
   const region = readStringOption(options, "region", `${at} options`);
-  if (region !== undefined && !REGION.test(region)) throw new Error(`${at}: "${region}" is not an AWS region such as "eu-west-1"`);
+  if (region === undefined) return region;
+  if (provider === "gcp") {
+    if (!GCP_REGION.test(region)) throw new Error(`${at}: "${region}" is not a GCP region such as "us-central1"`);
+  } else if (!REGION.test(region)) {
+    throw new Error(`${at}: "${region}" is not an AWS region such as "eu-west-1"`);
+  }
   return region;
 }
 
@@ -1903,6 +1912,12 @@ function readStringArrayOption(options: Node | undefined, name: string, at: stri
   if (!value) return undefined;
   if (!Node.isArrayLiteralExpression(value)) throw new Error(`${at}: ${name} must be an array of strings`);
   return value.getElements().map((item) => configString(item, `${at}: ${name}`, setupEnv));
+}
+
+function withProject(options: Record<string, string> | undefined, project: string | undefined, at: string): Record<string, string> | undefined {
+  if (project === undefined) return options;
+  if (options?.project !== undefined) throw new Error(`${at}: give the project option or functionOptions.project, not both`);
+  return { ...options, project };
 }
 
 function mergeNetwork(options: Record<string, string> | undefined, network: Record<string, string>, at: string): Record<string, string> | undefined {

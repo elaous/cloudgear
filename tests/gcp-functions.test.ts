@@ -4,12 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { analyzeApp } from "../src/analyze/app";
 import { adoptEntries } from "../src/deploy/adopt";
-import { apply, type Drivers } from "../src/deploy/apply";
+import { apply, incompleteSpec, type Drivers } from "../src/deploy/apply";
 import { gcpDrivers } from "../src/deploy/gcp";
 import { serviceAccountIdFor } from "../src/deploy/gcp/functions";
+import { desiredGrants, grantId, rolesFor } from "../src/deploy/gcp/grants";
 import { GcpApiError, httpFor, toApiError, type GcpHttp } from "../src/deploy/gcp/http";
+import type { StorageLike } from "../src/deploy/gcp/storage";
 import { plan } from "../src/deploy/plan";
-import { stateKey } from "../src/deploy/state";
+import { stateKey, type StateEntry } from "../src/deploy/state";
 import { gcpFunctionIdFor } from "../src/names";
 import { validateOptions } from "../src/providers";
 import type { CloudgearConfig } from "../src/config/schema";
@@ -38,7 +40,7 @@ interface Live {
 
 const OWNED = { cloudgear_resource: "foo", "cloudgear_managed-by": "cloudgear", cloudgear_service_account: "created" };
 
-function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; propagationFailures?: number; polls?: number; functions?: Record<string, Partial<Live>>; neverFinish?: boolean; failOn?: (method: string, url: string) => Error | undefined } = {}) {
+function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; propagationFailures?: number; polls?: number; functions?: Record<string, Partial<Live>>; neverFinish?: boolean; failOn?: (method: string, url: string) => Error | undefined; failSetPolicy?: (bucket: string) => Error | undefined } = {}) {
   const calls: { method: string; url: string; body?: any }[] = [];
   const uploads: { url: string; headers: Record<string, string>; text: string }[] = [];
   const sleeps: number[] = [];
@@ -124,19 +126,51 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
       uploads.push({ url, headers, text: Buffer.from(data).toString("latin1") });
     },
   };
+  const policies = new Map<string, { bindings: { role: string; members: string[]; condition?: { title?: string; expression: string } }[]; etag: string; version?: number }>();
+  const storage = (): StorageLike => ({
+    async createBucket(name) {
+      calls.push({ method: "BUCKET", url: `create ${name}` });
+      policies.set(name, { bindings: [], etag: "1" });
+      return [{}];
+    },
+    bucket(name) {
+      return {
+        iam: {
+          async getPolicy() {
+            calls.push({ method: "BUCKET", url: `get ${name}` });
+            const found = policies.get(name);
+            if (!found) throw Object.assign(new Error("bucket not found"), { code: 404 });
+            return [JSON.parse(JSON.stringify(found))];
+          },
+          async setPolicy(policy) {
+            calls.push({ method: "BUCKET", url: `set ${name}`, body: JSON.parse(JSON.stringify(policy)) });
+            const injected = opts.failSetPolicy?.(name);
+            if (injected) throw injected;
+            policies.set(name, JSON.parse(JSON.stringify(policy)));
+            return {};
+          },
+        },
+        async getMetadata() {
+          return [{ location: "US" }];
+        },
+        async setMetadata() {},
+        async delete() {
+          policies.delete(name);
+        },
+      };
+    },
+  });
   const logs: string[] = [];
   const build = (region: string | null = "us-central1"): Drivers =>
     gcpDrivers({
-      storage: () => {
-        throw new Error("unused");
-      },
+      storage,
       defaultProject: async () => undefined,
-      labels: { "cloudgear:project": "app" },
+      labels: { "cloudgear:project": "app", "cloudgear:managed-by": "cloudgear" },
       log: (m) => void logs.push(m),
       env: {},
       functions: { http, region: region ?? undefined, readBundle: () => new TextEncoder().encode("export const handler = () => {};"), readIncluded: () => [{ name: "dist/index.html", data: new TextEncoder().encode("<html>") }], sleep: async (ms) => void sleeps.push(ms) },
     });
-  return { calls, uploads, sleeps, accounts, live, logs, drivers: build(), build };
+  return { calls, uploads, sleeps, accounts, live, logs, policies, drivers: build(), build };
 }
 
 const spec = (overrides: Record<string, unknown> = {}) => fn({ type: "@gcp.CloudFunction", physical_name: "app-foo", runtime: "nodejs22", timeout_s: 60, permission: [], env: [{ key: "GREETING", value: "hi" }], options: { project: "my-proj-123" }, ...overrides });
@@ -201,7 +235,7 @@ describe("cloud functions driver", () => {
     expect(google.live.get(NAME)!.invokers).toEqual(["allUsers"]);
     expect(google.live.get(NAME)!.runInvokers).toEqual(["allUsers"]);
     expect(google.live.get(NAME)!.labels).toMatchObject({ cloudgear_service_account: "created" });
-    expect(state.entries[KEY]!.outputs).toEqual({ name: NAME, url: "https://app-foo-abc-uc.a.run.app", project: "my-proj-123", region: "us-central1", service_account: SA, service_account_created: "true" });
+    expect(state.entries[KEY]!.outputs).toEqual({ name: NAME, url: "https://app-foo-abc-uc.a.run.app", project: "my-proj-123", region: "us-central1", service_account: SA, service_account_created: "true", bucket_grants: "[]" });
     expect(plan(configWith(), state).every((a) => a.op === "noop")).toBe(true);
   });
 
@@ -400,6 +434,225 @@ describe("cloud functions driver", () => {
     expect(existing.calls.every((c) => c.method === "GET")).toBe(true);
     expect(await fakeGoogle().drivers["@gcp.CloudFunction"]!.adopt!(entry!, { entry: () => undefined })).toBeUndefined();
     await expect(fakeGoogle({ functions: { [NAME]: { state: "FAILED" } } }).drivers["@gcp.CloudFunction"]!.adopt!(entry!, { entry: () => undefined })).rejects.toThrow(/is FAILED: build failed/);
+  });
+});
+
+const BUCKET = { name: "assets", type: "@gcp.GCS", physical_name: "assets", dry: false, source: "setup.ts:1", options: { project: "my-proj-123" } };
+const MEMBER = `serviceAccount:${SA}`;
+const withAccess = (permission: { resource: string; path: string; action: string[] }[], overrides: Record<string, unknown> = {}): CloudgearConfig =>
+  baseConfig({
+    provider: "gcp",
+    resource: [BUCKET],
+    function: [spec({ permission, env: [{ key: "CLOUDGEAR_BLOB_ASSETS", value_from: "assets" }], ...overrides })],
+    authenticated: "iam",
+  });
+const READ = { resource: "assets", path: "", action: ["storage.objects.get", "storage.objects.list"] };
+const bindingsOf = (google: ReturnType<typeof fakeGoogle>) => google.policies.get("assets")!.bindings;
+
+describe("bucket access", () => {
+  test("roles are the smallest set that covers the permissions", () => {
+    expect(rolesFor(["storage.objects.get"])).toEqual(["roles/storage.objectViewer"]);
+    expect(rolesFor(["storage.objects.get", "storage.objects.list"])).toEqual(["roles/storage.objectViewer"]);
+    expect(rolesFor(["storage.objects.create"])).toEqual(["roles/storage.objectCreator"]);
+    expect(rolesFor(["storage.objects.get", "storage.objects.create"])).toEqual(["roles/storage.objectViewer", "roles/storage.objectCreator"]);
+    expect(rolesFor(["storage.objects.get", "storage.objects.delete"])).toEqual(["roles/storage.objectUser"]);
+    expect(() => rolesFor(["storage.buckets.delete"])).toThrow(/No GCS role covers storage.buckets.delete/);
+    expect(desiredGrants([{ type: "@aws.S3", physical_name: "other", path: "", actions: ["s3:GetObject"] }])).toEqual([]);
+    expect(() => desiredGrants([{ type: "@gcp.GCS", physical_name: "assets", path: 'a"b', actions: ["storage.objects.get"] }])).toThrow(/characters a GCS access condition cannot hold/);
+  });
+
+  test("the function's service account is given read access to its bucket, and the grant is recorded", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    expect(bindingsOf(google)).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+    expect(state.entries[KEY]!.outputs.bucket_grants).toBe(JSON.stringify([grantId({ bucket: "assets", role: "roles/storage.objectViewer", path: "" })]));
+    expect(google.calls.map((c) => c.url).indexOf("create assets")).toBeLessThan(google.calls.findIndex((c) => c.url.includes("functionId=")));
+    expect(plan(withAccess([READ]), state).every((a) => a.op === "noop")).toBe(true);
+  });
+
+  test("a path limits the grant to object names under it, with a condition", async () => {
+    const google = fakeGoogle();
+    await applyConfig(withAccess([{ resource: "assets", path: "reports/", action: ["storage.objects.get"] }]), emptyState(), google.drivers);
+    expect(bindingsOf(google)).toEqual([
+      { role: "roles/storage.objectViewer", members: [MEMBER], condition: { title: "cloudgear: reports/", expression: 'resource.name.startsWith("projects/_/buckets/assets/objects/reports/")' } },
+    ]);
+    expect(google.policies.get("assets")!.version).toBe(3);
+  });
+
+  test("a change in permissions adds what is new and removes only what cloudgear granted", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    // Somebody else's access, on the same role and on another one.
+    const policy = google.policies.get("assets")!;
+    policy.bindings[0]!.members.push("user:someone@example.com");
+    policy.bindings.push({ role: "roles/storage.admin", members: ["group:admins@example.com"] });
+    await applyConfig(withAccess([{ resource: "assets", path: "", action: ["storage.objects.create"] }]), state, google.drivers);
+    expect(bindingsOf(google)).toEqual([
+      { role: "roles/storage.objectViewer", members: ["user:someone@example.com"] },
+      { role: "roles/storage.admin", members: ["group:admins@example.com"] },
+      { role: "roles/storage.objectCreator", members: [MEMBER] },
+    ]);
+    expect(JSON.parse(state.entries[KEY]!.outputs.bucket_grants!)).toEqual(["assets|roles/storage.objectCreator|"]);
+  });
+
+  test("deleting the function takes back its access before deleting its account", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    google.calls.length = 0;
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    expect(bindingsOf(google)).toEqual([]);
+    const order = google.calls.map((c) => `${c.method} ${c.url}`);
+    expect(order.indexOf("BUCKET set assets")).toBeGreaterThan(-1);
+    expect(order.indexOf("BUCKET set assets")).toBeLessThan(order.findIndex((c) => c.startsWith("DELETE https://iam.googleapis.com")));
+  });
+
+  test("a bucket that is already gone does not block the delete", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    google.policies.clear();
+    await applyConfig(empty(), state, google.drivers);
+    expect(state.entries).toEqual({});
+  });
+
+  test("a function with no bucket permissions never touches a bucket policy", async () => {
+    const google = fakeGoogle();
+    await applyConfig(configWith(), emptyState(), google.drivers);
+    expect(google.calls.some((c) => c.method === "BUCKET")).toBe(false);
+  });
+
+  test("a deploy picked up later, and a function brought in by import, still get their access", async () => {
+    const resumed = fakeGoogle({ functions: { [NAME]: { labels: OWNED, deploying: 1 } }, existingAccounts: [SA] });
+    await applyConfig(withAccess([READ]), emptyState(), resumed.drivers);
+    expect(bindingsOf(resumed)).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+
+    const imported = fakeGoogle({ functions: { [NAME]: {} } });
+    const state = emptyState();
+    const config = withAccess([READ]);
+    imported.policies.set("assets", { bindings: [], etag: "1" });
+    await adoptEntries(plan(config, state).filter((a) => a.type === "@gcp.CloudFunction"), state, imported.drivers, () => true);
+    await applyConfig(config, state, imported.drivers);
+    expect(bindingsOf(imported)).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("a policy that changed in between is retried, and a service account that is not usable yet is waited for", async () => {
+    let writes = 0;
+    const conflict = fakeGoogle({ failSetPolicy: () => (writes++ === 0 ? Object.assign(new Error("etag mismatch"), { code: 412 }) : undefined) });
+    await applyConfig(withAccess([READ]), emptyState(), conflict.drivers);
+    expect(bindingsOf(conflict)).toHaveLength(1);
+
+    let failures = 2;
+    const propagating = fakeGoogle({ failSetPolicy: () => (failures-- > 0 ? Object.assign(new Error(`Service account ${SA} does not exist`), { code: 400 }) : undefined) });
+    await applyConfig(withAccess([READ]), emptyState(), propagating.drivers);
+    expect(bindingsOf(propagating)).toHaveLength(1);
+    expect(propagating.sleeps.filter((ms) => ms === 4000)).toHaveLength(2);
+  });
+
+  test("a function on the project's default service account is refused clearly, without waiting", async () => {
+    const google = fakeGoogle({ functions: { [NAME]: { email: "" } } });
+    const state = emptyState();
+    const config = withAccess([READ]);
+    await adoptEntries(plan(config, state).filter((a) => a.type === "@gcp.CloudFunction"), state, google.drivers, () => true);
+    await expect(applyConfig(config, state, google.drivers)).rejects.toThrow(/runs as the project's default service account, and cloudgear will not give that shared account bucket access/);
+    expect(google.calls.some((c) => c.url === "set assets")).toBe(false);
+    expect(google.sleeps.filter((ms) => ms === 4000)).toEqual([]);
+  });
+
+  test("a permission that cannot be granted fails before anything is deployed", async () => {
+    const google = fakeGoogle();
+    await expect(applyConfig(withAccess([{ resource: "assets", path: 'a"b', action: ["storage.objects.get"] }]), emptyState(), google.drivers)).rejects.toThrow(/characters a GCS access condition cannot hold/);
+    expect(google.calls.some((c) => c.url.includes("functions") || c.url.includes("serviceAccounts"))).toBe(false);
+    expect(google.live.size).toBe(0);
+  });
+
+  test("a delete finishes even when the bucket's policy cannot be edited", async () => {
+    let denied = false;
+    const google = fakeGoogle({ failSetPolicy: () => (denied ? Object.assign(new Error("permission denied"), { code: 403 }) : undefined) });
+    const state = emptyState();
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    denied = true;
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    expect(state.entries[KEY]).toBeUndefined();
+    expect(google.accounts.size).toBe(0);
+    expect(google.logs.some((m) => m.includes(`could not remove ${SA} from assets (permission denied); remove it by hand`))).toBe(true);
+  });
+
+  test("grants made before a failure stay recorded, and the next apply finishes the rest", async () => {
+    const OTHER = { ...BUCKET, name: "other", physical_name: "other" };
+    let failOther = false;
+    const google = fakeGoogle({ failSetPolicy: (bucket) => (failOther && bucket === "other" ? new Error("quota exceeded") : undefined) });
+    const state = emptyState();
+    const config = (permission: { resource: string; path: string; action: string[] }[]) =>
+      baseConfig({ provider: "gcp", resource: [BUCKET, OTHER], function: [spec({ permission, env: [{ key: "CLOUDGEAR_BLOB_ASSETS", value_from: "assets" }] })], authenticated: "iam" });
+    await applyConfig(config([READ]), state, google.drivers);
+    failOther = true;
+    await expect(applyConfig(config([READ, { ...READ, resource: "other" }]), state, google.drivers)).rejects.toThrow(/quota exceeded/);
+    expect(JSON.parse(state.entries[KEY]!.outputs.bucket_grants!)).toEqual(["assets|roles/storage.objectViewer|"]);
+    failOther = false;
+    await applyConfig(config([READ, { ...READ, resource: "other" }]), state, google.drivers);
+    expect(JSON.parse(state.entries[KEY]!.outputs.bucket_grants!)).toEqual(["assets|roles/storage.objectViewer|", "other|roles/storage.objectViewer|"]);
+    expect(google.policies.get("other")!.bindings).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("a binding that was already there is not recorded, so it is never taken away", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    google.policies.get("assets")!.bindings.push({ role: "roles/storage.objectViewer", members: [MEMBER] });
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    expect(state.entries[KEY]!.outputs.bucket_grants).toBe("[]");
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    expect(bindingsOf(google)).toEqual([{ role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("the policy that was read is written back with its etag, version and other conditional bindings", async () => {
+    const google = fakeGoogle();
+    const state = emptyState();
+    await applyConfig(baseConfig({ provider: "gcp", resource: [BUCKET], function: [] }), state, google.drivers);
+    const other = { role: "roles/storage.objectViewer", members: ["user:temp@example.com"], condition: { title: "temporary", expression: "request.time < timestamp('2030-01-01T00:00:00Z')" } };
+    google.policies.get("assets")!.bindings.push(other);
+    await applyConfig(withAccess([READ]), state, google.drivers);
+    const written = google.calls.find((c) => c.url === "set assets")!.body;
+    expect(written.etag).toBe("1");
+    expect(written.version).toBe(3);
+    expect(bindingsOf(google)).toEqual([other, { role: "roles/storage.objectViewer", members: [MEMBER] }]);
+  });
+
+  test("a long path gives a condition title within Google's length", async () => {
+    const google = fakeGoogle();
+    await applyConfig(withAccess([{ resource: "assets", path: `${"é".repeat(60)}😀${"x".repeat(60)}/`, action: ["storage.objects.get"] }]), emptyState(), google.drivers);
+    const title = bindingsOf(google)[0]!.condition!.title!;
+    expect([...title].length).toBeLessThanOrEqual(100);
+    expect(title.startsWith("cloudgear: ")).toBe(true);
+  });
+
+  test("a store on another provider is not granted anything", async () => {
+    const google = fakeGoogle();
+    const config = baseConfig({
+      provider: "gcp",
+      resource: [{ name: "archive", type: "@aws.S3", physical_name: "archive", dry: true, source: "a.ts:1" }],
+      function: [spec({ permission: [{ resource: "archive", path: "", action: ["s3:GetObject"] }], env: [] })],
+      authenticated: "iam",
+    });
+    await applyConfig(config, emptyState(), google.drivers);
+    expect(google.calls.some((c) => c.method === "BUCKET")).toBe(false);
+  });
+});
+
+describe("a function left half applied", () => {
+  test("is planned as an update even though no field differs, so it is finished", () => {
+    const config = configWith();
+    const desired = plan(config, emptyState()).find((a) => a.type === "@gcp.CloudFunction")!.desired!;
+    const state = emptyState();
+    const entry: StateEntry = { kind: "function", type: "@gcp.CloudFunction", name: "foo", physical_name: "app-foo", spec: incompleteSpec(desired.spec), outputs: { name: NAME }, deps: [] };
+    state.entries[KEY] = entry;
+    const [action] = plan(config, state);
+    expect(action).toMatchObject({ op: "update", changes: ["incomplete"] });
+    entry.spec = desired.spec;
+    expect(plan(config, state)[0]!.op).toBe("noop");
   });
 });
 

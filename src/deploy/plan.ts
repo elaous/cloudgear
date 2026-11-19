@@ -427,6 +427,8 @@ export function plan(config: CloudgearConfig, state: State): PlannedAction[] {
       actions.push({ ...base, op: "replace", changes: ["physical_name"] });
     } else {
       const changes = entry.kind === "function" ? functionChanges(current.spec, entry.spec) : specChanged(current.spec, entry.spec) ? ["spec"] : [];
+      // A function left half applied holds the spec it was meant to reach, so no field differs; it still has to be finished.
+      if (entry.kind === "function" && !changes.length && current.spec.incomplete) changes.push("incomplete");
       if (entry.refresh && entry.deps.some((dep) => churned.has(dep))) changes.push("dependencies");
       actions.push({ ...base, op: changes.length ? "update" : "noop", changes });
     }

@@ -23,7 +23,13 @@ const factories = new Map<BlobProvider, BlobDriverFactory>();
 
 const BUILT_IN: Partial<Record<BlobProvider, () => Promise<BlobDriverFactory>>> = {
   aws: async () => (await import("./drivers/s3")).createS3Driver,
+  gcp: async () => (await import("./drivers/gcs")).createGcsDriver,
 };
+
+// The driver that ships with cloudgear for a provider, if there is one.
+export async function builtInBlobDriver(provider: BlobProvider): Promise<BlobDriverFactory | undefined> {
+  return BUILT_IN[provider]?.();
+}
 
 export function registerBlobDriver(provider: BlobProvider, factory: BlobDriverFactory): void {
   factories.set(provider, factory);
@@ -35,9 +41,8 @@ export async function createBlobDriver(provider: BlobProvider, location: string,
   }
   let factory = factories.get(provider);
   if (!factory) {
-    const load = BUILT_IN[provider];
-    if (!load) throw new Error(`No blob driver for provider "${provider}"; register one with registerBlobDriver()`);
-    factory = await load();
+    factory = await builtInBlobDriver(provider);
+    if (!factory) throw new Error(`No blob driver for provider "${provider}"; register one with registerBlobDriver()`);
     factories.set(provider, factory);
   }
   return factory(location, options);

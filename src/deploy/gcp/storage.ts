@@ -2,7 +2,17 @@ import type { Adopted, Driver } from "../apply";
 import { labelsFrom, resolveProject, type GcpDeps } from "./index";
 
 // The part of @google-cloud/storage this driver uses, so tests can stand in for it.
+export interface BucketPolicy {
+  bindings: { role: string; members: string[]; condition?: { title?: string; description?: string; expression: string } }[];
+  version?: number;
+  etag?: string;
+}
+
 export interface BucketLike {
+  iam: {
+    getPolicy(options?: { requestedPolicyVersion?: number }): Promise<[BucketPolicy, ...unknown[]]>;
+    setPolicy(policy: BucketPolicy): Promise<unknown>;
+  };
   getMetadata(): Promise<[Record<string, any>, ...unknown[]]>;
   setMetadata(metadata: Record<string, unknown>): Promise<unknown>;
   delete(): Promise<unknown>;

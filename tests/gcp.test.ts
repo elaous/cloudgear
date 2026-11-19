@@ -49,6 +49,7 @@ function fakeGcs(initial: Record<string, Partial<Bucket>> = {}, opts: { forbidde
       },
       bucket(name) {
         return {
+          iam: { getPolicy: async () => [{ bindings: [] }], setPolicy: async () => ({}) },
           async getMetadata() {
             calls.push({ project, op: "get", name });
             if (opts.forbidden?.includes(name)) throw new ApiError(403, "forbidden");

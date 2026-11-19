@@ -23,6 +23,7 @@ const factories = new Map<BlobProvider, BlobDriverFactory>();
 
 const BUILT_IN: Partial<Record<BlobProvider, () => Promise<BlobDriverFactory>>> = {
   aws: async () => (await import("./drivers/s3")).createS3Driver,
+  gcp: async () => (await import("./drivers/gcs")).createGcsDriver,
 };
 
 export function registerBlobDriver(provider: BlobProvider, factory: BlobDriverFactory): void {

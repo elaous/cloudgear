@@ -952,16 +952,26 @@ planned, one resource at a time.
     only changed), and `env.<NAME>` variables. A route's own `options` MUST NOT set
     `project` when the router does. Memory and timeout follow the provider
     defaults (256 MiB, 60 s).
-  - Only the function's own code and settings are managed. **A function does not
-    get access to any bucket yet**; granting a function's service account access
-    to a GCS bucket comes next, so until then a GCP function cannot read or write
-    the buckets in the same config. Schedules, a CDN and an API domain are not
-    available on GCP.
+  - **Bucket access.** A function can use the GCS buckets in the same config
+    (`new BlobStore("gcp", "gs://assets")`; `@cloudgear/blob` has a built-in GCS
+    driver that uses the function's own credentials). `apply` gives the
+    function's service account the roles its calls need on those buckets:
+    reading or listing gets `roles/storage.objectViewer`, writing
+    `roles/storage.objectCreator`, and deleting `roles/storage.objectUser`
+    (which also allows overwriting). A store with a path (`path: "reports/"`)
+    gets an IAM condition limiting the grant to object names under it, which
+    needs uniform bucket-level access (buckets cloudgear creates have it). Only
+    bindings cloudgear recorded are ever removed, so other people's access on the
+    same roles is left alone, and the grants are taken back before the service
+    account is deleted. A store on another provider is not granted anything.
+  - Schedules, a CDN and an API domain are not available on GCP.
   - Before the first `apply`, enable the Cloud Functions, Cloud Build, Artifact
     Registry and Cloud Run APIs in the project. cloudgear does not enable APIs.
   - The identity needs to create and delete functions and service accounts and
     to act as the new service account (for example `roles/cloudfunctions.admin`,
-    `roles/iam.serviceAccountAdmin` and `roles/iam.serviceAccountUser`).
+    `roles/iam.serviceAccountAdmin` and `roles/iam.serviceAccountUser`), and to
+    change the IAM policy of the buckets the functions use (for example
+    `roles/storage.admin`).
   - Removing a function deletes it and the service account cloudgear made. When a
     build fails outright, the function and the service account made for it are
     removed again, unless the function could not be removed, in which case the
@@ -972,9 +982,10 @@ planned, one resource at a time.
   real GCP. The Cloud Functions field names and routes come from Google's own
   proto definitions. Things I could not verify: the service account
   creation call, the Cloud Run IAM route and the invoker role used for public
-  access (`roles/cloudfunctions.invoker` and `roles/run.invoker`), and the exact
-  text of Google's errors while a new service account propagates. The first real
-  `apply` is the real test.
+  access (`roles/cloudfunctions.invoker` and `roles/run.invoker`), the exact
+  text of Google's errors while a new service account propagates, and whether an
+  IAM condition on `resource.name` also limits listing. The first real `apply` is
+  the real test.
 
 ## `@cloudgear/core`
 
@@ -2152,6 +2163,8 @@ Where each moving part lives, since several are called across packages:
 | `neonDrivers`, `neonApiKey` (Neon projects) | `src/deploy/neon/index.ts` | `src/cli.ts` |
 | `gcpDrivers`, `resolveProject`, `labelsFrom` | `src/deploy/gcp/index.ts` | `src/cli.ts` |
 | GCS bucket driver | `src/deploy/gcp/storage.ts` | `gcpDrivers` |
+| Bucket access for a function (`desiredGrants`, `changeGrant`) | `src/deploy/gcp/grants.ts` | the Cloud Functions driver |
+| GCS blob driver (runtime) | `packages/blob/drivers/gcs.ts` | `createBlobDriver("gcp", ...)` |
 | Cloud Functions driver | `src/deploy/gcp/functions.ts` | `gcpDrivers` |
 | `httpFor`, `GcpApiError` (authenticated Google API calls) | `src/deploy/gcp/http.ts` | the GCP deployers |
 | `resolveOutputReferences` | `src/deploy/environment.ts` | the Lambda and Cloud Functions drivers |

@@ -1,3 +1,5 @@
+export { NETWORK_FIELDS } from "./schema.gen";
+
 export type NetworkProvider = "aws";
 
 export interface NetworkOptions {

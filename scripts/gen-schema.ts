@@ -12,6 +12,7 @@ const GENERATED_HEADER = "// Generated from proto/ by scripts/gen-schema.ts; do 
 const TARGETS: Record<string, string> = {
   "cloudgear/v1/blob.proto": "packages/blob/schema.gen.ts",
   "cloudgear/v1/cache.proto": "packages/cache/schema.gen.ts",
+  "cloudgear/v1/network.proto": "packages/network/schema.gen.ts",
 };
 
 const snake = (name: string): string => name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
@@ -55,7 +56,7 @@ export function generate(): Map<string, string> {
     };
 
     const messageLines = (message: DescMessage): string[] => {
-      const lines: string[] = [];
+      const lines: string[] = [`export const ${snake(message.name)}_FIELDS = ${literal(message.fields.map((f) => f.name))} as const;`, ""];
       const ops = message.proto.options ? (getOption(message, operations) as { method: string; intents: number[] }[]) : [];
       if (ops.length) {
         lines.push(`export const ${snake(message.name)}_OPERATIONS = {`);

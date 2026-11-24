@@ -1,4 +1,6 @@
 import type { BlobAccess } from "@cloudgear/blob";
+import { CACHE_ENGINES, CACHE_SIZES } from "@cloudgear/cache";
+import type { NETWORK_FIELDS } from "@cloudgear/network";
 import type { CloudgearConfig } from "./config/schema";
 
 type OptionRule = (value: string) => string | undefined;
@@ -41,7 +43,7 @@ const idList =
     return ids.every((id) => pattern.test(id)) && new Set(ids).size === ids.length ? undefined : `must be a comma-separated list of distinct ${label} ids`;
   };
 
-const NETWORK_RULES: Record<string, OptionRule> = {
+const NETWORK_RULES: Record<(typeof NETWORK_FIELDS)[number], OptionRule> = {
   vpc: (v) => (v === "default" || /^vpc-[0-9a-f]{8,17}$/.test(v) ? undefined : 'must be "default" or a VPC id such as "vpc-0123456789abcdef0"'),
   subnets: idList(/^subnet-[0-9a-f]{8,17}$/, 16, "subnet"),
   security_groups: idList(/^sg-[0-9a-f]{8,17}$/, 5, "security group"),
@@ -80,8 +82,8 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       },
       "@aws.ElastiCache": {
         keys: {
-          engine: oneOf("valkey", "redis", "memcached"),
-          size: oneOf("micro", "small", "medium"),
+          engine: oneOf(...CACHE_ENGINES),
+          size: oneOf(...CACHE_SIZES),
           allow_destroy: oneOf("true"),
           ...NETWORK_RULES,
         },

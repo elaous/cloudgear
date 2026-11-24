@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// What a call on a resource needs permission to do.
+enum Intent {
+  INTENT_UNSPECIFIED = 0;
+  INTENT_READ = 1;
+  INTENT_WRITE = 2;
+  INTENT_DELETE = 3;
+  INTENT_LIST = 4;
+}
+
+// A method of the resource's runtime class and the intents calling it implies.
+message Operation {
+  string method = 1;
+  repeated Intent intents = 2;
+}
+
+extend google.protobuf.FieldOptions {
+  // Changing it after creation means replacing the resource.
+  bool immutable = 50001;
+  // Applied when the field is unset.
+  string default_value = 50002;
+}
+
+extend google.protobuf.EnumValueOptions {
+  // The name used in setup.ts; the enum value name is not.
+  string name = 50021;
+}
+
+extend google.protobuf.MessageOptions {
+  // `destroy` refuses it unless allow_destroy is set.
+  bool protected = 50011;
+  // Methods whose calls the analyzer turns into permissions.
+  repeated Operation operations = 50012;
+}

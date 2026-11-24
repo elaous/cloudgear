@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "cloudgear/v1/network.proto";
+import "cloudgear/v1/options.proto";
+
+enum CacheProvider {
+  CACHE_PROVIDER_UNSPECIFIED = 0;
+  CACHE_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+}
+
+enum CacheEngine {
+  CACHE_ENGINE_UNSPECIFIED = 0;
+  CACHE_ENGINE_VALKEY = 1 [(cloudgear.v1.name) = "valkey"];
+  CACHE_ENGINE_REDIS = 2 [(cloudgear.v1.name) = "redis"];
+  CACHE_ENGINE_MEMCACHED = 3 [(cloudgear.v1.name) = "memcached"];
+}
+
+enum CacheSize {
+  CACHE_SIZE_UNSPECIFIED = 0;
+  CACHE_SIZE_MICRO = 1 [(cloudgear.v1.name) = "micro"];
+  CACHE_SIZE_SMALL = 2 [(cloudgear.v1.name) = "small"];
+  CACHE_SIZE_MEDIUM = 3 [(cloudgear.v1.name) = "medium"];
+}
+
+message Cache {
+  option (cloudgear.v1.protected) = true;
+
+  CacheProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+  optional CacheEngine engine = 3 [(cloudgear.v1.default_value) = "valkey"];
+  optional CacheSize size = 4 [(cloudgear.v1.default_value) = "micro"];
+  Network network = 5;
+  bool allow_destroy = 6;
+}

@@ -1,9 +1,10 @@
-export type CacheProvider = "aws";
-export type CacheEngine = "valkey" | "redis" | "memcached";
-export type CacheSize = "micro" | "small" | "medium";
+import { CACHE_ENGINES, CACHE_PROVIDERS, CACHE_SIZES } from "./schema.gen";
 
-export const CACHE_ENGINES: readonly CacheEngine[] = ["valkey", "redis", "memcached"];
-export const CACHE_SIZES: readonly CacheSize[] = ["micro", "small", "medium"];
+export { CACHE_DEFAULTS, CACHE_ENGINES, CACHE_PROVIDERS, CACHE_SIZES } from "./schema.gen";
+
+export type CacheProvider = (typeof CACHE_PROVIDERS)[number];
+export type CacheEngine = (typeof CACHE_ENGINES)[number];
+export type CacheSize = (typeof CACHE_SIZES)[number];
 
 export interface CacheOptions {
   // Default "valkey"; "redis" and "valkey" speak the same protocol.
@@ -29,10 +30,10 @@ export class Cache {
     readonly name: string,
     readonly options: CacheOptions = {},
   ) {
-    if (provider !== "aws") throw new Error(`Cache provider "${provider}" is not supported yet (supported: aws)`);
+    if (!CACHE_PROVIDERS.includes(provider)) throw new Error(`Cache provider "${provider}" is not supported yet (supported: ${CACHE_PROVIDERS.join(", ")})`);
     assertCacheName(name);
-    if (options.engine !== undefined && !CACHE_ENGINES.includes(options.engine)) throw new Error(`Unsupported cache engine "${options.engine}" (supported: ${CACHE_ENGINES.join(", ")})`);
-    if (options.size !== undefined && !CACHE_SIZES.includes(options.size)) throw new Error(`Unsupported cache size "${options.size}" (supported: ${CACHE_SIZES.join(", ")})`);
+    if (options.engine !== undefined && !(CACHE_ENGINES as readonly string[]).includes(options.engine)) throw new Error(`Unsupported cache engine "${options.engine}" (supported: ${CACHE_ENGINES.join(", ")})`);
+    if (options.size !== undefined && !(CACHE_SIZES as readonly string[]).includes(options.size)) throw new Error(`Unsupported cache size "${options.size}" (supported: ${CACHE_SIZES.join(", ")})`);
   }
 
   static envVarFor(name: string): string {

@@ -7,6 +7,7 @@ import {
   type BlobDriver,
   type BlobProvider,
 } from "./driver";
+import { BLOB_STORE_OPERATIONS } from "./schema.gen";
 
 export { assertS3BucketName, registerBlobDriver, parseBlobUri, S3_BUCKET_NAME, URI_SCHEMES } from "./driver";
 export type { BlobData, BlobDriver, BlobDriverFactory, BlobDriverOptions, BlobProvider } from "./driver";
@@ -20,15 +21,7 @@ export interface BlobClients {
 
 export type BlobAccess = "read" | "write" | "delete" | "list";
 
-export const BLOB_OPERATIONS = {
-  get: ["read"],
-  getText: ["read"],
-  getJson: ["read"],
-  exists: ["read", "list"],
-  put: ["write"],
-  delete: ["delete"],
-  list: ["list"],
-} as const satisfies Partial<Record<keyof BlobStore, readonly BlobAccess[]>>;
+export const BLOB_OPERATIONS = BLOB_STORE_OPERATIONS satisfies Partial<Record<keyof BlobStore, readonly BlobAccess[]>>;
 
 export interface BlobStoreOptions {
   path?: string;

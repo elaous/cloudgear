@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "cloudgear/v1/options.proto";
+
+enum BlobProvider {
+  BLOB_PROVIDER_UNSPECIFIED = 0;
+  BLOB_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+  BLOB_PROVIDER_GCP = 2 [(cloudgear.v1.name) = "gcp"];
+  BLOB_PROVIDER_AZURE = 3 [(cloudgear.v1.name) = "azure"];
+}
+
+message BlobStore {
+  option (cloudgear.v1.operations) = {
+    method: "get"
+    intents: [INTENT_READ]
+  };
+  option (cloudgear.v1.operations) = {
+    method: "getText"
+    intents: [INTENT_READ]
+  };
+  option (cloudgear.v1.operations) = {
+    method: "getJson"
+    intents: [INTENT_READ]
+  };
+  option (cloudgear.v1.operations) = {
+    method: "exists"
+    intents: [
+      INTENT_READ,
+      INTENT_LIST
+    ]
+  };
+  option (cloudgear.v1.operations) = {
+    method: "put"
+    intents: [INTENT_WRITE]
+  };
+  option (cloudgear.v1.operations) = {
+    method: "delete"
+    intents: [INTENT_DELETE]
+  };
+  option (cloudgear.v1.operations) = {
+    method: "list"
+    intents: [INTENT_LIST]
+  };
+
+  BlobProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+  // Key prefix inside the bucket.
+  optional string path = 3;
+  optional string region = 4 [(cloudgear.v1.immutable) = true];
+  map<string, string> options = 5;
+}

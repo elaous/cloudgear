@@ -22,7 +22,12 @@ A pull request MUST pass these:
 bun test              # the full suite (about 5 minutes)
 bun run typecheck     # tsc --noEmit
 bun run lint          # biome lint .
+bunx buf lint         # the schema in proto/
 ```
+
+The constants in `packages/*/schema.gen.ts` come from `proto/`. After you edit a
+`.proto` file, run `bun run schema` and commit the result; `tests/schema.test.ts`
+fails when they disagree.
 
 `bun test tests/<file>.test.ts` runs one file while you work. Add or update a
 test for every behavior change; fixtures for the analyzer live in

@@ -6,6 +6,8 @@ export const CACHE_ENGINES = ["valkey","redis","memcached"] as const;
 
 export const CACHE_SIZES = ["micro","small","medium"] as const;
 
+export const CACHE_FIELDS = ["provider","name","engine","size","network","allow_destroy"] as const;
+
 export const CACHE_DEFAULTS = {
   engine: "valkey",
   size: "micro",

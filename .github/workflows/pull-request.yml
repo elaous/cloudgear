@@ -29,6 +29,10 @@ jobs:
         run: bun run lint
       - name: Lint schema
         run: bunx buf lint
+      - name: Check schema compatibility
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bunx buf breaking --against ".git#branch=origin/$BASE_REF"
       - name: Select tests
         id: select
         shell: bash

@@ -1,4 +1,5 @@
 import { DescribeSecurityGroupsCommand, DescribeSubnetsCommand, DescribeVpcsCommand } from "@aws-sdk/client-ec2";
+import { NETWORK_FIELDS } from "@cloudgear/network";
 import type { SendClient } from "./index";
 
 export interface ResolvedNetwork {
@@ -14,7 +15,7 @@ export interface NetworkDeps {
 }
 
 // The option keys a network is stored under, on functions and on caches.
-export const NETWORK_KEYS = ["vpc", "subnets", "security_groups"] as const;
+export const NETWORK_KEYS = NETWORK_FIELDS;
 
 const notFound = (err: unknown, prefix: string): boolean => ((err as { name?: string }).name ?? "").startsWith(prefix);
 

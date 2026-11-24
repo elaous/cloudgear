@@ -2,6 +2,8 @@
 
 export const BLOB_PROVIDERS = ["aws","gcp","azure"] as const;
 
+export const BLOB_STORE_FIELDS = ["provider","name","path","region","options"] as const;
+
 export const BLOB_STORE_OPERATIONS = {
   get: ["read"],
   getText: ["read"],

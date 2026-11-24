@@ -32,7 +32,7 @@ extend google.protobuf.EnumValueOptions {
 }
 
 extend google.protobuf.MessageOptions {
-  // `destroy` refuses it unless allow_destroy is set.
+  // Documentation only; the drivers enforce protection.
   bool protected = 50011;
   // Methods whose calls the analyzer turns into permissions.
   repeated Operation operations = 50012;

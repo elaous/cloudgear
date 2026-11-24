@@ -15,13 +15,14 @@ const TARGETS: Record<string, string> = {
 };
 
 const snake = (name: string): string => name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+const plural = (name: string): string => (/(S|X|Z|CH|SH)$/.test(name) ? `${name}ES` : name.endsWith("Y") ? `${name.slice(0, -1)}IES` : `${name}S`);
 const literal = (value: unknown): string => JSON.stringify(value);
 
 export function generate(): Map<string, string> {
   const dir = mkdtempSync(join(tmpdir(), "cloudgear-schema-"));
   try {
     const image = join(dir, "image.binpb");
-    execFileSync(join(ROOT, "node_modules/.bin/buf"), ["build", "--exclude-source-info", "-o", image], { cwd: ROOT, stdio: ["ignore", "ignore", "inherit"] });
+    execFileSync("bunx", ["--bun", "buf", "build", "--exclude-source-info", "-o", image], { cwd: ROOT, stdio: ["ignore", "ignore", "inherit"] });
     const registry = createFileRegistry(fromBinary(FileDescriptorSetSchema, readFileSync(image)));
     const extension = (name: string) => {
       const found = registry.getExtension(`cloudgear.v1.${name}`);
@@ -38,11 +39,19 @@ export function generate(): Map<string, string> {
       if (!hasOption(value, valueName)) throw new Error(`${value.name} has no (cloudgear.v1.name) option`);
       return getOption(value, valueName) as string;
     };
-    const intentName = (number: number): string => intent.values.find((v) => v.number === number)!.name.replace(/^INTENT_/, "").toLowerCase();
+    const intentName = (number: number): string => {
+      const value = intent.values.find((v) => v.number === number);
+      if (!value || number === 0) throw new Error(`operation uses an unspecified or unknown intent (${number})`);
+      return value.name.replace(/^INTENT_/, "").toLowerCase();
+    };
 
+    const enumNames = new Map<string, string[]>();
     const enumLines = (enumeration: DescEnum): string[] => {
-      const names = enumeration.values.filter((v) => v.number !== 0).map((v) => valueNameOf(enumeration, v.number));
-      return [`export const ${snake(enumeration.name)}S = ${literal(names)} as const;`, ""];
+      const [unspecified, ...rest] = enumeration.values;
+      if (unspecified?.number !== 0 || !unspecified.name.endsWith("_UNSPECIFIED")) throw new Error(`${enumeration.name} must start with a *_UNSPECIFIED = 0 value`);
+      const names = rest.map((v) => valueNameOf(enumeration, v.number));
+      enumNames.set(enumeration.name, names);
+      return [`export const ${plural(snake(enumeration.name))} = ${literal(names)} as const;`, ""];
     };
 
     const messageLines = (message: DescMessage): string[] => {
@@ -56,7 +65,12 @@ export function generate(): Map<string, string> {
       const defaults = message.fields.filter((f) => hasOption(f, defaultValue));
       if (defaults.length) {
         lines.push(`export const ${snake(message.name)}_DEFAULTS = {`);
-        for (const field of defaults) lines.push(`  ${field.localName}: ${literal(getOption(field, defaultValue))},`);
+        for (const field of defaults) {
+        const value = getOption(field, defaultValue) as string;
+        const allowed = field.enum ? enumNames.get(field.enum.name) : undefined;
+        if (allowed && !allowed.includes(value)) throw new Error(`${message.name}.${field.name} defaults to "${value}", not one of ${allowed.join(", ")}`);
+        lines.push(`  ${field.localName}: ${literal(value)},`);
+      }
         lines.push("} as const;", "");
       }
       return lines;
@@ -66,6 +80,7 @@ export function generate(): Map<string, string> {
     for (const [protoFile, target] of Object.entries(TARGETS)) {
       const file = registry.getFile(protoFile);
       if (!file) throw new Error(`${protoFile} is not in the schema`);
+      if (file.messages.some((m) => m.nestedEnums.length)) throw new Error(`${protoFile}: nested enums are not supported; declare them at the top level`);
       const body = [...file.enums.flatMap(enumLines), ...file.messages.flatMap(messageLines)];
       out.set(target, `${GENERATED_HEADER}\n${body.join("\n").trimEnd()}\n`);
     }

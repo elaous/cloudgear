@@ -1,10 +1,14 @@
-import { CACHE_ENGINES, CACHE_PROVIDERS, CACHE_SIZES } from "./schema.gen";
+import { CACHE_ENGINES as ENGINES, CACHE_PROVIDERS as PROVIDERS, CACHE_SIZES as SIZES } from "./schema.gen";
 
-export { CACHE_DEFAULTS, CACHE_ENGINES, CACHE_PROVIDERS, CACHE_SIZES } from "./schema.gen";
+export { CACHE_DEFAULTS } from "./schema.gen";
 
-export type CacheProvider = (typeof CACHE_PROVIDERS)[number];
-export type CacheEngine = (typeof CACHE_ENGINES)[number];
-export type CacheSize = (typeof CACHE_SIZES)[number];
+export type CacheProvider = (typeof PROVIDERS)[number];
+export type CacheEngine = (typeof ENGINES)[number];
+export type CacheSize = (typeof SIZES)[number];
+
+export const CACHE_PROVIDERS: readonly CacheProvider[] = PROVIDERS;
+export const CACHE_ENGINES: readonly CacheEngine[] = ENGINES;
+export const CACHE_SIZES: readonly CacheSize[] = SIZES;
 
 export interface CacheOptions {
   // Default "valkey"; "redis" and "valkey" speak the same protocol.
@@ -32,8 +36,8 @@ export class Cache {
   ) {
     if (!CACHE_PROVIDERS.includes(provider)) throw new Error(`Cache provider "${provider}" is not supported yet (supported: ${CACHE_PROVIDERS.join(", ")})`);
     assertCacheName(name);
-    if (options.engine !== undefined && !(CACHE_ENGINES as readonly string[]).includes(options.engine)) throw new Error(`Unsupported cache engine "${options.engine}" (supported: ${CACHE_ENGINES.join(", ")})`);
-    if (options.size !== undefined && !(CACHE_SIZES as readonly string[]).includes(options.size)) throw new Error(`Unsupported cache size "${options.size}" (supported: ${CACHE_SIZES.join(", ")})`);
+    if (options.engine !== undefined && !CACHE_ENGINES.includes(options.engine)) throw new Error(`Unsupported cache engine "${options.engine}" (supported: ${CACHE_ENGINES.join(", ")})`);
+    if (options.size !== undefined && !CACHE_SIZES.includes(options.size)) throw new Error(`Unsupported cache size "${options.size}" (supported: ${CACHE_SIZES.join(", ")})`);
   }
 
   static envVarFor(name: string): string {

@@ -1,4 +1,6 @@
-export type BlobProvider = "aws" | "gcp" | "azure";
+import type { BLOB_PROVIDERS } from "./schema.gen";
+
+export type BlobProvider = (typeof BLOB_PROVIDERS)[number];
 export type BlobData = string | Uint8Array;
 
 export interface BlobDriver {

@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+// Where a resource runs; unset means the default VPC.
+message Network {
+  optional string vpc = 1;
+  repeated string subnets = 2;
+  repeated string security_groups = 3;
+}

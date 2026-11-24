@@ -8,6 +8,7 @@ import {
   DescribeCacheClustersCommand,
   DescribeReplicationGroupsCommand,
 } from "@aws-sdk/client-elasticache";
+import { CACHE_DEFAULTS } from "@cloudgear/cache";
 import type { Adopted, Driver } from "../apply";
 import type { DesiredEntry } from "../plan";
 import { destroyAllowed, withoutAllowDestroy } from "../protect";
@@ -49,7 +50,7 @@ const named = (err: unknown, ...names: string[]): boolean => names.includes((err
 
 const wanted = (spec: Record<string, unknown>): Wanted => {
   const options = (spec.options ?? {}) as Record<string, string>;
-  return { engine: options.engine ?? "valkey", nodeType: NODE_TYPES[options.size ?? "micro"]! };
+  return { engine: options.engine ?? CACHE_DEFAULTS.engine, nodeType: NODE_TYPES[options.size ?? CACHE_DEFAULTS.size]! };
 };
 
 const networkOptions = (spec: Record<string, unknown>): Record<string, string> => {

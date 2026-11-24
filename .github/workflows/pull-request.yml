@@ -27,6 +27,8 @@ jobs:
         run: bun run typecheck
       - name: Lint
         run: bun run lint
+      - name: Lint schema
+        run: bunx buf lint
       - name: Select tests
         id: select
         shell: bash

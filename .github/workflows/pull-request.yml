@@ -32,7 +32,12 @@ jobs:
       - name: Check schema compatibility
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: bunx buf breaking --against ".git#branch=origin/$BASE_REF"
+        run: |
+          if git cat-file -e "origin/$BASE_REF:buf.yaml" 2>/dev/null; then
+            bunx buf breaking --against ".git#branch=origin/$BASE_REF"
+          else
+            echo "The base branch has no schema yet; nothing to compare."
+          fi
       - name: Select tests
         id: select
         shell: bash

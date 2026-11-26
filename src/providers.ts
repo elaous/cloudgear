@@ -1,4 +1,4 @@
-import type { BlobAccess } from "@cloudgear/blob";
+import { assertCorsRules, assertSiteFiles, type BlobAccess, type CorsMethod } from "@cloudgear/blob";
 import { CACHE_ENGINES, CACHE_SIZES } from "@cloudgear/cache";
 import type { NETWORK_FIELDS } from "@cloudgear/network";
 import type { CloudgearConfig } from "./config/schema";
@@ -43,6 +43,60 @@ const idList =
     return ids.every((id) => pattern.test(id)) && new Set(ids).size === ids.length ? undefined : `must be a comma-separated list of distinct ${label} ids`;
   };
 
+const parsedJson = (value: string): { ok: true; value: unknown } | { ok: false; reason: string } => {
+  try {
+    return { ok: true, value: JSON.parse(value) };
+  } catch {
+    return { ok: false, reason: "must be JSON" };
+  }
+};
+
+const jsonStrings =
+  (what: string): OptionRule =>
+  (value) => {
+    const parsed = parsedJson(value);
+    if (!parsed.ok) return parsed.reason;
+    return Array.isArray(parsed.value) && parsed.value.every((v) => typeof v === "string" && v !== "") ? undefined : `must be a JSON list of non-empty ${what}`;
+  };
+
+const CORS_RULE_KEYS = ["origins", "methods", "headers", "expose_headers", "max_age_seconds"];
+
+// Rules use the schema's snake_case keys.
+const corsRules: OptionRule = (value) => {
+  const parsed = parsedJson(value);
+  if (!parsed.ok) return parsed.reason;
+  if (!Array.isArray(parsed.value)) return "must be a JSON list of CORS rules";
+  const unknown = parsed.value.flatMap((r) => Object.keys(r ?? {})).find((key) => !CORS_RULE_KEYS.includes(key));
+  if (unknown) return `has a rule with the unknown key "${unknown}"`;
+  try {
+    assertCorsRules(
+      parsed.value.map((r: Record<string, unknown>) => ({
+        origins: r.origins as string[],
+        methods: r.methods as CorsMethod[],
+        ...(r.headers !== undefined ? { headers: r.headers as string[] } : {}),
+        ...(r.expose_headers !== undefined ? { exposeHeaders: r.expose_headers as string[] } : {}),
+        ...(r.max_age_seconds !== undefined ? { maxAgeSeconds: r.max_age_seconds as number } : {}),
+      })),
+      "cors",
+    );
+  } catch (err) {
+    return (err as Error).message.replace(/^cors: /, "");
+  }
+  return undefined;
+};
+
+const cacheControlRules: OptionRule = (value) => {
+  const parsed = parsedJson(value);
+  if (!parsed.ok) return parsed.reason;
+  if (!Array.isArray(parsed.value)) return "must be a JSON list of { match, value } rules";
+  try {
+    assertSiteFiles({ dir: "site", cacheControl: parsed.value as { match: string; value: string }[] }, "site_cache_control");
+  } catch (err) {
+    return (err as Error).message.replace(/^site_cache_control: files\./, "");
+  }
+  return undefined;
+};
+
 const NETWORK_RULES: Record<(typeof NETWORK_FIELDS)[number], OptionRule> = {
   vpc: (v) => (v === "default" || /^vpc-[0-9a-f]{8,17}$/.test(v) ? undefined : 'must be "default" or a VPC id such as "vpc-0123456789abcdef0"'),
   subnets: idList(/^subnet-[0-9a-f]{8,17}$/, 16, "subnet"),
@@ -60,7 +114,21 @@ export const WEB_ACL_ARN = /^arn:aws:wafv2:us-east-1:\d{12}:global\/webacl\/[\w-
 export const PROVIDERS: Record<string, ProviderProfile> = {
   aws: {
     options: {
-      "@aws.S3": { keys: { versioning: oneOf("true", "false") } },
+      "@aws.S3": {
+        keys: {
+          versioning: oneOf("true", "false"),
+          index_document: (v) => (/^[^/]{1,255}$/.test(v) ? undefined : 'must be a file name without "/"'),
+          error_document: (v) => (/^[^/][^\r\n]{0,1023}$/.test(v) ? undefined : 'must be a key that does not start with "/"'),
+          cors: corsRules,
+          site_dir: (v) => (v.length > 0 && v.length <= 4096 ? undefined : "must be a directory path"),
+          site_include: jsonStrings("globs"),
+          site_exclude: jsonStrings("globs"),
+          site_cache_control: cacheControlRules,
+          site_prune: oneOf("true"),
+          site_files_hash: (v) => (/^[0-9a-f]{64}$/.test(v) ? undefined : "must be a SHA-256 in hex"),
+          site_files_count: integerBetween(0, 10000),
+        },
+      },
       "@aws.Lambda": {
         keys: {
           tracing: oneOf("Active", "PassThrough"),

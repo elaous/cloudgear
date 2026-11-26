@@ -1,12 +1,23 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["tests/fixtures/router/secrets/*.ts", "tests/fixtures/router/events/*.ts", "tests/fixtures/router/types/*.ts", "tests/fixtures/router/policies/*.ts"],
+  "include": [
+    "tests/fixtures/router/secrets/*.ts",
+    "tests/fixtures/router/events/*.ts",
+    "tests/fixtures/router/types/*.ts",
+    "tests/fixtures/router/policies/*.ts",
+    "tests/fixtures/router/site/*.ts"
+  ],
   "exclude": [
     "node_modules",
     "tests/fixtures/router/secrets/computed-name.ts",
     "tests/fixtures/router/events/bad-trigger.ts",
     "tests/fixtures/router/events/not-a-trigger.ts",
     "tests/fixtures/router/policies/missing-json.ts",
-    "tests/fixtures/router/policies/named-import.ts"
+    "tests/fixtures/router/policies/named-import.ts",
+    "tests/fixtures/router/site/bad-cors.ts",
+    "tests/fixtures/router/site/bad-prune.ts",
+    "tests/fixtures/router/site/bad-cors-key.ts",
+    "tests/fixtures/router/site/bad-key.ts",
+    "tests/fixtures/router/site/bad-clash.ts"
   ]
 }

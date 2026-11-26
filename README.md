@@ -647,7 +647,7 @@ destroy, because ACM shares it between certificates for a domain.
 `cloudgear invalidate [path...]` clears a site CDN's cache (`/*` by default); the
 router's distribution is not offered. An app with several CDNs needs
 `--domain <cdn domain>` to say which one.
-Uploading the site's files is not part of cloudgear yet.
+Uploading the site's files is part of `BlobStoreWebSite`, below.
 
 Things that have not been checked against real services: all of the
 CloudFront, ACM, API Gateway, Route 53 and Gandi calls are tested against
@@ -708,6 +708,38 @@ The in-memory driver has no client, and `client()` throws there. The `aws` types
 Deployed functions find the physical store through the env var
 `BlobStore.envVarFor(name)` (`CLOUDGEAR_BLOB_<NAME>`), which `cloudgear
 generate` writes into the config and `BlobStore.location` reads.
+
+### Static websites: `BlobStoreWebSite`
+
+`BlobStoreWebSite` is a `BlobStore` that also serves a static website. Give it to a
+`CDN` as its `bucket`, as you would a `BlobStore`.
+
+```ts
+import { BlobStoreWebSite } from "@cloudgear/blob";
+
+const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
+  errorDocument: "404.html",
+  files: { dir: "./dist", exclude: ["**/*.map"], cacheControl: [{ match: "assets/**", value: "public, max-age=31536000, immutable" }] },
+  cors: [{ origins: [`https://web.${process.env.ENV_DOMAIN}`], methods: ["GET", "HEAD"], maxAgeSeconds: 3600 }],
+});
+```
+
+- `indexDocument` defaults to `index.html` and `errorDocument` is optional. Apply sets the
+  bucket's website configuration from them, and removes it if you drop both.
+- `cors` takes rules with `origins` (`"*"` or `https://example.com`, with at most one `*`
+  each), `methods` (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`), `headers`, `exposeHeaders` and
+  `maxAgeSeconds`. Apply replaces the bucket's CORS rules with them and removes them if you
+  drop `cors`.
+- `files` names the directory to upload (`./x` is relative to the setup file, any other path
+  to the project root) with `include` and `exclude` globs, `prune` and `cacheControl` rules
+  (the first matching glob wins). `generate` reads the directory, so build the site first,
+  and stores a hash of the files and their count in the config.
+- Everything is literal, as for `BlobStore`; strings may use environment variables as
+  elsewhere in `setup.ts`. The provider is `aws` for now.
+- A bucket you import is recorded and never changed, so its website and CORS settings are
+  not applied; the import says so.
+
+Not done yet: `apply` does not upload the files and refuses a `files` setting until it does.
 
 ### Scheduled functions
 

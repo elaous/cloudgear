@@ -20,7 +20,8 @@ import { Instance, type InstanceSize } from "@cloudgear/instance";
 import { Network } from "@cloudgear/network";
 import { Registry } from "@cloudgear/registry";
 import { Stream, type StreamMode } from "@cloudgear/stream";
-import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
+import { assertCorsRules, assertSiteFiles, assertWebSiteDocuments, BLOB_OPERATIONS, BLOB_STORE_WEB_SITE_DEFAULTS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider, type CorsMethod, type CorsRule } from "@cloudgear/blob";
+import { listSiteFiles, siteFilesHash } from "../deploy/site-files";
 import { DNS, DNS_PROVIDERS, type DnsProvider, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, SECRET_STORE_DEFAULTS, type SecretService } from "@cloudgear/secrets";
 import { ANY_METHOD, METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
@@ -34,6 +35,8 @@ export interface AnalyzedResource {
   region?: string;
   dry: boolean;
   options?: Record<string, string>;
+  // Absolute path of a website's directory; generate stores it relative to the config.
+  siteDir?: string;
   file: string;
   line: number;
 }
@@ -299,13 +302,22 @@ function analyzeEntry(entryPath: string): AppModel {
 
   const resourceByDecl = new Map<Node, Store>();
   const resources = new Map<string, AnalyzedResource>();
-  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/blob", "BlobStore"))) {
+  for (const expr of newExpressions.filter((e) => isClass(e, "@cloudgear/blob", "BlobStore") || isClass(e, "@cloudgear/blob", "BlobStoreWebSite"))) {
+    const isSite = isClass(expr, "@cloudgear/blob", "BlobStoreWebSite");
     const [providerArg, uriArg, optionsArg] = expr.getArguments();
     const provider = stringLiteral(providerArg, `${where(expr)}: BlobStore provider`);
     const uri = configString(uriArg, `${where(expr)}: BlobStore URI`, setupEnv);
     const storePath = readStorePath(optionsArg, where(expr));
     const storeRegion = readRegion(optionsArg, `${where(expr)}: BlobStore`);
-    const storeOptions = readOptionsMap(optionsArg, "options", `${where(expr)}: BlobStore`);
+    let storeOptions = readOptionsMap(optionsArg, "options", `${where(expr)}: BlobStore`);
+    let siteDir: string | undefined;
+    if (isSite) {
+      const site = readWebSiteOptions(optionsArg, provider, where(expr), expr.getSourceFile().getFilePath());
+      const clash = Object.keys(site.options).find((key) => storeOptions?.[key] !== undefined);
+      if (clash) throw new Error(`${where(expr)}: options.${clash} is set by the web site settings; remove it from options`);
+      storeOptions = { ...storeOptions, ...site.options };
+      siteDir = site.dir;
+    }
     const decl = expr.getParentIfKind(SyntaxKind.VariableDeclaration);
     if (!decl || decl.getInitializer() !== expr) {
       throw new Error(`${where(expr)}: assign new BlobStore(...) to a variable so its usage can be traced`);
@@ -316,6 +328,7 @@ function analyzeEntry(entryPath: string): AppModel {
       provider,
       region: storeRegion,
       options: storeOptions,
+      ...(siteDir ? { siteDir } : {}),
       dry: readDirectives(decl, where(expr)).has("dry"),
       file: relative(expr.getSourceFile().getFilePath()),
       line: expr.getStartLineNumber(),
@@ -1762,6 +1775,95 @@ function readCdnOptions(optionsArg: Node | undefined, at: string): Record<string
     options = { ...options, [option]: text };
   }
   return options;
+}
+
+const SITE_OPTION_KEYS = new Set(["path", "region", "options", "driver", "indexDocument", "errorDocument", "files", "cors"]);
+const SITE_FILES_KEYS = new Set(["dir", "include", "exclude", "prune", "cacheControl"]);
+const CORS_KEYS = new Set(["origins", "methods", "headers", "exposeHeaders", "maxAgeSeconds"]);
+const CACHE_RULE_KEYS = new Set(["match", "value"]);
+
+function assertKnownKeys(node: Node, allowed: Set<string>, what: string, at: string): void {
+  if (!Node.isObjectLiteralExpression(node)) throw new Error(`${at}: ${what} must be an object literal`);
+  for (const prop of node.getProperties()) {
+    if (Node.isSpreadAssignment(prop)) throw new Error(`${at}: spread in ${what} cannot be analyzed`);
+    const key = propName(prop);
+    if (key === undefined || !allowed.has(key)) throw new Error(`${at}: unknown ${what} option "${key ?? prop.getText()}"; use ${[...allowed].join(", ")}`);
+  }
+}
+
+function objectElements(node: Node, what: string, at: string): Node[] {
+  if (!Node.isArrayLiteralExpression(node)) throw new Error(`${at}: ${what} must be an array of object literals`);
+  return node.getElements().map((element) => {
+    const unwrapped = unwrapLiteral(element);
+    if (!Node.isObjectLiteralExpression(unwrapped)) throw new Error(`${at}: each ${what} entry must be an object literal`);
+    return unwrapped;
+  });
+}
+
+// Settings of a BlobStoreWebSite as string options, plus the directory it uploads.
+function readWebSiteOptions(options: Node | undefined, provider: string, at: string, callerFile: string): { options: Record<string, string>; dir?: string } {
+  if (provider !== "aws") throw new Error(`${at}: BlobStoreWebSite supports provider "aws" for now`);
+  if (options) assertKnownKeys(options, SITE_OPTION_KEYS, "BlobStoreWebSite", at);
+  const out: Record<string, string> = {};
+  const indexDocument = readStringOption(options, "indexDocument", at) ?? BLOB_STORE_WEB_SITE_DEFAULTS.indexDocument;
+  const errorDocument = readStringOption(options, "errorDocument", at);
+  assertWebSiteDocuments({ indexDocument, errorDocument }, at);
+  out.index_document = indexDocument;
+  if (errorDocument !== undefined) out.error_document = errorDocument;
+
+  const corsNode = optionValue(options, "cors", at);
+  if (corsNode) {
+    const rules: CorsRule[] = objectElements(corsNode, "cors", at).map((rule) => {
+      assertKnownKeys(rule, CORS_KEYS, "cors rule", at);
+      const headers = readStringArrayOption(rule, "headers", `${at}: cors`);
+      const exposeHeaders = readStringArrayOption(rule, "exposeHeaders", `${at}: cors`);
+      const maxAgeSeconds = readNumberOption(rule, "maxAgeSeconds", `${at}: cors`);
+      return {
+        origins: readStringArrayOption(rule, "origins", `${at}: cors`) ?? [],
+        methods: (readStringArrayOption(rule, "methods", `${at}: cors`) ?? []) as CorsMethod[],
+        ...(headers ? { headers } : {}),
+        ...(exposeHeaders ? { exposeHeaders } : {}),
+        ...(maxAgeSeconds !== undefined ? { maxAgeSeconds } : {}),
+      };
+    });
+    assertCorsRules(rules, at);
+    out.cors = JSON.stringify(
+      rules.map((r) => ({
+        origins: r.origins,
+        methods: r.methods,
+        ...(r.headers ? { headers: r.headers } : {}),
+        ...(r.exposeHeaders ? { expose_headers: r.exposeHeaders } : {}),
+        ...(r.maxAgeSeconds !== undefined ? { max_age_seconds: r.maxAgeSeconds } : {}),
+      })),
+    );
+  }
+
+  const filesNode = optionValue(options, "files", at);
+  if (!filesNode) return { options: out };
+  assertKnownKeys(filesNode, SITE_FILES_KEYS, "files", at);
+  const filesAt = `${at}: files`;
+  const dirText = readStringOption(filesNode, "dir", filesAt);
+  const include = readStringArrayOption(filesNode, "include", filesAt) ?? [];
+  const exclude = readStringArrayOption(filesNode, "exclude", filesAt) ?? [];
+  const prune = readBooleanOption(filesNode, "prune", filesAt);
+  const cacheNode = optionValue(filesNode, "cacheControl", filesAt);
+  const cacheControl = cacheNode
+    ? objectElements(cacheNode, "cacheControl", filesAt).map((rule) => {
+        assertKnownKeys(rule, CACHE_RULE_KEYS, "cacheControl rule", filesAt);
+        return { match: readStringOption(rule, "match", `${filesAt}.cacheControl`) ?? "", value: readStringOption(rule, "value", `${filesAt}.cacheControl`) ?? "" };
+      })
+    : [];
+  assertSiteFiles({ dir: dirText ?? "", include, exclude, ...(prune !== undefined ? { prune } : {}), cacheControl }, at);
+  const dir = resolveRoutePath(dirText!, callerFile);
+  const listed = listSiteFiles(dir, { include, exclude, cacheControl });
+  if (listed.length === 0) throw new Error(`${filesAt}: ${dirText} holds no files after include and exclude`);
+  out.site_files_hash = siteFilesHash(listed);
+  out.site_files_count = String(listed.length);
+  if (include.length) out.site_include = JSON.stringify(include);
+  if (exclude.length) out.site_exclude = JSON.stringify(exclude);
+  if (prune) out.site_prune = "true";
+  if (cacheControl.length) out.site_cache_control = JSON.stringify(cacheControl);
+  return { options: out, dir };
 }
 
 function readOptionsMap(options: Node | undefined, name: string, at: string): Record<string, string> | undefined {

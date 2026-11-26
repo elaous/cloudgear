@@ -10,6 +10,8 @@ import type { DnsOptions } from "@cloudgear/dns";
 import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CertOptions } from "@cloudgear/cdn";
 import { CERT_FIELDS } from "@cloudgear/cdn";
+import type { SecretStoreOptions } from "@cloudgear/secrets";
+import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
 
 const camel = (name: string): string => name.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 
@@ -30,9 +32,14 @@ describe("schema", () => {
 
   // Fields that are not options: the provider, the name and positional arguments.
   test("Dns and Cert options name the same fields as the schema", () => {
-    const dns: Required<Omit<DnsOptions, "token" | "driver">> = { zone: "" };
+    const dns: Required<Omit<DnsOptions, "driver">> = { zone: "", token: "" };
     expect(Object.keys(dns).sort()).toEqual(DNS_FIELDS.filter((f) => !["provider", "name", "domain"].includes(f)).sort());
     const cert: Required<Omit<CertOptions, "driver">> = { region: "", options: {} };
     expect(Object.keys(cert).sort()).toEqual(CERT_FIELDS.filter((f) => !["provider", "name", "dns"].includes(f)).sort());
+  });
+
+  test("SecretStore options name the same fields as the schema", () => {
+    const store: Required<Omit<SecretStoreOptions, "driver">> = { service: "ssm", region: "", kmsKey: "" };
+    expect(Object.keys(store).sort()).toEqual(SECRET_STORE_FIELDS.filter((f) => !["provider", "name"].includes(f)).map(camel).sort());
   });
 });

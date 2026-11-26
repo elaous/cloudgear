@@ -1,4 +1,6 @@
-export type DnsProvider = "gandi" | "aws";
+import type { DNS_PROVIDERS } from "./schema.gen";
+
+export type DnsProvider = (typeof DNS_PROVIDERS)[number];
 export type DnsRecordType = "CNAME" | "TXT" | "A" | "AAAA";
 
 export interface DnsRecord {

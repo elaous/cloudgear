@@ -1,4 +1,6 @@
-export type CertProvider = "aws";
+import type { CERT_PROVIDERS } from "./schema.gen";
+
+export type CertProvider = (typeof CERT_PROVIDERS)[number];
 export type CertState = "none" | "pending" | "issued" | "failed";
 
 export interface CertInfo {

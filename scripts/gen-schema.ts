@@ -13,6 +13,8 @@ const TARGETS: Record<string, string> = {
   "cloudgear/v1/blob.proto": "packages/blob/schema.gen.ts",
   "cloudgear/v1/cache.proto": "packages/cache/schema.gen.ts",
   "cloudgear/v1/network.proto": "packages/network/schema.gen.ts",
+  "cloudgear/v1/dns.proto": "packages/dns/schema.gen.ts",
+  "cloudgear/v1/cert.proto": "packages/cdn/schema.gen.ts",
 };
 
 const snake = (name: string): string => name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();

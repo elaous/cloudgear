@@ -31,6 +31,10 @@ describe("BlobStoreWebSite", () => {
     expect(() => site({ indexDocument: "a/b.html" })).toThrow('indexDocument must be a file name without "/"');
     expect(() => site({ indexDocument: "" })).toThrow("indexDocument");
     expect(() => site({ errorDocument: "/404.html" })).toThrow("errorDocument must be a key that does not start with");
+    expect(() => site({ errorDocument: "a\nb.html" })).toThrow("errorDocument");
+    expect(() => site({ errorDocument: "x".repeat(1025) })).toThrow("errorDocument");
+    expect(() => site({ indexDocument: "x".repeat(256) })).toThrow("indexDocument");
+    expect(site({ indexDocument: "x".repeat(255), errorDocument: "e".repeat(1024) }).indexDocument).toHaveLength(255);
   });
 
   test("rejects bad CORS rules", () => {
@@ -52,6 +56,10 @@ describe("BlobStoreWebSite", () => {
     const rule = { origins: ["https://example.com"], methods: ["GET" as const] };
     expect(() => site({ cors: [{ ...rule, origins: ["https://"] }] })).toThrow('origin "https://"');
     expect(() => site({ cors: [{ ...rule, origins: ["https://*"] }] })).toThrow('origin "https://*"');
+    for (const bad of ["://example.com", "1http://example.com", "ht tp://example.com", "https://exa mple.com", "https://example.com/path", "https://example.com ", "ftp//example.com"]) {
+      expect(() => site({ cors: [{ ...rule, origins: [bad] }] }), bad).toThrow("must be \"*\" or look like");
+    }
+    expect(site({ cors: [{ ...rule, origins: ["HTTPS://Example.com:8443", "chrome-extension://abc", "https://*.example.com"] }] }).cors).toHaveLength(1);
     for (const bad of ["./index.html", "/index.html", "!*.map"]) {
       expect(() => site({ files: { dir: "./d", exclude: [bad] } })).toThrow(`files.exclude "${bad}" must not start with`);
       expect(() => site({ files: { dir: "./d", include: [bad] } })).toThrow("files.include");

@@ -41,4 +41,6 @@ extend google.protobuf.MessageOptions {
   bool protected = 50011;
   // Methods whose calls the analyzer turns into permissions.
   repeated Operation operations = 50012;
+  // A subtype of this message, such as "BlobStore"; it lists its own fields.
+  string extends = 50013;
 }

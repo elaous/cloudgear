@@ -11,7 +11,7 @@ import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CertOptions } from "@cloudgear/cdn";
 import { CERT_FIELDS } from "@cloudgear/cdn";
 import type { BlobStoreOptions } from "@cloudgear/blob";
-import { BLOB_STORE_FIELDS } from "@cloudgear/blob";
+import { BLOB_STORE_FIELDS, BLOB_STORE_WEB_SITE_FIELDS } from "@cloudgear/blob";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
 import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
 
@@ -49,5 +49,11 @@ describe("schema", () => {
   test("BlobStore options name the same fields as the schema", () => {
     const store: Required<Omit<BlobStoreOptions, "driver">> = { path: "", region: "", options: {} };
     expect(Object.keys(store).sort()).toEqual(BLOB_STORE_FIELDS.filter((f) => !["provider", "name", "bucket"].includes(f)).sort());
+  });
+
+  // BlobStoreWebSite extends BlobStore: it repeats the parent's fields and adds its own.
+  test("BlobStoreWebSite lists every BlobStore field", () => {
+    for (const field of BLOB_STORE_FIELDS) expect([...BLOB_STORE_WEB_SITE_FIELDS]).toContain(field);
+    expect([...BLOB_STORE_WEB_SITE_FIELDS].slice(0, BLOB_STORE_FIELDS.length)).toEqual([...BLOB_STORE_FIELDS]);
   });
 });

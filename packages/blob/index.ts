@@ -7,7 +7,7 @@ import {
   type BlobDriver,
   type BlobProvider,
 } from "./driver";
-import { BLOB_STORE_OPERATIONS, BLOB_STORE_WEB_SITE_DEFAULTS, CORS_METHODS } from "./schema.gen";
+import { BLOB_STORE_OPERATIONS } from "./schema.gen";
 
 export {
   BLOB_PROVIDERS,
@@ -44,114 +44,6 @@ export interface BlobStoreOptions {
 }
 
 export type ProviderOptions = Record<string, string | number | boolean>;
-
-export type CorsMethod = (typeof CORS_METHODS)[number];
-
-export interface CorsRule {
-  // "*" or an origin like "https://example.com".
-  origins: string[];
-  methods: CorsMethod[];
-  headers?: string[];
-  exposeHeaders?: string[];
-  maxAgeSeconds?: number;
-}
-
-export interface CacheControlRule {
-  // A glob such as "assets/**", over paths in the directory.
-  match: string;
-  // The Cache-Control header value.
-  value: string;
-}
-
-export interface SiteFiles {
-  // "./x" is relative to the setup file; else the project root.
-  dir: string;
-  include?: string[];
-  exclude?: string[];
-  // Deletes uploaded files that left the directory; off by default.
-  prune?: boolean;
-  // The first matching rule wins.
-  cacheControl?: CacheControlRule[];
-}
-
-export interface BlobStoreWebSiteOptions extends BlobStoreOptions {
-  // A file name without "/"; default "index.html".
-  indexDocument?: string;
-  errorDocument?: string;
-  // Literal only; read by generate.
-  files?: SiteFiles;
-  // Literals only; read by generate.
-  cors?: CorsRule[];
-}
-
-const ORIGIN = /^([a-z][a-z0-9+.-]*):\/\/([^\s/]+)$/i;
-
-// "*", or scheme://host where the host has a character besides "*".
-function isOrigin(origin: string): boolean {
-  if (origin === "*") return true;
-  const match = ORIGIN.exec(origin);
-  return match !== null && match[2]!.replaceAll("*", "") !== "";
-}
-const MAX_CORS_RULES = 100;
-const MAX_AGE_SECONDS = 31_536_000;
-
-function assertStrings(value: unknown, what: string, at: string): asserts value is string[] {
-  if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || v === "")) throw new Error(`${at}: ${what} must be a list of non-empty strings`);
-}
-
-export function assertCorsRules(rules: readonly CorsRule[], at: string): void {
-  if (rules.length === 0 || rules.length > MAX_CORS_RULES) throw new Error(`${at}: cors takes 1 to ${MAX_CORS_RULES} rules, got ${rules.length}`);
-  rules.forEach((rule, i) => {
-    const where = `${at}: cors[${i}]`;
-    assertStrings(rule.origins, "origins", where);
-    if (rule.origins.length === 0) throw new Error(`${where}: origins must not be empty`);
-    for (const origin of rule.origins) {
-      if (!isOrigin(origin) || origin.split("*").length > 2) throw new Error(`${where}: origin "${origin}" must be "*" or look like "https://example.com", with at most one "*"`);
-    }
-    assertStrings(rule.methods, "methods", where);
-    if (rule.methods.length === 0) throw new Error(`${where}: methods must not be empty`);
-    for (const method of rule.methods) {
-      if (!(CORS_METHODS as readonly string[]).includes(method)) throw new Error(`${where}: method "${method}" must be one of ${CORS_METHODS.join(", ")}`);
-    }
-    if (new Set(rule.methods).size !== rule.methods.length) throw new Error(`${where}: methods lists a method twice`);
-    if (rule.headers !== undefined) assertStrings(rule.headers, "headers", where);
-    if (rule.exposeHeaders !== undefined) assertStrings(rule.exposeHeaders, "exposeHeaders", where);
-    if (rule.maxAgeSeconds !== undefined && !(Number.isInteger(rule.maxAgeSeconds) && rule.maxAgeSeconds >= 0 && rule.maxAgeSeconds <= MAX_AGE_SECONDS)) {
-      throw new Error(`${where}: maxAgeSeconds must be an integer from 0 to ${MAX_AGE_SECONDS}`);
-    }
-  });
-}
-
-function assertGlobs(patterns: readonly string[], what: string, at: string): void {
-  for (const pattern of patterns) {
-    if (/^(\.\/|\/|!)/.test(pattern)) throw new Error(`${at}: ${what} "${pattern}" must not start with "./", "/" or "!"; globs match paths such as "assets/app.js"`);
-  }
-}
-
-export function assertSiteFiles(files: SiteFiles, at: string): void {
-  const where = `${at}: files`;
-  if (typeof files.dir !== "string" || files.dir.trim() === "") throw new Error(`${where}.dir must be a non-empty string`);
-  if (files.include !== undefined) {
-    assertStrings(files.include, "files.include", at);
-    assertGlobs(files.include, "files.include", at);
-  }
-  if (files.exclude !== undefined) {
-    assertStrings(files.exclude, "files.exclude", at);
-    assertGlobs(files.exclude, "files.exclude", at);
-  }
-  if (files.prune !== undefined && typeof files.prune !== "boolean") throw new Error(`${where}.prune must be true or false`);
-  files.cacheControl?.forEach((rule, i) => {
-    if (typeof rule.match !== "string" || rule.match === "") throw new Error(`${where}.cacheControl[${i}].match must be a non-empty glob`);
-    assertGlobs([rule.match], `files.cacheControl[${i}].match`, at);
-    if (typeof rule.value !== "string" || rule.value === "" || /[\r\n]/.test(rule.value)) throw new Error(`${where}.cacheControl[${i}].value must be a one-line header value`);
-  });
-}
-
-export function assertWebSiteDocuments(options: { indexDocument?: string; errorDocument?: string }, at: string): void {
-  const { indexDocument, errorDocument } = options;
-  if (indexDocument !== undefined && !/^[^/]{1,255}$/.test(indexDocument)) throw new Error(`${at}: indexDocument must be a file name without "/", such as "index.html"`);
-  if (errorDocument !== undefined && !/^[^/][^\r\n]{0,1023}$/.test(errorDocument)) throw new Error(`${at}: errorDocument must be a key that does not start with "/", such as "404.html"`);
-}
 
 // Prefix gets a trailing slash; bucket root is an empty string.
 export function normalizeBlobPath(path: string): string {
@@ -281,25 +173,5 @@ export class BlobStore<P extends BlobProvider = BlobProvider> {
         throw err;
       });
     return this.driverPromise;
-  }
-}
-
-// A BlobStore that serves a static website.
-export class BlobStoreWebSite<P extends BlobProvider = BlobProvider> extends BlobStore<P> {
-  readonly indexDocument: string;
-  readonly errorDocument: string | undefined;
-  readonly files: SiteFiles | undefined;
-  readonly cors: readonly CorsRule[];
-
-  constructor(provider: P, uri: string, options: BlobStoreWebSiteOptions = {}) {
-    super(provider, uri, options);
-    const at = `BlobStoreWebSite "${uri}"`;
-    this.indexDocument = options.indexDocument ?? BLOB_STORE_WEB_SITE_DEFAULTS.indexDocument;
-    this.errorDocument = options.errorDocument;
-    assertWebSiteDocuments({ indexDocument: this.indexDocument, errorDocument: this.errorDocument }, at);
-    if (options.files) assertSiteFiles(options.files, at);
-    if (options.cors) assertCorsRules(options.cors, at);
-    this.files = options.files;
-    this.cors = options.cors ?? [];
   }
 }

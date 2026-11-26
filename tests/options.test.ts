@@ -69,7 +69,7 @@ describe("options in the config", () => {
   });
 
   test.each([
-    ["unknown-key.ts", /@aws\.S3 "data": unknown option "color" for @aws\.S3 \(supported: versioning\)/],
+    ["unknown-key.ts", /@aws\.S3 "data": unknown option "color" for @aws\.S3 \(supported: versioning, index_document, error_document, cors, site_dir, /],
     ["bad-value.ts", /option "versioning" must be one of true, false/],
     ["reserved-env.ts", /option "env\.AWS_REGION" is not a usable environment variable name/],
   ])("generate rejects %s", async (file, error) => {

@@ -9,6 +9,8 @@ import {
 } from "./driver";
 import { BLOB_STORE_OPERATIONS } from "./schema.gen";
 
+export { BLOB_PROVIDERS, BLOB_STORE_FIELDS } from "./schema.gen";
+
 export { assertS3BucketName, registerBlobDriver, parseBlobUri, S3_BUCKET_NAME, URI_SCHEMES } from "./driver";
 export type { BlobData, BlobDriver, BlobDriverFactory, BlobDriverOptions, BlobProvider } from "./driver";
 

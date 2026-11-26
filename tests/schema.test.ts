@@ -11,7 +11,7 @@ import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CertOptions } from "@cloudgear/cdn";
 import { CERT_FIELDS } from "@cloudgear/cdn";
 import type { BlobStoreOptions } from "@cloudgear/blob";
-import { BLOB_STORE_FIELDS } from "../packages/blob/schema.gen";
+import { BLOB_STORE_FIELDS } from "@cloudgear/blob";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
 import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
 

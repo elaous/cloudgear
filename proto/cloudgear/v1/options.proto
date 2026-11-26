@@ -27,7 +27,7 @@ extend google.protobuf.FieldOptions {
   // The field refers to a resource; the value is the message of that resource, such as "Dns".
   // Written as the resource itself in setup files, stored as its name.
   string references = 50003;
-  // A setup file MUST set it, whatever the type; an enum without a default is required already.
+  // Setup files must set it; unset is an error.
   bool required = 50004;
 }
 

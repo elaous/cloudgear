@@ -63,7 +63,7 @@ enum CorsMethod {
   CORS_METHOD_DELETE = 5 [(cloudgear.v1.name) = "DELETE"];
 }
 
-// A cross-origin rule on a bucket, in the shape S3 and GCS share.
+// A CORS rule, in the shape S3 and GCS share.
 message CorsRule {
   repeated string origins = 1 [(cloudgear.v1.required) = true];
   repeated CorsMethod methods = 2 [(cloudgear.v1.required) = true];
@@ -88,10 +88,11 @@ message SiteFiles {
   repeated string exclude = 3;
   // Deletes uploaded files that are no longer in the directory.
   bool prune = 4;
+  // The first matching rule wins.
   repeated CacheControlRule cache_control = 5;
 }
 
-// A BlobStore that serves a static website: it uploads files and sets CORS rules.
+// A BlobStore that serves a website from uploaded files.
 message BlobStoreWebSite {
   option (cloudgear.v1.extends) = "BlobStore";
 

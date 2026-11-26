@@ -10,6 +10,8 @@ import type { DnsOptions } from "@cloudgear/dns";
 import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CertOptions } from "@cloudgear/cdn";
 import { CERT_FIELDS } from "@cloudgear/cdn";
+import type { BlobStoreOptions } from "@cloudgear/blob";
+import { BLOB_STORE_FIELDS } from "../packages/blob/schema.gen";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
 import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
 
@@ -41,5 +43,11 @@ describe("schema", () => {
   test("SecretStore options name the same fields as the schema", () => {
     const store: Required<Omit<SecretStoreOptions, "driver">> = { service: "ssm", region: "", kmsKey: "" };
     expect(Object.keys(store).sort()).toEqual(SECRET_STORE_FIELDS.filter((f) => !["provider", "name"].includes(f)).map(camel).sort());
+  });
+
+  // The bucket is the positional URI argument of BlobStore.
+  test("BlobStore options name the same fields as the schema", () => {
+    const store: Required<Omit<BlobStoreOptions, "driver">> = { path: "", region: "", options: {} };
+    expect(Object.keys(store).sort()).toEqual(BLOB_STORE_FIELDS.filter((f) => !["provider", "name", "bucket"].includes(f)).sort());
   });
 });

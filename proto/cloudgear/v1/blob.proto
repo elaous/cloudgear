@@ -46,6 +46,8 @@ message BlobStore {
 
   BlobProvider provider = 1 [(cloudgear.v1.immutable) = true];
   string name = 2 [(cloudgear.v1.immutable) = true];
+  // The bucket's name at the provider; the name above is only this resource's label.
+  string bucket = 6 [(cloudgear.v1.immutable) = true, (cloudgear.v1.required) = true];
   // Key prefix inside the bucket.
   optional string path = 3;
   optional string region = 4 [(cloudgear.v1.immutable) = true];

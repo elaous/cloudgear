@@ -222,7 +222,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
       dry: r.dry,
       source: `${fromConfig(r.file)}:${r.line}`,
       region: r.region,
-      options: r.siteDir ? { ...r.options, site_dir: fromConfig(r.siteDir) } : r.options,
+      options: r.options,
     })).concat(
       model.buses.map((bus) => ({
         name: busResource(bus.name),

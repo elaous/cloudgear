@@ -44,6 +44,13 @@ describe("listSiteFiles", () => {
     expect(file?.cacheControl).toBe("first");
   });
 
+  test("rejects a directory outside the root it is given", () => {
+    const dir = tree({ "sub/a.txt": "1" });
+    expect(listSiteFiles(path.join(dir, "sub"), none, dir).map((f) => f.key)).toEqual(["a.txt"]);
+    expect(() => listSiteFiles(path.join(dir, ".."), none, dir)).toThrow("is outside");
+    expect(() => listSiteFiles(path.join(dir, "..", `${path.basename(dir)}-other`), none, dir)).toThrow("is outside");
+  });
+
   test("rejects a missing directory, a file and symbolic links", () => {
     expect(() => listSiteFiles("/nonexistent/site-dir", none)).toThrow("does not exist; build the site first");
     const dir = tree({ "a.txt": "1" });
@@ -81,6 +88,9 @@ describe("contentTypeOf", () => {
     expect(contentTypeOf("font.woff2")).toBe("font/woff2");
     expect(contentTypeOf("data.unknownext")).toBe("application/octet-stream");
     expect(contentTypeOf("README")).toBe("application/octet-stream");
+    expect(contentTypeOf("x.constructor")).toBe("application/octet-stream");
+    expect(contentTypeOf("x.__proto__")).toBe("application/octet-stream");
+    expect(contentTypeOf("x.toString")).toBe("application/octet-stream");
   });
 });
 

@@ -1858,7 +1858,7 @@ function readWebSiteOptions(options: Node | undefined, provider: string, at: str
   const projectRoot = projectRootOf(callerFile);
   const fromRoot = path.relative(projectRoot, dir);
   if (fromRoot.startsWith("..") || path.isAbsolute(fromRoot)) throw new Error(`${filesAt}: ${dirText} is outside the project (${projectRoot})`);
-  const listed = listSiteFiles(dir, { include, exclude, cacheControl });
+  const listed = listSiteFiles(dir, { include, exclude, cacheControl }, projectRoot);
   if (listed.length === 0) throw new Error(`${filesAt}: ${dirText} holds no files after include and exclude`);
   out.site_files_hash = siteFilesHash(listed);
   out.site_files_count = String(listed.length);

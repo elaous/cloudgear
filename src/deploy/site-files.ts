@@ -53,7 +53,10 @@ const TYPES: Record<string, string> = {
   zip: "application/zip",
 };
 
-export const contentTypeOf = (key: string): string => TYPES[path.extname(key).slice(1).toLowerCase()] ?? "application/octet-stream";
+export function contentTypeOf(key: string): string {
+  const extension = path.extname(key).slice(1).toLowerCase();
+  return Object.hasOwn(TYPES, extension) ? TYPES[extension]! : "application/octet-stream";
+}
 
 const matches = (patterns: readonly string[], key: string): boolean => patterns.some((pattern) => new Bun.Glob(pattern).match(key));
 
@@ -77,10 +80,13 @@ function walk(dir: string, prefix: string, rules: SiteRules, out: { key: string;
 }
 
 // Lists the files a site uploads, in key order, with hashes and headers.
-export function listSiteFiles(dir: string, rules: SiteRules): SiteFile[] {
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error(`site directory ${dir} does not exist; build the site first`);
+export function listSiteFiles(dir: string, rules: SiteRules, root: string = dir): SiteFile[] {
+  const base = path.resolve(root);
+  const target = path.resolve(dir);
+  if (target !== base && !target.startsWith(base + path.sep)) throw new Error(`site directory ${dir} is outside ${root}`);
+  if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error(`site directory ${dir} does not exist; build the site first`);
   const found: { key: string; file: string }[] = [];
-  walk(dir, "", rules, found);
+  walk(target, "", rules, found);
   return found.map(({ key, file }): SiteFile => {
     const bytes = fs.readFileSync(file);
     const rule = rules.cacheControl.find((r) => new Bun.Glob(r.match).match(key));

@@ -70,6 +70,13 @@ describe("changing a website bucket", () => {
     expect(aws.calls).toEqual([]);
   });
 
+  test("the same rules written in another key order, with empty lists, are not a change", async () => {
+    const reordered = JSON.stringify([{ max_age_seconds: 3600, expose_headers: ["etag"], headers: ["content-type"], methods: ["GET", "HEAD"], origins: ["https://example.com"] }]);
+    const noisy = JSON.stringify([{ methods: ["GET"], origins: ["*"], headers: [], expose_headers: [] }]);
+    expect((await apply2(siteOptions(), siteOptions({ cors: reordered }))).calls).toEqual([]);
+    expect((await apply2(siteOptions({ cors: noisy }), siteOptions({ cors: JSON.stringify([{ origins: ["*"], methods: ["GET"] }]) }))).calls).toEqual([]);
+  });
+
   test("a new CORS rule replaces the rules and leaves the website alone", async () => {
     const aws = await apply2(siteOptions(), siteOptions({ cors: JSON.stringify([{ origins: ["*"], methods: ["GET"] }]) }));
     expect(aws.names()).toEqual(["PutBucketCorsCommand"]);
@@ -121,10 +128,10 @@ describe("importing a website bucket", () => {
     expect(result.notes).toEqual([]);
   });
 
-  test("site files are refused", async () => {
+  test("site files are noted, not uploaded", async () => {
     const { result } = await importing(withOptions(siteOptions({ site_dir: "dist" })));
-    expect(result.adopted).toEqual([]);
-    expect(result.failed[0]).toContain("uploading site files");
+    expect(result.adopted).toHaveLength(1);
+    expect(result.notes).toContain("@aws.S3 site: its site files are not uploaded: cloudgear never changes an imported bucket");
   });
 });
 
@@ -151,6 +158,7 @@ describe("option rules for website buckets", () => {
     expect(keys.cors!("{}")).toContain("list of CORS rules");
     expect(keys.cors!(JSON.stringify([{ origins: [], methods: ["GET"] }]))).toContain("origins must not be empty");
     expect(keys.cors!(JSON.stringify([{ origins: ["*"], methods: ["PATCH"] }]))).toContain('method "PATCH"');
+    expect(keys.cors!(JSON.stringify([{ origins: ["*"], methods: ["GET"], extra: 1 }]))).toContain('unknown key "extra"');
     expect(keys.site_include!("[1]")).toContain("non-empty globs");
     expect(keys.site_cache_control!(JSON.stringify([{ match: "x" }]))).toContain("value");
     expect(keys.site_prune!("false")).toContain("one of true");

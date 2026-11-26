@@ -35,7 +35,7 @@ export interface AnalyzedResource {
   region?: string;
   dry: boolean;
   options?: Record<string, string>;
-  // Absolute path of a website's directory; generate stores it relative to the config.
+  // Absolute; generate stores it relative to the config.
   siteDir?: string;
   file: string;
   line: number;
@@ -334,7 +334,7 @@ function analyzeEntry(entryPath: string): AppModel {
       line: expr.getStartLineNumber(),
     };
     const existing = resources.get(resource.name);
-    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region || !sameOptions(existing.options, resource.options))) {
+    if (existing && (existing.dry !== resource.dry || existing.provider !== resource.provider || existing.region !== resource.region || existing.siteDir !== resource.siteDir || !sameOptions(existing.options, resource.options))) {
       throw new Error(
         `${where(expr)}: BlobStore "${resource.name}" is also declared at ${existing.file}:${existing.line} with a different provider, region, options or directives`,
       );
@@ -1800,7 +1800,7 @@ function objectElements(node: Node, what: string, at: string): Node[] {
   });
 }
 
-// Settings of a BlobStoreWebSite as string options, plus the directory it uploads.
+// Site settings as string options, plus the upload directory.
 function readWebSiteOptions(options: Node | undefined, provider: string, at: string, callerFile: string): { options: Record<string, string>; dir?: string } {
   if (provider !== "aws") throw new Error(`${at}: BlobStoreWebSite supports provider "aws" for now`);
   if (options) assertKnownKeys(options, SITE_OPTION_KEYS, "BlobStoreWebSite", at);
@@ -1855,6 +1855,9 @@ function readWebSiteOptions(options: Node | undefined, provider: string, at: str
     : [];
   assertSiteFiles({ dir: dirText ?? "", include, exclude, ...(prune !== undefined ? { prune } : {}), cacheControl }, at);
   const dir = resolveRoutePath(dirText!, callerFile);
+  const projectRoot = projectRootOf(callerFile);
+  const fromRoot = path.relative(projectRoot, dir);
+  if (fromRoot.startsWith("..") || path.isAbsolute(fromRoot)) throw new Error(`${filesAt}: ${dirText} is outside the project (${projectRoot})`);
   const listed = listSiteFiles(dir, { include, exclude, cacheControl });
   if (listed.length === 0) throw new Error(`${filesAt}: ${dirText} holds no files after include and exclude`);
   out.site_files_hash = siteFilesHash(listed);

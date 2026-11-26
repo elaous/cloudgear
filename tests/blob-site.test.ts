@@ -48,6 +48,18 @@ describe("BlobStoreWebSite", () => {
     expect(site({ cors: [{ ...rule, origins: ["https://*.example.com", "http://localhost:3000"] }] }).cors).toHaveLength(1);
   });
 
+  test("rejects origins without a host and globs that can never match", () => {
+    const rule = { origins: ["https://example.com"], methods: ["GET" as const] };
+    expect(() => site({ cors: [{ ...rule, origins: ["https://"] }] })).toThrow('origin "https://"');
+    expect(() => site({ cors: [{ ...rule, origins: ["https://*"] }] })).toThrow('origin "https://*"');
+    for (const bad of ["./index.html", "/index.html", "!*.map"]) {
+      expect(() => site({ files: { dir: "./d", exclude: [bad] } })).toThrow(`files.exclude "${bad}" must not start with`);
+      expect(() => site({ files: { dir: "./d", include: [bad] } })).toThrow("files.include");
+      expect(() => site({ files: { dir: "./d", cacheControl: [{ match: bad, value: "x" }] } })).toThrow("cacheControl[0].match");
+    }
+    expect(site({ files: { dir: "./d", include: ["**/*.html"], exclude: ["assets/**"], cacheControl: [{ match: "**", value: "x" }] } }).files?.dir).toBe("./d");
+  });
+
   test("rejects bad file settings", () => {
     expect(() => site({ files: { dir: "" } })).toThrow("files.dir must be a non-empty string");
     expect(() => site({ files: { dir: "./d", include: [""] } })).toThrow("files.include");

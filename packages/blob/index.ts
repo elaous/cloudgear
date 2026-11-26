@@ -48,7 +48,7 @@ export type ProviderOptions = Record<string, string | number | boolean>;
 export type CorsMethod = (typeof CORS_METHODS)[number];
 
 export interface CorsRule {
-  // "*" or an origin such as "https://example.com"; at most one "*" each.
+  // "*" or an origin like "https://example.com".
   origins: string[];
   methods: CorsMethod[];
   headers?: string[];
@@ -57,14 +57,14 @@ export interface CorsRule {
 }
 
 export interface CacheControlRule {
-  // A glob over file paths relative to the directory.
+  // A glob such as "assets/**", over paths in the directory.
   match: string;
   // The Cache-Control header value.
   value: string;
 }
 
 export interface SiteFiles {
-  // "./x" is relative to the setup file, any other path to the project root.
+  // "./x" is relative to the setup file; else the project root.
   dir: string;
   include?: string[];
   exclude?: string[];
@@ -75,16 +75,16 @@ export interface SiteFiles {
 }
 
 export interface BlobStoreWebSiteOptions extends BlobStoreOptions {
-  // Default "index.html"; a file name without "/".
+  // A file name without "/"; default "index.html".
   indexDocument?: string;
   errorDocument?: string;
-  // Literal only; `cloudgear apply` uploads the directory.
+  // Literal only; read by generate.
   files?: SiteFiles;
   // Literals only; read by generate.
   cors?: CorsRule[];
 }
 
-const ORIGIN = /^(\*|[a-z][a-z0-9+.-]*:\/\/[^\s*/]*\*?[^\s*/]*|[a-z][a-z0-9+.-]*:\/\/\*[^\s*/]*)$/i;
+const ORIGIN = /^(\*|[a-z][a-z0-9+.-]*:\/\/[^\s/]*[^\s/*][^\s/]*)$/i;
 const MAX_CORS_RULES = 100;
 const MAX_AGE_SECONDS = 31_536_000;
 
@@ -115,14 +115,27 @@ export function assertCorsRules(rules: readonly CorsRule[], at: string): void {
   });
 }
 
+function assertGlobs(patterns: readonly string[], what: string, at: string): void {
+  for (const pattern of patterns) {
+    if (/^(\.\/|\/|!)/.test(pattern)) throw new Error(`${at}: ${what} "${pattern}" must not start with "./", "/" or "!"; globs match paths such as "assets/app.js"`);
+  }
+}
+
 export function assertSiteFiles(files: SiteFiles, at: string): void {
   const where = `${at}: files`;
   if (typeof files.dir !== "string" || files.dir.trim() === "") throw new Error(`${where}.dir must be a non-empty string`);
-  if (files.include !== undefined) assertStrings(files.include, "files.include", at);
-  if (files.exclude !== undefined) assertStrings(files.exclude, "files.exclude", at);
+  if (files.include !== undefined) {
+    assertStrings(files.include, "files.include", at);
+    assertGlobs(files.include, "files.include", at);
+  }
+  if (files.exclude !== undefined) {
+    assertStrings(files.exclude, "files.exclude", at);
+    assertGlobs(files.exclude, "files.exclude", at);
+  }
   if (files.prune !== undefined && typeof files.prune !== "boolean") throw new Error(`${where}.prune must be true or false`);
   files.cacheControl?.forEach((rule, i) => {
     if (typeof rule.match !== "string" || rule.match === "") throw new Error(`${where}.cacheControl[${i}].match must be a non-empty glob`);
+    assertGlobs([rule.match], `files.cacheControl[${i}].match`, at);
     if (typeof rule.value !== "string" || rule.value === "" || /[\r\n]/.test(rule.value)) throw new Error(`${where}.cacheControl[${i}].value must be a one-line header value`);
   });
 }
@@ -264,7 +277,7 @@ export class BlobStore<P extends BlobProvider = BlobProvider> {
   }
 }
 
-// A BlobStore that serves a static website: `apply` uploads the files and sets the CORS rules.
+// A BlobStore that serves a static website.
 export class BlobStoreWebSite<P extends BlobProvider = BlobProvider> extends BlobStore<P> {
   readonly indexDocument: string;
   readonly errorDocument: string | undefined;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { listSiteFiles, siteFilesHash } from "../src/deploy/site-files";
+import { contentTypeOf, listSiteFiles, MAX_SITE_FILES, siteFilesHash } from "../src/deploy/site-files";
 
 const dirs: string[] = [];
 function tree(files: Record<string, string>): string {
@@ -51,6 +51,37 @@ describe("listSiteFiles", () => {
     expect(() => listSiteFiles(path.join(dir, "a.txt"), none)).toThrow("does not exist");
     fs.symlinkSync(path.join(dir, "a.txt"), path.join(dir, "link.txt"));
     expect(() => listSiteFiles(dir, none)).toThrow("is a symbolic link");
+  });
+});
+
+describe("walking", () => {
+  test("a symbolic link inside an excluded tree is skipped, one that would be uploaded is an error", () => {
+    const dir = tree({ "index.html": "1", "node_modules/pkg/a.js": "2", "other/b.js": "3" });
+    fs.symlinkSync(path.join(dir, "index.html"), path.join(dir, "node_modules", "link.js"));
+    expect(listSiteFiles(dir, { ...none, exclude: ["node_modules/**"] }).map((f) => f.key)).toEqual(["index.html", "other/b.js"]);
+    expect(listSiteFiles(dir, { ...none, include: ["index.html"] }).map((f) => f.key)).toEqual(["index.html"]);
+    expect(() => listSiteFiles(dir, none)).toThrow("is a symbolic link");
+    fs.symlinkSync(path.join(dir, "other"), path.join(dir, "linked-dir"));
+    expect(listSiteFiles(dir, { ...none, exclude: ["node_modules/**", "linked-dir/**"] }).map((f) => f.key)).toEqual(["index.html", "other/b.js"]);
+  });
+
+  test("excluded files do not count toward the limit", () => {
+    const dir = tree({ "keep.txt": "1" });
+    fs.mkdirSync(path.join(dir, "skip"));
+    for (let i = 0; i <= MAX_SITE_FILES; i++) fs.writeFileSync(path.join(dir, "skip", `f${i}`), "");
+    expect(listSiteFiles(dir, { ...none, exclude: ["skip/**"] }).map((f) => f.key)).toEqual(["keep.txt"]);
+    expect(() => listSiteFiles(dir, none)).toThrow(`more than ${MAX_SITE_FILES} files`);
+  });
+});
+
+describe("contentTypeOf", () => {
+  test("is fixed by a table, not by the runtime", () => {
+    expect(contentTypeOf("index.html")).toBe("text/html; charset=utf-8");
+    expect(contentTypeOf("a/app.JS")).toBe("text/javascript; charset=utf-8");
+    expect(contentTypeOf("logo.svg")).toBe("image/svg+xml");
+    expect(contentTypeOf("font.woff2")).toBe("font/woff2");
+    expect(contentTypeOf("data.unknownext")).toBe("application/octet-stream");
+    expect(contentTypeOf("README")).toBe("application/octet-stream");
   });
 });
 

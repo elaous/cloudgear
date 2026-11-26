@@ -14,7 +14,7 @@ export interface CorsRuleConfig {
   max_age_seconds?: number;
 }
 
-// What a website bucket is configured with; undefined fields are not set.
+// Website and CORS settings; unset fields are absent.
 export interface SiteSettings {
   indexDocument?: string;
   errorDocument?: string;
@@ -31,7 +31,7 @@ export function siteSettings(options: Record<string, string> | undefined): SiteS
 
 export const hasSiteSettings = (settings: SiteSettings): boolean => settings.indexDocument !== undefined || settings.errorDocument !== undefined || settings.cors !== undefined;
 
-// Files are uploaded by a later step; an apply that would skip them fails instead.
+// Refuses site files until apply can upload them.
 export function assertNoUploads(options: Record<string, string> | undefined, bucket: string): void {
   if (options?.site_dir) throw new Error(`Bucket "${bucket}": uploading site files (${options.site_dir}) is not supported by apply yet; remove files from the BlobStoreWebSite`);
 }
@@ -44,7 +44,7 @@ const normalizeRule = (rule: CorsRuleConfig): CorsRuleConfig => ({
   ...(rule.max_age_seconds !== undefined ? { max_age_seconds: rule.max_age_seconds } : {}),
 });
 
-// Makes the bucket's website and CORS configuration match `wanted`, touching only what differs from `had`.
+// Sets what differs between `had` and `wanted`.
 export async function applySite(s3: SendClient, bucket: string, wanted: SiteSettings, had: SiteSettings): Promise<void> {
   const websiteWanted = wanted.indexDocument !== undefined || wanted.errorDocument !== undefined;
   const websiteHad = had.indexDocument !== undefined || had.errorDocument !== undefined;

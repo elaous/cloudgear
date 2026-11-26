@@ -58,6 +58,8 @@ describe("BlobStoreWebSite in setup.ts", () => {
       "bad-cors-key.ts": /unknown cors rule option "extra"/,
       "bad-clash.ts": /options\.cors is set by the web site settings/,
       "bad-index.ts": /indexDocument must be a file name without "\/"/,
+      "bad-outside.ts": /is outside the project/,
+      "bad-glob.ts": /files\.exclude "\.\/index\.html" must not start with/,
     };
     for (const [file, message] of Object.entries(cases)) {
       expect(() => analyzeApp(site(file), env), file).toThrow(message);

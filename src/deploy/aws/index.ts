@@ -405,7 +405,6 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       async adopt(entry, _context, hint) {
         const region = (entry.spec.region as string | undefined) || options.region;
         const desiredOptions = entry.spec.options as Record<string, string> | undefined;
-        assertNoUploads(desiredOptions, entry.physical_name);
         if (hint?.arn) {
           const bucket = expectArn(hint.arn, "s3", "an S3 bucket").resource;
           if (bucket !== entry.physical_name) throw new Error(`${hint.arn} is the bucket "${bucket}", but the config uses "${entry.physical_name}"`);
@@ -424,6 +423,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         if (hasSiteSettings(siteSettings(desiredOptions))) {
           adopted.notes.push("its website and CORS settings are not applied: cloudgear never changes an imported bucket");
         }
+        if (desiredOptions?.site_dir) adopted.notes.push("its site files are not uploaded: cloudgear never changes an imported bucket");
         if (hint?.exportPolicies) {
           try {
             const got = await s3For(region).send(new GetBucketPolicyCommand({ Bucket: entry.physical_name }));

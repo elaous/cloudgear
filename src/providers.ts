@@ -59,11 +59,15 @@ const jsonStrings =
     return Array.isArray(parsed.value) && parsed.value.every((v) => typeof v === "string" && v !== "") ? undefined : `must be a JSON list of non-empty ${what}`;
   };
 
-// Rules are written as the schema names them: snake_case keys.
+const CORS_RULE_KEYS = ["origins", "methods", "headers", "expose_headers", "max_age_seconds"];
+
+// Rules use the schema's snake_case keys.
 const corsRules: OptionRule = (value) => {
   const parsed = parsedJson(value);
   if (!parsed.ok) return parsed.reason;
   if (!Array.isArray(parsed.value)) return "must be a JSON list of CORS rules";
+  const unknown = parsed.value.flatMap((r) => Object.keys(r ?? {})).find((key) => !CORS_RULE_KEYS.includes(key));
+  if (unknown) return `has a rule with the unknown key "${unknown}"`;
   try {
     assertCorsRules(
       parsed.value.map((r: Record<string, unknown>) => ({

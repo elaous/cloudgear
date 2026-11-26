@@ -11,7 +11,7 @@ export interface SiteRules {
 }
 
 export interface SiteFile {
-  // Slash-separated path relative to the directory; the object key without the bucket path.
+  // Slash-separated path relative to the directory.
   key: string;
   path: string;
   size: number;
@@ -21,16 +21,59 @@ export interface SiteFile {
   cacheControl?: string;
 }
 
+const TYPES: Record<string, string> = {
+  html: "text/html; charset=utf-8",
+  htm: "text/html; charset=utf-8",
+  css: "text/css; charset=utf-8",
+  js: "text/javascript; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8",
+  json: "application/json; charset=utf-8",
+  map: "application/json; charset=utf-8",
+  webmanifest: "application/manifest+json; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
+  xml: "application/xml; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  ico: "image/x-icon",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  wasm: "application/wasm",
+  pdf: "application/pdf",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mp3: "audio/mpeg",
+  zip: "application/zip",
+};
+
+export const contentTypeOf = (key: string): string => TYPES[path.extname(key).slice(1).toLowerCase()] ?? "application/octet-stream";
+
 const matches = (patterns: readonly string[], key: string): boolean => patterns.some((pattern) => new Bun.Glob(pattern).match(key));
 
-function walk(dir: string, prefix: string, out: { key: string; file: string }[]): void {
+// Walks the directory once, skipping excluded trees; a symbolic link is an error only if it would be uploaded.
+function walk(dir: string, prefix: string, rules: SiteRules, out: { key: string; file: string }[]): void {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
     const file = path.join(dir, entry.name);
     const key = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isSymbolicLink()) throw new Error(`${file} is a symbolic link; the site directory must hold real files`);
-    if (entry.isDirectory()) walk(file, key, out);
-    else if (entry.isFile()) out.push({ key, file });
-    if (out.length > MAX_SITE_FILES) throw new Error(`the site directory holds more than ${MAX_SITE_FILES} files; narrow it with include and exclude`);
+    const excluded = matches(rules.exclude, key) || matches(rules.exclude, `${key}/_`);
+    if (entry.isSymbolicLink()) {
+      if (!excluded && (rules.include.length === 0 || matches(rules.include, key))) throw new Error(`${file} is a symbolic link; the site directory must hold real files`);
+      continue;
+    }
+    if (entry.isDirectory()) {
+      if (!matches(rules.exclude, `${key}/_`)) walk(file, key, rules, out);
+    } else if (entry.isFile() && !matches(rules.exclude, key) && (rules.include.length === 0 || matches(rules.include, key))) {
+      out.push({ key, file });
+      if (out.length > MAX_SITE_FILES) throw new Error(`the site holds more than ${MAX_SITE_FILES} files; narrow it with include and exclude`);
+    }
   }
 }
 
@@ -38,22 +81,20 @@ function walk(dir: string, prefix: string, out: { key: string; file: string }[])
 export function listSiteFiles(dir: string, rules: SiteRules): SiteFile[] {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error(`site directory ${dir} does not exist; build the site first`);
   const found: { key: string; file: string }[] = [];
-  walk(dir, "", found);
-  return found
-    .filter(({ key }) => (rules.include.length === 0 || matches(rules.include, key)) && !matches(rules.exclude, key))
-    .map(({ key, file }): SiteFile => {
-      const bytes = fs.readFileSync(file);
-      const rule = rules.cacheControl.find((r) => new Bun.Glob(r.match).match(key));
-      return {
-        key,
-        path: file,
-        size: bytes.byteLength,
-        md5: createHash("md5").update(bytes).digest("hex"),
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        contentType: Bun.file(file).type || "application/octet-stream",
-        ...(rule ? { cacheControl: rule.value } : {}),
-      };
-    });
+  walk(dir, "", rules, found);
+  return found.map(({ key, file }): SiteFile => {
+    const bytes = fs.readFileSync(file);
+    const rule = rules.cacheControl.find((r) => new Bun.Glob(r.match).match(key));
+    return {
+      key,
+      path: file,
+      size: bytes.byteLength,
+      md5: createHash("md5").update(bytes).digest("hex"),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      contentType: contentTypeOf(key),
+      ...(rule ? { cacheControl: rule.value } : {}),
+    };
+  });
 }
 
 // Changes when a file's name, content, type or headers change.

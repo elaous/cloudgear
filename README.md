@@ -647,7 +647,7 @@ destroy, because ACM shares it between certificates for a domain.
 `cloudgear invalidate [path...]` clears a site CDN's cache (`/*` by default); the
 router's distribution is not offered. An app with several CDNs needs
 `--domain <cdn domain>` to say which one.
-Uploading the site's files is part of `BlobStoreWebSite`, below.
+`BlobStoreWebSite`, below, is meant to upload a site's files; `apply` does not do that yet.
 
 Things that have not been checked against real services: all of the
 CloudFront, ACM, API Gateway, Route 53 and Gandi calls are tested against
@@ -725,19 +725,26 @@ const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
 ```
 
 - `indexDocument` defaults to `index.html` and `errorDocument` is optional. Apply sets the
-  bucket's website configuration from them, and removes it if you drop both.
+  bucket's website configuration from them. Changing a site back to a plain `BlobStore`
+  removes the website configuration and the CORS rules.
 - `cors` takes rules with `origins` (`"*"` or `https://example.com`, with at most one `*`
   each), `methods` (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`), `headers`, `exposeHeaders` and
   `maxAgeSeconds`. Apply replaces the bucket's CORS rules with them and removes them if you
   drop `cors`.
 - `files` names the directory to upload (`./x` is relative to the setup file, any other path
-  to the project root) with `include` and `exclude` globs, `prune` and `cacheControl` rules
-  (the first matching glob wins). `generate` reads the directory, so build the site first,
-  and stores a hash of the files and their count in the config.
+  to the project root, and it MUST stay inside the project) with `include` and `exclude`
+  globs, `prune` and `cacheControl` rules (the first matching glob wins). A glob matches a
+  path inside the directory, such as `assets/**` or `**/*.map`; it MUST NOT start with `./`,
+  `/` or `!`, and a plain `assets` matches only a file called `assets`. `generate` reads the
+  directory, so build the site first, and stores a hash of the files and their count in the
+  config. A symbolic link that would be uploaded is an error; excluded ones are skipped.
 - Everything is literal, as for `BlobStore`; strings may use environment variables as
   elsewhere in `setup.ts`. The provider is `aws` for now.
-- A bucket you import is recorded and never changed, so its website and CORS settings are
-  not applied; the import says so.
+- A bucket you import is recorded and never changed, so its website settings, CORS rules and
+  files are not applied; the import says so.
+- Setting these needs `s3:PutBucketWebsite`, `s3:DeleteBucketWebsite`, `s3:PutBucketCORS`
+  and `s3:DeleteBucketCORS` for the deploying principal, on top of the bucket permissions
+  `apply` already uses.
 
 Not done yet: `apply` does not upload the files and refuses a `files` setting until it does.
 

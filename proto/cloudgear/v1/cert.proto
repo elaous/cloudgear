@@ -12,10 +12,10 @@ enum CertProvider {
 // A certificate for the domain of a Dns, validated through that Dns.
 message Cert {
   CertProvider provider = 1 [(cloudgear.v1.immutable) = true];
-  string name = 2;
+  string name = 2 [(cloudgear.v1.immutable) = true];
   // The Dns whose domain the certificate covers.
-  string dns = 3 [(cloudgear.v1.references) = "Dns"];
+  string dns = 3 [(cloudgear.v1.references) = "Dns", (cloudgear.v1.immutable) = true];
   // The default differs for a CDN and for a router.
-  optional string region = 4;
+  optional string region = 4 [(cloudgear.v1.immutable) = true];
   map<string, string> options = 5;
 }

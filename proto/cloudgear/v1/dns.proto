@@ -10,10 +10,11 @@ enum DnsProvider {
   DNS_PROVIDER_AWS = 2 [(cloudgear.v1.name) = "aws"];
 }
 
+// The provider token is not modeled yet.
 // A domain whose records cloudgear manages in a zone at a DNS provider.
 message Dns {
   DnsProvider provider = 1 [(cloudgear.v1.immutable) = true];
-  string name = 2;
+  string name = 2 [(cloudgear.v1.immutable) = true];
   // A wildcard domain starts with "*.".
   string domain = 3 [(cloudgear.v1.immutable) = true];
   // Defaults to the last two labels of the domain, three for co.uk-style suffixes.

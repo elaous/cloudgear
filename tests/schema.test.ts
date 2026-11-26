@@ -6,6 +6,10 @@ import { CACHE_FIELDS } from "../packages/cache/schema.gen";
 import type { NetworkOptions } from "@cloudgear/network";
 import { NETWORK_FIELDS } from "@cloudgear/network";
 import { generate } from "../scripts/gen-schema";
+import type { DnsOptions } from "@cloudgear/dns";
+import { DNS_FIELDS } from "@cloudgear/dns";
+import type { CertOptions } from "@cloudgear/cdn";
+import { CERT_FIELDS } from "@cloudgear/cdn";
 
 const camel = (name: string): string => name.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 
@@ -22,5 +26,13 @@ describe("schema", () => {
     expect(Object.keys(network).sort()).toEqual(NETWORK_FIELDS.map(camel).sort());
     const cache: Required<CacheOptions> = { engine: "valkey", size: "micro", network: { provider: "aws" }, allowDestroy: false };
     expect(Object.keys(cache).sort()).toEqual(CACHE_FIELDS.filter((f) => f !== "provider" && f !== "name").map(camel).sort());
+  });
+
+  // Fields that are not options: the provider, the name and positional arguments.
+  test("Dns and Cert options name the same fields as the schema", () => {
+    const dns: Required<Omit<DnsOptions, "token" | "driver">> = { zone: "" };
+    expect(Object.keys(dns).sort()).toEqual(DNS_FIELDS.filter((f) => !["provider", "name", "domain"].includes(f)).sort());
+    const cert: Required<Omit<CertOptions, "driver">> = { region: "", options: {} };
+    expect(Object.keys(cert).sort()).toEqual(CERT_FIELDS.filter((f) => !["provider", "name", "dns"].includes(f)).sort());
   });
 });

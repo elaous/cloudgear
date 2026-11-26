@@ -21,7 +21,7 @@ import { Network } from "@cloudgear/network";
 import { Registry } from "@cloudgear/registry";
 import { Stream, type StreamMode } from "@cloudgear/stream";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
-import { DNS, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
+import { DNS, DNS_PROVIDERS, type DnsProvider, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
 import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
 import { ANY_METHOD, METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
@@ -1194,8 +1194,9 @@ function analyzeEntry(entryPath: string): AppModel {
     const dnsOf = (expr: NewExpression) => {
       const at = where(expr);
       const [providerArg, domainArg, optionsArg] = expr.getArguments();
-      const provider = stringLiteral(providerArg, `${at}: DNS provider`);
-      if (provider !== "gandi" && provider !== "aws") throw new Error(`${at}: DNS provider must be "gandi" or "aws"`);
+      const providerName = stringLiteral(providerArg, `${at}: DNS provider`);
+      if (!(DNS_PROVIDERS as readonly string[]).includes(providerName)) throw new Error(`${at}: DNS provider must be ${DNS_PROVIDERS.map((p) => `"${p}"`).join(" or ")}`);
+      const provider = providerName as DnsProvider;
       const zone = readStringOption(optionsArg, "zone", `${at}: DNS options`);
       const token = readSecretToken(optionsArg, at);
       try {

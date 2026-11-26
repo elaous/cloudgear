@@ -42,7 +42,7 @@ import { KinesisClient } from "@aws-sdk/client-kinesis";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
-import { applySite, assertNoUploads, hasSiteSettings, siteSettings } from "./s3site";
+import { applySite, applySiteFiles, hasSiteSettings, manifestOutput, readManifest, readSiteFiles, removeSiteFiles, SITE_MANIFEST, siteSettings } from "./s3site";
 import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { DriverContext, Drivers } from "../apply";
 import { resolveOutputReferences } from "../environment";
@@ -73,6 +73,8 @@ export interface SendClient {
 export interface AwsDriverOptions {
   region: string;
   readBundle: (fn: FunctionSpec) => Uint8Array;
+  // Directory the config's relative site paths start from.
+  siteRoot?: string;
   readIncluded?: (fn: FunctionSpec) => { name: string; data: Uint8Array }[];
   clients?: { s3?: SendClient; lambda?: SendClient; iam?: SendClient; acm?: SendClient; cloudfront?: SendClient; events?: SendClient; apigateway?: SendClient; ecr?: SendClient; kinesis?: SendClient; ec2?: SendClient; elasticache?: SendClient; ssm?: SendClient };
   // Entry's own zone, so removals still clean up.
@@ -382,7 +384,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     "@aws.S3": {
       async create(entry) {
         const region = (entry.spec.region as string | undefined) || options.region;
-        assertNoUploads(entry.spec.options as Record<string, string> | undefined, entry.physical_name);
+        const siteOptions = entry.spec.options as Record<string, string> | undefined;
+        readSiteFiles(siteOptions, options.siteRoot);
+        const uploaded = readManifest(undefined);
         await s3For(region).send(
           new CreateBucketCommand({
             Bucket: entry.physical_name,
@@ -395,12 +399,14 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
             await setVersioning(entry.physical_name, region, true);
           }
-          await applySite(s3For(region), entry.physical_name, siteSettings(entry.spec.options as Record<string, string> | undefined), {});
+          await applySite(s3For(region), entry.physical_name, siteSettings(siteOptions), {});
+          await applySiteFiles(s3For(region), entry.physical_name, siteOptions, options.siteRoot, uploaded);
         } catch (err) {
+          await removeSiteFiles(s3For(region), entry.physical_name, uploaded).catch(() => {});
           await s3For(region).send(new DeleteBucketCommand({ Bucket: entry.physical_name })).catch(() => {});
           throw err;
         }
-        return { arn: `arn:aws:s3:::${entry.physical_name}`, region };
+        return { arn: `arn:aws:s3:::${entry.physical_name}`, region, ...manifestOutput(uploaded) };
       },
       async adopt(entry, _context, hint) {
         const region = (entry.spec.region as string | undefined) || options.region;
@@ -447,7 +453,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
             `Bucket "${entry.physical_name}" cannot move from region "${before}" to "${after}"; destroy it (after emptying it) and apply again`,
           );
         }
-        assertNoUploads(entry.spec.options as Record<string, string> | undefined, entry.physical_name);
+        const siteOptions = entry.spec.options as Record<string, string> | undefined;
+        readSiteFiles(siteOptions, options.siteRoot);
         const wanted = (entry.spec.options as Record<string, string> | undefined)?.versioning === "true";
         const had = (current.spec.options as Record<string, string> | undefined)?.versioning === "true";
         if (wanted !== had) await setVersioning(entry.physical_name, after, wanted);
@@ -457,11 +464,14 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           siteSettings(entry.spec.options as Record<string, string> | undefined),
           siteSettings(current.spec.options as Record<string, string> | undefined),
         );
-        return {};
+        const uploaded = readManifest(current.outputs[SITE_MANIFEST]);
+        await applySiteFiles(s3For(after), entry.physical_name, siteOptions, options.siteRoot, uploaded);
+        return manifestOutput(uploaded, !!current.outputs[SITE_MANIFEST]);
       },
       async delete(current) {
         const region = (current.spec.region as string | undefined) || current.outputs.region;
         try {
+          await removeSiteFiles(s3For(region), current.physical_name, readManifest(current.outputs[SITE_MANIFEST]));
           await s3For(region).send(new DeleteBucketCommand({ Bucket: current.physical_name }));
         } catch (err) {
           const name = (err as { name?: string }).name;

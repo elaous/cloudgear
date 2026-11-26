@@ -647,7 +647,7 @@ destroy, because ACM shares it between certificates for a domain.
 `cloudgear invalidate [path...]` clears a site CDN's cache (`/*` by default); the
 router's distribution is not offered. An app with several CDNs needs
 `--domain <cdn domain>` to say which one.
-`BlobStoreWebSite`, below, is meant to upload a site's files; `apply` does not do that yet.
+`BlobStoreWebSite`, below, uploads a site's files on `apply`; `invalidate` clears a CDN's cache afterwards.
 
 Things that have not been checked against real services: all of the
 CloudFront, ACM, API Gateway, Route 53 and Gandi calls are tested against
@@ -740,13 +740,24 @@ const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
   config. A symbolic link that would be uploaded is an error; excluded ones are skipped.
 - Everything is literal, as for `BlobStore`; strings may use environment variables as
   elsewhere in `setup.ts`. The provider is `aws` for now.
+- `plan` and `apply` list the directory again and show `site files: N new, N changed, N
+  removed` for each site bucket. If the directory no longer matches the hash `generate`
+  stored, they stop and ask you to run `generate` again. Without `prune`, files the site no
+  longer holds are kept and shown as "no longer in the site (kept)".
+- `apply` uploads new and changed files (a file is changed when its content, content type or
+  cache header changed) with `ContentType`, `CacheControl` and a `sha256` metadata entry. It
+  records what it uploaded in state, so with `prune: true` it deletes only those keys and never
+  objects it did not upload. Removing `files` from a site with `prune: true` deletes the files it
+  uploaded. Unchanged files are not uploaded again, and a file changed in the bucket by someone
+  else is not noticed.
+- `destroy` deletes the files `apply` uploaded and then the bucket; it still refuses a bucket
+  that holds other objects or versions.
 - A bucket you import is recorded and never changed, so its website settings, CORS rules and
   files are not applied; the import says so.
 - Setting these needs `s3:PutBucketWebsite`, `s3:DeleteBucketWebsite`, `s3:PutBucketCORS`
-  and `s3:DeleteBucketCORS` for the deploying principal, on top of the bucket permissions
-  `apply` already uses.
-
-Not done yet: `apply` does not upload the files and refuses a `files` setting until it does.
+  and `s3:DeleteBucketCORS` for the deploying principal, plus `s3:PutObject` for the files and
+  `s3:DeleteObject` for `prune` and `destroy`, on top of the bucket permissions `apply`
+  already uses.
 
 ### Scheduled functions
 
@@ -2246,8 +2257,8 @@ Early draft. `aws` has the deploy drivers; `gcp` deploys buckets and functions s
 `BlobStore` is the only storage client. Function URLs are IAM-protected, so
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has any number of
-CDNs for static sites but at most one that serves the router, and uploading the
-static site is not built yet.
+CDNs for static sites but at most one that serves the router. Static sites upload to
+AWS buckets only; Google Cloud is not supported yet.
 
 ## Testing
 

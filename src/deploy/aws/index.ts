@@ -42,6 +42,7 @@ import { KinesisClient } from "@aws-sdk/client-kinesis";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
+import { applySite, assertNoUploads, hasSiteSettings, siteSettings } from "./s3site";
 import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
 import type { DriverContext, Drivers } from "../apply";
 import { resolveOutputReferences } from "../environment";
@@ -381,6 +382,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
     "@aws.S3": {
       async create(entry) {
         const region = (entry.spec.region as string | undefined) || options.region;
+        assertNoUploads(entry.spec.options as Record<string, string> | undefined, entry.physical_name);
         await s3For(region).send(
           new CreateBucketCommand({
             Bucket: entry.physical_name,
@@ -393,6 +395,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
             await setVersioning(entry.physical_name, region, true);
           }
+          await applySite(s3For(region), entry.physical_name, siteSettings(entry.spec.options as Record<string, string> | undefined), {});
         } catch (err) {
           await s3For(region).send(new DeleteBucketCommand({ Bucket: entry.physical_name })).catch(() => {});
           throw err;
@@ -401,6 +404,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
       },
       async adopt(entry, _context, hint) {
         const region = (entry.spec.region as string | undefined) || options.region;
+        const desiredOptions = entry.spec.options as Record<string, string> | undefined;
         if (hint?.arn) {
           const bucket = expectArn(hint.arn, "s3", "an S3 bucket").resource;
           if (bucket !== entry.physical_name) throw new Error(`${hint.arn} is the bucket "${bucket}", but the config uses "${entry.physical_name}"`);
@@ -416,6 +420,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           throw err;
         }
         const adopted: { outputs: Record<string, string>; files?: { path: string; content: string }[]; notes: string[] } = { outputs: { arn: `arn:aws:s3:::${entry.physical_name}`, region }, notes: [] };
+        if (hasSiteSettings(siteSettings(desiredOptions))) {
+          adopted.notes.push("its website and CORS settings are not applied: cloudgear never changes an imported bucket");
+        }
+        if (desiredOptions?.site_dir) adopted.notes.push("its site files are not uploaded: cloudgear never changes an imported bucket");
         if (hint?.exportPolicies) {
           try {
             const got = await s3For(region).send(new GetBucketPolicyCommand({ Bucket: entry.physical_name }));
@@ -439,9 +447,16 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
             `Bucket "${entry.physical_name}" cannot move from region "${before}" to "${after}"; destroy it (after emptying it) and apply again`,
           );
         }
+        assertNoUploads(entry.spec.options as Record<string, string> | undefined, entry.physical_name);
         const wanted = (entry.spec.options as Record<string, string> | undefined)?.versioning === "true";
         const had = (current.spec.options as Record<string, string> | undefined)?.versioning === "true";
         if (wanted !== had) await setVersioning(entry.physical_name, after, wanted);
+        await applySite(
+          s3For(after),
+          entry.physical_name,
+          siteSettings(entry.spec.options as Record<string, string> | undefined),
+          siteSettings(current.spec.options as Record<string, string> | undefined),
+        );
         return {};
       },
       async delete(current) {

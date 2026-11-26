@@ -199,6 +199,13 @@ describe("BlobStore path prefix", () => {
     expect(normalizeBlobPath("/")).toBe("");
     expect(normalizeBlobPath("")).toBe("");
     for (const bad of ["a//b", "../x", "a/./b", "a/../b"]) expect(() => normalizeBlobPath(bad)).toThrow(/Invalid blob path/);
+    expect(normalizeBlobPath("///a///")).toBe("a/");
+    expect(normalizeBlobPath("//a/b//")).toBe("a/b/");
+    const started = performance.now();
+    expect(normalizeBlobPath(`${"/".repeat(200_000)}a${"/".repeat(200_000)}`)).toBe("a/");
+    expect(normalizeBlobPath("/".repeat(200_000))).toBe("");
+    expect(() => normalizeBlobPath(`a${"/".repeat(100_000)}b`)).toThrow(/Invalid blob path/);
+    expect(performance.now() - started).toBeLessThan(1000);
     for (const bad of ["a*", "a?b", "${aws:username}", "x/$y"]) {
       expect(() => normalizeBlobPath(bad)).toThrow(/"\*", "\?" and "\$" are not allowed/);
     }

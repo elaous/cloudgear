@@ -12,7 +12,7 @@ import type { DnsOptions } from "@cloudgear/dns";
 import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CertOptions } from "@cloudgear/cdn";
 import { CERT_FIELDS } from "@cloudgear/cdn";
-import type { BlobStoreOptions } from "@cloudgear/blob";
+import type { BlobStoreOptions, BlobStoreWebSiteOptions } from "@cloudgear/blob";
 import { BLOB_STORE_FIELDS, BLOB_STORE_WEB_SITE_FIELDS } from "@cloudgear/blob";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
 import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
@@ -51,6 +51,19 @@ describe("schema", () => {
   test("BlobStore options name the same fields as the schema", () => {
     const store: Required<Omit<BlobStoreOptions, "driver">> = { path: "", region: "", options: {} };
     expect(Object.keys(store).sort()).toEqual(BLOB_STORE_FIELDS.filter((f) => !["provider", "name", "bucket"].includes(f)).sort());
+  });
+
+  test("BlobStoreWebSite options name the same fields as the schema", () => {
+    const options: Required<Omit<BlobStoreWebSiteOptions, "driver">> = {
+      path: "",
+      region: "",
+      options: {},
+      indexDocument: "",
+      errorDocument: "",
+      files: { dir: "" },
+      cors: [],
+    };
+    expect(Object.keys(options).sort()).toEqual(BLOB_STORE_WEB_SITE_FIELDS.filter((f) => !["provider", "name", "bucket"].includes(f)).map(camel).sort());
   });
 
   // The web site repeats the parent's fields first.

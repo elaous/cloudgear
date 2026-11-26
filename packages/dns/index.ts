@@ -12,6 +12,7 @@ import {
   type DnsRecordType,
 } from "./driver";
 
+export { DNS_FIELDS, DNS_PROVIDERS } from "./schema.gen";
 export { createDnsDriver, registerDnsDriver, normalizeCertDomain, normalizeHostname, normalizeRecordName, relativeName, isWithinZone, isWildcardDomain, wildcardCovers } from "./driver";
 export type { DnsDriver, DnsDriverFactory, DnsDriverOptions, DnsProvider, DnsRecord, DnsRecordType } from "./driver";
 

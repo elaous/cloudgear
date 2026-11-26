@@ -5,13 +5,15 @@ import type { CacheOptions } from "@cloudgear/cache";
 import { CACHE_FIELDS } from "../packages/cache/schema.gen";
 import type { NetworkOptions } from "@cloudgear/network";
 import { NETWORK_FIELDS } from "@cloudgear/network";
-import { generate } from "../scripts/gen-schema";
+import { create, getOption, toBinary } from "@bufbuild/protobuf";
+import { FieldOptionsSchema, type FieldOptions } from "@bufbuild/protobuf/wkt";
+import { generate, loadRegistry } from "../scripts/gen-schema";
 import type { DnsOptions } from "@cloudgear/dns";
 import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CertOptions } from "@cloudgear/cdn";
 import { CERT_FIELDS } from "@cloudgear/cdn";
 import type { BlobStoreOptions } from "@cloudgear/blob";
-import { BLOB_STORE_FIELDS } from "@cloudgear/blob";
+import { BLOB_STORE_FIELDS, BLOB_STORE_WEB_SITE_FIELDS } from "@cloudgear/blob";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
 import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
 
@@ -49,5 +51,24 @@ describe("schema", () => {
   test("BlobStore options name the same fields as the schema", () => {
     const store: Required<Omit<BlobStoreOptions, "driver">> = { path: "", region: "", options: {} };
     expect(Object.keys(store).sort()).toEqual(BLOB_STORE_FIELDS.filter((f) => !["provider", "name", "bucket"].includes(f)).sort());
+  });
+
+  // The web site repeats the parent's fields first.
+  test("BlobStoreWebSite repeats the BlobStore fields exactly", () => {
+    for (const field of BLOB_STORE_FIELDS) expect([...BLOB_STORE_WEB_SITE_FIELDS]).toContain(field);
+    expect([...BLOB_STORE_WEB_SITE_FIELDS].slice(0, BLOB_STORE_FIELDS.length)).toEqual([...BLOB_STORE_FIELDS]);
+    const registry = loadRegistry();
+    const parent = registry.getMessage("cloudgear.v1.BlobStore")!;
+    const child = registry.getMessage("cloudgear.v1.BlobStoreWebSite")!;
+    const optionBytes = (field: { proto: { options?: FieldOptions } }): string =>
+      Buffer.from(toBinary(FieldOptionsSchema, field.proto.options ?? create(FieldOptionsSchema))).toString("hex");
+    for (const field of parent.fields) {
+      const same = child.fields.find((f) => f.name === field.name)!;
+      expect(same).toBeDefined();
+      const shape = (f: typeof field) => [f.number, f.fieldKind, f.proto.type, f.fieldKind === "map" ? f.mapKind : f.proto.typeName, f.proto.label, f.proto.proto3Optional];
+      expect(shape(same)).toEqual(shape(field));
+      expect(optionBytes(same)).toBe(optionBytes(field));
+    }
+    expect(getOption(child, registry.getExtension("cloudgear.v1.extends")!)).toBe("BlobStore");
   });
 });

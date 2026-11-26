@@ -53,3 +53,58 @@ message BlobStore {
   optional string region = 4 [(cloudgear.v1.immutable) = true];
   map<string, string> options = 5;
 }
+
+enum CorsMethod {
+  CORS_METHOD_UNSPECIFIED = 0;
+  CORS_METHOD_GET = 1 [(cloudgear.v1.name) = "GET"];
+  CORS_METHOD_HEAD = 2 [(cloudgear.v1.name) = "HEAD"];
+  CORS_METHOD_POST = 3 [(cloudgear.v1.name) = "POST"];
+  CORS_METHOD_PUT = 4 [(cloudgear.v1.name) = "PUT"];
+  CORS_METHOD_DELETE = 5 [(cloudgear.v1.name) = "DELETE"];
+}
+
+// A CORS rule, in the shape S3 and GCS share.
+message CorsRule {
+  repeated string origins = 1 [(cloudgear.v1.required) = true];
+  repeated CorsMethod methods = 2 [(cloudgear.v1.required) = true];
+  repeated string headers = 3;
+  repeated string expose_headers = 4;
+  optional int32 max_age_seconds = 5;
+}
+
+message CacheControlRule {
+  // A glob over file paths relative to the directory.
+  string match = 1 [(cloudgear.v1.required) = true];
+  // The Cache-Control header value.
+  string value = 2 [(cloudgear.v1.required) = true];
+}
+
+// The files uploaded to a website bucket.
+message SiteFiles {
+  // The local directory whose files are uploaded.
+  string dir = 1 [(cloudgear.v1.required) = true];
+  // Globs over file paths; empty includes everything.
+  repeated string include = 2;
+  repeated string exclude = 3;
+  // Deletes uploaded files that are no longer in the directory.
+  bool prune = 4;
+  // The first matching rule wins.
+  repeated CacheControlRule cache_control = 5;
+}
+
+// A BlobStore that serves a website from uploaded files.
+message BlobStoreWebSite {
+  option (cloudgear.v1.extends) = "BlobStore";
+
+  BlobProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+  string bucket = 6 [(cloudgear.v1.immutable) = true, (cloudgear.v1.required) = true];
+  optional string path = 3;
+  optional string region = 4 [(cloudgear.v1.immutable) = true];
+  map<string, string> options = 5;
+
+  optional string index_document = 7 [(cloudgear.v1.default_value) = "index.html"];
+  optional string error_document = 8;
+  optional SiteFiles files = 9;
+  repeated CorsRule cors = 10;
+}

@@ -12,6 +12,7 @@ import {
 } from "./driver";
 
 export { assertSecretName, createSecretDriver, registerSecretDriver, parseSecretPath } from "./driver";
+export { SECRET_PROVIDERS, SECRET_SERVICES, SECRET_STORE_DEFAULTS, SECRET_STORE_FIELDS } from "./schema.gen";
 export type { SecretDriver, SecretDriverFactory, SecretDriverOptions, SecretProvider, SecretService } from "./driver";
 
 export interface SecretStoreOptions {

@@ -1,5 +1,7 @@
-export type SecretProvider = "aws";
-export type SecretService = "ssm" | "secretsmanager";
+import { SECRET_STORE_DEFAULTS, type SECRET_PROVIDERS, type SECRET_SERVICES } from "./schema.gen";
+
+export type SecretProvider = (typeof SECRET_PROVIDERS)[number];
+export type SecretService = (typeof SECRET_SERVICES)[number];
 
 export interface SecretDriver {
   // Missing secrets are null, never an error.
@@ -18,7 +20,7 @@ export interface SecretDriverOptions {
 
 export type SecretDriverFactory = (options: SecretDriverOptions) => SecretDriver | Promise<SecretDriver>;
 
-export const DEFAULT_SERVICE: SecretService = "ssm";
+export const DEFAULT_SERVICE: SecretService = SECRET_STORE_DEFAULTS.service;
 
 const factories = new Map<string, SecretDriverFactory>();
 

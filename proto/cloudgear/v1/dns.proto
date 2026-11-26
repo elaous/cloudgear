@@ -3,6 +3,7 @@ syntax = "proto3";
 package cloudgear.v1;
 
 import "cloudgear/v1/options.proto";
+import "cloudgear/v1/secret.proto";
 
 enum DnsProvider {
   DNS_PROVIDER_UNSPECIFIED = 0;
@@ -10,7 +11,6 @@ enum DnsProvider {
   DNS_PROVIDER_AWS = 2 [(cloudgear.v1.name) = "aws"];
 }
 
-// The provider token is not modeled yet.
 // A domain whose records cloudgear manages in a zone at a DNS provider.
 message Dns {
   DnsProvider provider = 1 [(cloudgear.v1.immutable) = true];
@@ -19,4 +19,6 @@ message Dns {
   string domain = 3 [(cloudgear.v1.immutable) = true];
   // Defaults to the last two labels of the domain, three for co.uk-style suffixes.
   optional string zone = 4 [(cloudgear.v1.immutable) = true];
+  // A secret that holds the provider token; never the token itself.
+  optional SecretRef token = 5;
 }

@@ -22,7 +22,7 @@ import { Registry } from "@cloudgear/registry";
 import { Stream, type StreamMode } from "@cloudgear/stream";
 import { BLOB_OPERATIONS, normalizeBlobPath, parseBlobUri, type BlobAccess, type BlobProvider } from "@cloudgear/blob";
 import { DNS, DNS_PROVIDERS, type DnsProvider, isWildcardDomain, normalizeHostname, wildcardCovers } from "@cloudgear/dns";
-import { parseSecretPath, type SecretService } from "@cloudgear/secrets";
+import { parseSecretPath, SECRET_STORE_DEFAULTS, type SecretService } from "@cloudgear/secrets";
 import { ANY_METHOD, METHODS, normalizeCron, toEventBridgeCron } from "@cloudgear/functions";
 import { behaviorsFor, conflictingGroups } from "../routes";
 import { configString, type SetupEnv } from "./configvalue";
@@ -348,7 +348,7 @@ function analyzeEntry(entryPath: string): AppModel {
     if (!decl || decl.getInitializer() !== expr) throw new Error(`${at}: assign new SecretStore(...) to a variable so its paths can be traced`);
     const [providerArg, optionsArg] = expr.getArguments();
     if (stringLiteral(providerArg, `${at}: SecretStore provider`) !== "aws") throw new Error(`${at}: SecretStore provider must be "aws"`);
-    const service = readStringOption(optionsArg, "service", `${at}: SecretStore options`) ?? "ssm";
+    const service = readStringOption(optionsArg, "service", `${at}: SecretStore options`) ?? SECRET_STORE_DEFAULTS.service;
     if (service !== "ssm" && service !== "secretsmanager") throw new Error(`${at}: SecretStore service must be "ssm" or "secretsmanager"`);
     secretStores.set(decl, {
       provider: "aws",

@@ -24,6 +24,9 @@ extend google.protobuf.FieldOptions {
   bool immutable = 50001;
   // Applied when the field is unset.
   string default_value = 50002;
+  // The field refers to a resource; the value is the message of that resource, such as "Dns".
+  // Written as the resource itself in setup files, stored as its name.
+  string references = 50003;
 }
 
 extend google.protobuf.EnumValueOptions {

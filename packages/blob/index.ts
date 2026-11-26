@@ -84,7 +84,14 @@ export interface BlobStoreWebSiteOptions extends BlobStoreOptions {
   cors?: CorsRule[];
 }
 
-const ORIGIN = /^(\*|[a-z][a-z0-9+.-]*:\/\/[^\s/]*[^\s/*][^\s/]*)$/i;
+const ORIGIN = /^([a-z][a-z0-9+.-]*):\/\/([^\s/]+)$/i;
+
+// "*", or scheme://host where the host has a character besides "*".
+function isOrigin(origin: string): boolean {
+  if (origin === "*") return true;
+  const match = ORIGIN.exec(origin);
+  return match !== null && match[2]!.replaceAll("*", "") !== "";
+}
 const MAX_CORS_RULES = 100;
 const MAX_AGE_SECONDS = 31_536_000;
 
@@ -99,7 +106,7 @@ export function assertCorsRules(rules: readonly CorsRule[], at: string): void {
     assertStrings(rule.origins, "origins", where);
     if (rule.origins.length === 0) throw new Error(`${where}: origins must not be empty`);
     for (const origin of rule.origins) {
-      if (!ORIGIN.test(origin) || origin.split("*").length > 2) throw new Error(`${where}: origin "${origin}" must be "*" or look like "https://example.com", with at most one "*"`);
+      if (!isOrigin(origin) || origin.split("*").length > 2) throw new Error(`${where}: origin "${origin}" must be "*" or look like "https://example.com", with at most one "*"`);
     }
     assertStrings(rule.methods, "methods", where);
     if (rule.methods.length === 0) throw new Error(`${where}: methods must not be empty`);

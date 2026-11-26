@@ -29,7 +29,6 @@ describe("listSiteFiles", () => {
     expect(files[0]?.contentType).toContain("javascript");
     expect(files[1]?.contentType).toContain("text/html");
     expect(files[1]?.cacheControl).toBeUndefined();
-    expect(files[1]?.md5).toMatch(/^[0-9a-f]{32}$/);
     expect(files[1]?.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 

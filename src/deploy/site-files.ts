@@ -15,7 +15,6 @@ export interface SiteFile {
   key: string;
   path: string;
   size: number;
-  md5: string;
   sha256: string;
   contentType: string;
   cacheControl?: string;
@@ -89,7 +88,6 @@ export function listSiteFiles(dir: string, rules: SiteRules): SiteFile[] {
       key,
       path: file,
       size: bytes.byteLength,
-      md5: createHash("md5").update(bytes).digest("hex"),
       sha256: createHash("sha256").update(bytes).digest("hex"),
       contentType: contentTypeOf(key),
       ...(rule ? { cacheControl: rule.value } : {}),

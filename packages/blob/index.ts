@@ -162,7 +162,11 @@ export function assertWebSiteDocuments(options: { indexDocument?: string; errorD
 
 // Prefix gets a trailing slash; bucket root is an empty string.
 export function normalizeBlobPath(path: string): string {
-  const trimmed = path.replace(/^\/+/, "").replace(/\/+$/, "");
+  let start = 0;
+  while (path[start] === "/") start++;
+  let end = path.length;
+  while (end > start && path[end - 1] === "/") end--;
+  const trimmed = path.slice(start, end);
   if (!trimmed) return "";
   if (trimmed.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new Error(`Invalid blob path "${path}": empty, "." and ".." segments are not allowed`);

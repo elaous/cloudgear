@@ -44,7 +44,7 @@ import { timed } from "@cloudgear/debug";
 import type { DnsDriver } from "@cloudgear/dns";
 import { applySite, applySiteFiles, hasSiteSettings, manifestOutput, readManifest, readSiteFiles, removeSiteFiles, SITE_MANIFEST, siteSettings } from "./s3site";
 import { CreateBucketCommand, DeleteBucketCommand, GetBucketPolicyCommand, HeadBucketCommand, PutBucketTaggingCommand, PutBucketVersioningCommand, S3Client, type BucketLocationConstraint } from "@aws-sdk/client-s3";
-import type { DriverContext, Drivers } from "../apply";
+import { PartialApplyError, type DriverContext, type Drivers } from "../apply";
 import { resolveOutputReferences } from "../environment";
 import { OUTPUT_REFERENCE, type DesiredEntry, type FunctionComparable } from "../plan";
 import type { StateEntry } from "../state";
@@ -396,11 +396,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         );
         try {
           if (options.tags) await s3For(region).send(new PutBucketTaggingCommand({ Bucket: entry.physical_name, Tagging: { TagSet: tagList(tagsFor(entry.name)) } }));
-          if (entry.spec.options && (entry.spec.options as Record<string, string>).versioning === "true") {
-            await setVersioning(entry.physical_name, region, true);
-          }
           await applySite(s3For(region), entry.physical_name, siteSettings(siteOptions), {});
           await applySiteFiles(s3For(region), entry.physical_name, siteOptions, options.siteRoot, uploaded);
+          if (siteOptions?.versioning === "true") await setVersioning(entry.physical_name, region, true);
         } catch (err) {
           await removeSiteFiles(s3For(region), entry.physical_name, uploaded).catch(() => {});
           await s3For(region).send(new DeleteBucketCommand({ Bucket: entry.physical_name })).catch(() => {});
@@ -465,13 +463,22 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           siteSettings(current.spec.options as Record<string, string> | undefined),
         );
         const uploaded = readManifest(current.outputs[SITE_MANIFEST]);
-        await applySiteFiles(s3For(after), entry.physical_name, siteOptions, options.siteRoot, uploaded);
-        return manifestOutput(uploaded, !!current.outputs[SITE_MANIFEST]);
+        const hadManifest = !!current.outputs[SITE_MANIFEST];
+        try {
+          await applySiteFiles(s3For(after), entry.physical_name, siteOptions, options.siteRoot, uploaded);
+        } catch (err) {
+          throw new PartialApplyError(err, { ...current.outputs, ...manifestOutput(uploaded, hadManifest) });
+        }
+        return manifestOutput(uploaded, hadManifest);
       },
       async delete(current) {
         const region = (current.spec.region as string | undefined) || current.outputs.region;
+        const uploaded = readManifest(current.outputs[SITE_MANIFEST]);
+        if (Object.keys(uploaded).length && (current.spec.options as Record<string, string> | undefined)?.versioning === "true") {
+          throw new Error(`Bucket "${current.physical_name}" is versioned and holds site files whose versions cloudgear cannot delete; empty it, or run cloudgear import to keep it, then retry`);
+        }
         try {
-          await removeSiteFiles(s3For(region), current.physical_name, readManifest(current.outputs[SITE_MANIFEST]));
+          await removeSiteFiles(s3For(region), current.physical_name, uploaded);
           await s3For(region).send(new DeleteBucketCommand({ Bucket: current.physical_name }));
         } catch (err) {
           const name = (err as { name?: string }).name;

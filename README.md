@@ -751,7 +751,8 @@ const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
   uploaded. Unchanged files are not uploaded again, and a file changed in the bucket by someone
   else is not noticed.
 - `destroy` deletes the files `apply` uploaded and then the bucket; it still refuses a bucket
-  that holds other objects or versions.
+  that holds other objects. A versioned bucket with uploaded files is refused before anything
+  is deleted, because cloudgear cannot delete object versions; empty it yourself first.
 - A bucket you import is recorded and never changed, so its website settings, CORS rules and
   files are not applied; the import says so.
 - Setting these needs `s3:PutBucketWebsite`, `s3:DeleteBucketWebsite`, `s3:PutBucketCORS`

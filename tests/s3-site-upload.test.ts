@@ -125,21 +125,84 @@ describe("uploading site files", () => {
     expect(() => withSiteChanges(plan(configFor(options), emptyState()), root)).toThrow("re-run `cloudgear generate`");
   });
 
-  test("a failed upload on create removes what was uploaded and the bucket", async () => {
-    const root = project(FILES);
-    let puts = 0;
-    const overrides = {
-      PutObjectCommand: () => {
-        if (++puts === 2) throw new Error("denied");
-        return {};
+  test("a failed upload on create stops the others, removes what landed and the bucket", async () => {
+    const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`f${String(i).padStart(2, "0")}.txt`, `${i}`]));
+    const root = project(many);
+    const landed: string[] = [];
+    let calls = 0;
+    const aws = fakeAws(
+      {
+        PutObjectCommand: async (input) => {
+          if (++calls === 3) throw new Error("denied");
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          landed.push(input.Key);
+          return {};
+        },
       },
-    };
-    await expect(deploy(root, siteOptions(root), emptyState(), overrides)).rejects.toThrow("denied");
-    const aws = fakeAws(overrides, undefined, undefined, undefined, root);
-    puts = 0;
+      undefined,
+      undefined,
+      undefined,
+      root,
+    );
     await expect(apply(plan(configFor(siteOptions(root)), emptyState()), emptyState(), aws.drivers, { save: () => {} })).rejects.toThrow("denied");
-    expect(aws.of("DeleteObjectsCommand")).toHaveLength(1);
+    const deleted = aws.of("DeleteObjectsCommand")[0].Delete.Objects.map((o: { Key: string }) => o.Key).sort();
+    expect(deleted).toEqual([...landed].sort());
+    expect(calls).toBeLessThan(40);
+    expect(aws.names().indexOf("DeleteObjectsCommand")).toBeGreaterThan(aws.names().lastIndexOf("PutObjectCommand"));
     expect(aws.of("DeleteBucketCommand")).toEqual([{ Bucket: "site-bucket" }]);
+  });
+
+  test("a failed update records the files it uploaded before failing", async () => {
+    const root = project(FILES);
+    const { state } = await deploy(root, siteOptions(root, { site_prune: "true" }));
+    write(root, { "a.html": "a", "b.html": "b" });
+    let puts = 0;
+    const aws = fakeAws({ PutObjectCommand: () => { if (++puts === 2) throw new Error("denied"); return {}; } }, undefined, undefined, undefined, root);
+    const actions = withSiteChanges(plan(configFor(siteOptions(root, { site_prune: "true" })), state), root);
+    await expect(apply(actions, state, aws.drivers, { save: () => {} })).rejects.toThrow("denied");
+    const manifest = readManifest(state.entries["@aws.S3.site"]!.outputs.site_manifest);
+    expect(Object.keys(manifest)).toHaveLength(3);
+    expect(state.entries["@aws.S3.site"]!.spec.incomplete).toBe(true);
+  });
+
+  test("a prune that S3 refuses for a key is an error and keeps the key tracked", async () => {
+    const root = project(FILES);
+    const { state } = await deploy(root, siteOptions(root, { site_prune: "true" }));
+    write(root, { "assets/app.js": null });
+    const aws = fakeAws({ DeleteObjectsCommand: () => ({ Errors: [{ Key: "assets/app.js", Message: "AccessDenied" }] }) }, undefined, undefined, undefined, root);
+    const actions = withSiteChanges(plan(configFor(siteOptions(root, { site_prune: "true" })), state), root);
+    await expect(apply(actions, state, aws.drivers, { save: () => {} })).rejects.toThrow("could not delete assets/app.js: AccessDenied");
+    expect(Object.keys(readManifest(state.entries["@aws.S3.site"]!.outputs.site_manifest))).toContain("assets/app.js");
+  });
+
+  test("a damaged manifest is an error, not an empty list", async () => {
+    expect(() => readManifest("{not json")).toThrow("is damaged");
+    expect(() => readManifest('{"a":1}')).toThrow("is damaged");
+    expect(() => readManifest("[]")).toThrow("is damaged");
+    expect(Object.keys(readManifest(""))).toEqual([]);
+  });
+
+  test("destroying a versioned bucket with site files fails before deleting anything", async () => {
+    const root = project(FILES);
+    const { state } = await deploy(root, siteOptions(root, { versioning: "true" }));
+    const aws = fakeAws({}, undefined, undefined, undefined, root);
+    await expect(apply(plan({ ...configFor({}), resource: [] }, state), state, aws.drivers, { save: () => {} })).rejects.toThrow("is versioned and holds site files");
+    expect(aws.calls).toEqual([]);
+  });
+
+  test("a new versioned site bucket enables versioning after the files are uploaded", async () => {
+    const root = project(FILES);
+    const { aws } = await deploy(root, siteOptions(root, { versioning: "true" }));
+    expect(aws.names().indexOf("PutBucketVersioningCommand")).toBeGreaterThan(aws.names().lastIndexOf("PutObjectCommand"));
+  });
+
+  test("a site directory that is a symbolic link out of the project is refused", async () => {
+    const root = project({});
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "s3-outside-"));
+    roots.push(outside);
+    fs.writeFileSync(path.join(outside, "secret.txt"), "s");
+    fs.symlinkSync(outside, path.join(root, "dist"));
+    expect(() => listSiteFiles(path.join(root, "dist"), { include: [], exclude: [], cacheControl: [] }, root)).toThrow("resolves outside");
   });
 
   test("dropping the site deletes tracked files only when pruning", async () => {

@@ -49,14 +49,17 @@ export const fingerprint = (file: SiteFile): string => createHash("sha256").upda
 export function readManifest(raw: string | undefined): SiteManifest {
   const manifest: SiteManifest = Object.create(null);
   if (!raw) return manifest;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return manifest;
-    for (const [key, value] of Object.entries(parsed)) if (typeof value === "string") manifest[key] = value;
-    return manifest;
+    parsed = JSON.parse(raw);
   } catch {
-    return manifest;
+    parsed = undefined;
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((value) => typeof value !== "string")) {
+    throw new Error(`the recorded list of uploaded site files (${SITE_MANIFEST}) is damaged; restore the state or remove that output`);
+  }
+  for (const [key, value] of Object.entries(parsed)) manifest[key] = value as string;
+  return manifest;
 }
 
 // Empty when nothing was ever uploaded; "" clears an earlier manifest.
@@ -105,10 +108,18 @@ export const describeSiteDiff = (diff: SiteDiff, prune: boolean): string =>
 
 async function inBatches<T>(items: readonly T[], size: number, run: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
+  let failure: { error: unknown } | undefined;
   const worker = async () => {
-    while (next < items.length) await run(items[next++]!);
+    while (!failure && next < items.length) {
+      try {
+        await run(items[next++]!);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
   };
   await Promise.all(Array.from({ length: Math.min(size, items.length) }, worker));
+  if (failure) throw failure.error;
 }
 
 async function deleteKeys(s3: SendClient, bucket: string, keys: readonly string[]): Promise<void> {

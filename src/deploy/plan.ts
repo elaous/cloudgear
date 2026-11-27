@@ -130,6 +130,10 @@ export interface FunctionComparable {
   memory_mb: number;
   timeout_s: number;
   code: string;
+  // Set only for a finished zip, which is uploaded as it is, with its handler and architecture.
+  archive?: true;
+  handler?: string;
+  architecture?: string;
   env: Record<string, string>;
   reserved_concurrency: number;
   options?: Record<string, string>;
@@ -143,8 +147,8 @@ export interface FunctionComparable {
 }
 
 const FUNCTION_CHANGE_FIELDS: Record<string, (keyof FunctionComparable)[]> = {
-  code: ["code"],
-  config: ["runtime", "memory_mb", "timeout_s", "env", "reserved_concurrency", "options"],
+  code: ["code", "archive", "architecture"],
+  config: ["runtime", "handler", "memory_mb", "timeout_s", "env", "reserved_concurrency", "options"],
   permissions: ["permissions", "secrets", "policies"],
   auth: ["auth", "scheduled_only"],
   invokers: ["invokers"],
@@ -187,12 +191,18 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
   }));
 
   for (const fn of config.function) {
+    if (fn.type !== "@aws.Lambda" && (fn.bundle.archive || fn.handler || fn.architecture)) {
+      throw new Error(`cloudgear config: function "${fn.name}" is a ${fn.type}, which cannot take a finished zip, a handler or an architecture; only @aws.Lambda can`);
+    }
     const spec: FunctionComparable = {
       physical_name: fn.physical_name,
       runtime: fn.runtime,
       memory_mb: fn.memory_mb,
       timeout_s: fn.timeout_s,
       code: fn.bundle.sha256,
+      ...(fn.bundle.archive ? { archive: true as const } : {}),
+      ...(fn.handler ? { handler: fn.handler } : {}),
+      ...(fn.architecture ? { architecture: fn.architecture } : {}),
       reserved_concurrency: fn.reserved_concurrency,
       ...optionsSpec(fn.options),
       auth: config.authenticated,

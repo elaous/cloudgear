@@ -7,7 +7,6 @@ import { decodeConfig, encodeConfig } from "../src/config/schema";
 import { adoptEntries } from "../src/deploy/adopt";
 import { buildDistributionConfig, attachedOf } from "../src/deploy/aws/cloudfront";
 import { plan, type CdnComparable } from "../src/deploy/plan";
-import { configHash, envReportPath } from "../src/envreport";
 import { baseConfig, emptyState, fakeAws, fn } from "./helpers";
 
 const origin = { Id: "legacy-api", DomainName: "legacy.example.org", OriginPath: "", CustomOriginConfig: { HTTPPort: 80, HTTPSPort: 443, OriginProtocolPolicy: "https-only" } };
@@ -171,7 +170,6 @@ describe("attached origins", () => {
       const file = path.join(dir, "cloudgear.prototxt");
       const text = encodeConfig(config);
       fs.writeFileSync(file, text);
-      fs.writeFileSync(envReportPath(file), JSON.stringify({ version: 1, config: configHash(text), functions: {} }));
       return file;
     };
 
@@ -182,13 +180,12 @@ describe("attached origins", () => {
       return state;
     };
 
-    test("the attached origins land in the config and the env report still matches it", async () => {
+    test("the attached origins land in the config", async () => {
       const file = setup(withCdn());
       const sync = syncAttached(file, await imported());
       expect(sync).toEqual({ written: [`www.example.com: kept 1 attached origin(s) in ${file}`], problems: [] });
       const written = fs.readFileSync(file, "utf8");
       expect(decodeConfig(written).cdn[0]!.attached![0]!.id).toBe("legacy-api");
-      expect(JSON.parse(fs.readFileSync(envReportPath(file), "utf8")).config).toBe(configHash(written));
       expect(written).toBe(encodeConfig(withCdn(decodeConfig(written).cdn[0]!.attached)));
     });
 

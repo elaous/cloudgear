@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { decodeConfig, type AttachedOriginSpec, type CloudgearConfig } from "./config/schema";
 import { encodePrototxt, type ProtoMessage } from "./config/prototxt";
 import type { State } from "./deploy/state";
-import { configHash, envReportPath, readEnvReport } from "./envreport";
 
 // Adds the attached blocks at the end of the cdn or api block of the domain.
 function insertAttached(lines: string[], kind: "cdn" | "api", domain: string, attached: AttachedOriginSpec[]): boolean {
@@ -55,10 +54,6 @@ export function syncAttached(configPath: string, state: State): AttachedSync {
     else result.problems.push(`${entry.name}: the attached origin(s) ${attached.map((item) => item.id).join(", ")} could not be added to ${configPath}, whose ${isCdn ? "cdn" : "api"} block is not in the generated layout; run \`cloudgear generate\` and import again, or apply will remove them`);
   }
   if (!result.written.length) return result;
-  const next = lines.join("\n");
-  fs.writeFileSync(configPath, next);
-  const reportFile = envReportPath(configPath);
-  const report = readEnvReport(reportFile);
-  if (report && report.config === configHash(text)) fs.writeFileSync(reportFile, `${JSON.stringify({ ...report, config: configHash(next) }, null, 2)}\n`);
+  fs.writeFileSync(configPath, lines.join("\n"));
   return result;
 }

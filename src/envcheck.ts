@@ -1,40 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
 import type { CloudgearConfig } from "./config/schema";
-import { configHash, envReportPath, formatMissingEnv, missingEnv, readEnvReport, type EnvReport } from "./envreport";
 import { secretGroups, secretStatus } from "./secrets";
 
 const SKIP = "Pass --skip-env-check to deploy anyway.";
 
-function currentReport(config: CloudgearConfig, configPath: string): EnvReport | undefined {
-  const report = readEnvReport(envReportPath(configPath));
-  if (report && report.config !== configHash(fs.readFileSync(configPath, "utf8"))) {
-    throw new Error(`${path.relative(process.cwd(), envReportPath(configPath))} was made for another config; re-run \`cloudgear generate\` (and commit both files together)`);
-  }
-  void config;
-  return report;
-}
-
-export function envWarnings(config: CloudgearConfig, configPath: string): string | undefined {
-  try {
-    const report = currentReport(config, configPath);
-    const missing = report ? missingEnv(report) : [];
-    return missing.length ? `${formatMissingEnv(missing)}\n         \`cloudgear apply\` will refuse to deploy until they are provided.` : undefined;
-  } catch (err) {
-    return (err as Error).message;
-  }
-}
-
-// Required env vars and their secrets are checked before deploy.
-export async function checkEnvironment(config: CloudgearConfig, configPath: string, region: string | undefined, warn: (message: string) => void = console.warn): Promise<void> {
-  const reportFile = envReportPath(configPath);
-  const report = currentReport(config, configPath);
-  if (!report) throw new Error(`${path.relative(process.cwd(), reportFile)} not found; run \`cloudgear generate\` first, or pass --skip-env-check`);
-  const missing = missingEnv(report);
-  if (missing.length) throw new Error(`${formatMissingEnv(missing)}\n${SKIP}`);
-  for (const [name, fn] of Object.entries(report.functions)) {
-    if (fn.dynamic.length) warn(`warning: ${name} reads the environment in ways that cannot be checked (${fn.dynamic.join(", ")})`);
-  }
+// Checks before deploy that the secrets the functions need are stored.
+export async function checkEnvironment(config: CloudgearConfig, region: string | undefined): Promise<void> {
   if (!secretGroups(config).length) return;
   const resolved = config.region || region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   // A DNS token in the deployer's environment needs no storage.

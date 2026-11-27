@@ -7,7 +7,8 @@ import { EventBus } from "@cloudgear/events";
 import { analyzeApp, type AnalyzedFunction, type SecretBindingModel, type SecretRefModel } from "./analyze/app";
 import { bundleFunction } from "./build/bundle";
 import { decodeConfig, encodeConfig, type AttachedOriginSpec, type CloudgearConfig, type FunctionSpec, type SecretBindingSpec, type SecretRefSpec } from "./config/schema";
-import { configHash, envReportPath, type EnvReport, type EnvSource } from "./envreport";
+import type { EnvReport, EnvSource } from "./envreport";
+import { updateLocalEnv, type LocalEnvUpdate } from "./localenv";
 import { cacheIdFor, fitName, gcpFunctionIdFor, sanitizeName } from "./names";
 import { capability, crossProviderAccess, environmentOptions, providerProfile, validateConfigOptions } from "./providers";
 
@@ -22,6 +23,8 @@ export interface GenerateOptions {
   invokers?: string[];
   reservedConcurrency?: number;
   setupEnv?: Record<string, string | undefined>;
+  // Dotenv file that gets a line for each variable the functions read.
+  localEnvPath?: string;
 }
 
 const MAX_INCLUDED_BYTES = 250 * 1024 * 1024;
@@ -30,7 +33,7 @@ const INVOKER = /^(\d{12}|arn:aws[a-z-]*:iam::\d{12}:(root|(user|role)\/.+))$/;
 
 const functionPhysicalName = (provider: string, project: string, name: string): string => (provider === "gcp" ? gcpFunctionIdFor(project, name) : fitName(`${project}-${sanitizeName(name)}`, 64));
 
-export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[] }> {
+export async function generate(options: GenerateOptions): Promise<{ config: CloudgearConfig; warnings: string[]; env: EnvReport; localEnv?: LocalEnvUpdate }> {
   const model = await timed("generate", `analyze ${options.entry}`, async () => analyzeApp(options.entry, options.setupEnv));
   debug("generate", "analyzed", () => ({
     provider: model.provider,
@@ -337,7 +340,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   const carried = new Set([...config.cdn.filter((c) => c.attached?.length).map((c) => c.domain), ...(config.api?.attached?.length ? [config.api.domain] : [])]);
   for (const domain of previous.keys()) if (!carried.has(domain)) warnings.push(`the attached origins of ${domain} were dropped: it is no longer a CDN here`);
   const configText = encodeConfig(config);
-  const report: EnvReport = { version: 1, config: configHash(configText), functions: {} };
+  const report: EnvReport = { functions: {} };
   for (const name of model.optionalEnv) {
     if (!model.functions.some((fn) => name in fn.envUse.variables)) warnings.push(`optionalEnv "${name}" is not read by any function; check the spelling`);
   }
@@ -361,14 +364,15 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
 
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(options.configPath, configText);
-  fs.writeFileSync(envReportPath(options.configPath), `${JSON.stringify(report, null, 2)}\n`);
+  fs.rmSync(`${options.configPath.replace(/\.prototxt$/, "")}.env.json`, { force: true });
+  const localEnv = options.localEnvPath ? updateLocalEnv(options.localEnvPath, report) : undefined;
   debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
   if (functions.some((f) => f.secret?.length) || config.certificate.some((c) => c.dns.token)) {
     for (const file of trackedEnvFiles(path.dirname(path.resolve(options.entry)))) {
       warnings.push(`${file} is tracked by git; keep env files out of the repository (add them to .gitignore) and load them with \`cloudgear secrets set\``);
     }
   }
-  return { config, warnings: [...new Set(warnings)] };
+  return { config, warnings: [...new Set(warnings)], env: report, ...(localEnv ? { localEnv } : {}) };
 }
 
 const refSpec = (s: SecretRefModel): SecretRefSpec => ({

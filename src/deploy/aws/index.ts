@@ -107,6 +107,9 @@ function withDebug(service: string, client: SendClient): SendClient {
 }
 
 export function awsDrivers(options: AwsDriverOptions): Drivers {
+  // A finished zip goes up as it is; a script bundle becomes index.mjs beside its included files.
+  const codeFor = (fn: FunctionSpec): Uint8Array =>
+    fn.bundle.archive ? options.readBundle(fn) : zip([{ name: "index.mjs", data: options.readBundle(fn) }, ...(options.readIncluded?.(fn) ?? [])]);
   // Buckets may sit in other regions; one client per region.
   const s3Clients = new Map<string, SendClient>();
   const s3For = (region?: string): SendClient => {
@@ -353,7 +356,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   function environment(spec: FunctionComparable, context?: DriverContext) {
-    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...resolveOutputReferences(spec.env, context), ...environmentOptions(spec.options) } };
+    // A finished zip is not a Node program.
+    return { Variables: { ...(spec.archive ? {} : { NODE_OPTIONS: "--enable-source-maps" }), ...resolveOutputReferences(spec.env, context), ...environmentOptions(spec.options) } };
   }
 
   const networkFor = (spec: FunctionComparable) => resolveNetwork({ ec2, region: options.region, log }, spec.options);
@@ -513,7 +517,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           for (const policy of spec.policies ?? []) undo.push(() => iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policy.name })));
           await putPermissions(roleName, spec, role.Role.Arn);
 
-          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
+          const code = codeFor(entry.source as FunctionSpec);
           let created: any;
           // A new IAM role takes seconds before Lambda can assume it.
           for (let attempt = 0; ; attempt++) {
@@ -523,7 +527,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
                   FunctionName: entry.physical_name,
                   Runtime: spec.runtime as any,
                   Role: role.Role.Arn,
-                  Handler: "index.handler",
+                  Handler: spec.handler ?? "index.handler",
+                  ...(spec.architecture ? { Architectures: [spec.architecture as any] } : {}),
                   Code: { ZipFile: code },
                   MemorySize: spec.memory_mb,
                   Timeout: spec.timeout_s,
@@ -584,7 +589,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
           const notes: string[] = [];
           const extra = Object.keys(config.Environment?.Variables ?? {}).filter((key) => !(key in environment(spec).Variables));
           if (extra.length) notes.push(`its environment variables not in the config will be removed: ${extra.sort().join(", ")}`);
-          if (config.Handler && config.Handler !== "index.handler") notes.push(`its handler "${config.Handler}" will become index.handler, and its code is replaced by the bundle`);
+          if (config.Handler && config.Handler !== (spec.handler ?? "index.handler")) notes.push(`its handler "${config.Handler}" will become ${spec.handler ?? "index.handler"}, and its code is replaced by the bundle`);
           if ((spec.policies ?? []).length) notes.push(`the policies declared for it (${spec.policies!.map((p) => p.name).join(", ")}) are put on role ${config.Role?.split("/").at(-1) ?? "its role"} by name, overwriting a policy of that name already there, and are removed again if they leave the code`);
           const liveVpc = config.VpcConfig?.VpcId ? config.VpcConfig : undefined;
           if (liveVpc && !spec.options?.vpc) notes.push(`it runs in VPC ${liveVpc.VpcId}, and will be taken out of it because the config has no network`);
@@ -627,8 +632,10 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         const tracingChanged = traced(spec) !== ((current.spec.options as Record<string, string> | undefined)?.tracing === "Active");
         if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec, current.outputs.role_arn, ((current.spec.policies as { name: string }[] | undefined) ?? []).map((p) => p.name), context);
         if (changes.includes("code")) {
-          const code = zip([{ name: "index.mjs", data: options.readBundle(entry.source as FunctionSpec) }, ...(options.readIncluded?.(entry.source as FunctionSpec) ?? [])]);
-          await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code }));
+          const code = codeFor(entry.source as FunctionSpec);
+          // Dropping the architecture from the config puts the function back on Lambda's default.
+          const architecture = spec.architecture ?? (current.spec.architecture ? "x86_64" : undefined);
+          await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code, ...(architecture ? { Architectures: [architecture as any] } : {}) }));
           await waitForFunction(entry.physical_name);
         }
         // A resource this function reads an output from was replaced; its new value has to be put in the environment.
@@ -647,7 +654,7 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
                   new UpdateFunctionConfigurationCommand({
                     FunctionName: entry.physical_name,
                     Runtime: spec.runtime as any,
-                    Handler: "index.handler",
+                    Handler: spec.handler ?? "index.handler",
                     MemorySize: spec.memory_mb,
                     Timeout: spec.timeout_s,
                     Environment: environment(spec, context),

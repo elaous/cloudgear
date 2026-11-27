@@ -602,7 +602,11 @@ function bundleReaders(configDir: string): { readBundle: (fn: FunctionSpec) => U
       const index = new Uint8Array(fs.readFileSync(file));
       const files = (fn.include ?? []).map((rel) => ({ name: rel, data: new Uint8Array(fs.readFileSync(includedPath(filesDir, rel))) }));
       if (hashContents(index, files.map((f) => ({ rel: f.name, data: f.data }))) !== fn.bundle.sha256) {
-        throw new Error(`${fn.bundle.path} does not match the config's sha256; re-run \`cloudgear generate\``);
+        throw new Error(
+          fn.bundle.archive
+            ? `${fn.bundle.path} does not match the config's sha256; set the config's bundle sha256 to the SHA-256 of the zip (\`generate\` does not write archive functions)`
+            : `${fn.bundle.path} does not match the config's sha256; re-run \`cloudgear generate\``,
+        );
       }
       verified.set(fn.physical_name, files);
       return index;

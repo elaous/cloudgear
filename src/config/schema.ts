@@ -101,7 +101,7 @@ export interface FunctionSpec {
   timeout_s: number;
   source: { file: string; export: string; member?: string; input_type?: string };
   route: { method: string; path: string; name: string }[];
-  bundle: { path: string; sha256: string };
+  bundle: { path: string; sha256: string; archive?: boolean };
   permission: { resource: string; path: string; action: string[] }[];
   // The named resource's physical name becomes the value.
   env: { key: string; value?: string; value_from?: string; output?: string }[];
@@ -115,6 +115,9 @@ export interface FunctionSpec {
   event?: EventTriggerSpec[];
   query_schedule?: { cron: string; query: Record<string, string> }[];
   policy?: { name: string; document: string }[];
+  // Lambda only: the handler of an archive bundle (empty is index.handler) and the instruction set.
+  handler?: string;
+  architecture?: "x86_64" | "arm64";
 }
 
 export interface EventTriggerSpec {
@@ -221,7 +224,9 @@ export function decodeConfig(text: string): CloudgearConfig {
         input_type: f.source?.input_type,
       },
       route: (f.route ?? []).map((r: Record<string, any>) => ({ method: str(r, "method"), path: str(r, "path"), name: String(r.name ?? "") })),
-      bundle: { path: str(f.bundle ?? {}, "path"), sha256: str(f.bundle ?? {}, "sha256") },
+      bundle: { path: str(f.bundle ?? {}, "path"), sha256: str(f.bundle ?? {}, "sha256"), ...(f.bundle?.archive === true ? { archive: true } : {}) },
+      ...(f.handler ? { handler: String(f.handler) } : {}),
+      ...(f.architecture ? { architecture: String(f.architecture) as "x86_64" | "arm64" } : {}),
       permission: (f.permission ?? []).map((p: Record<string, any>) => ({
         resource: str(p, "resource"),
         path: String(p.path ?? ""),
@@ -252,6 +257,12 @@ export function decodeConfig(text: string): CloudgearConfig {
     })),
   };
   for (const r of config.resource) if (r.type === "@aws.S3") assertS3BucketName(r.physical_name);
+  for (const f of config.function) {
+    if (f.architecture !== undefined && f.architecture !== "x86_64" && f.architecture !== "arm64") throw new Error(`cloudgear config: function "${f.name}": architecture must be x86_64 or arm64, got "${f.architecture}"`);
+    if (f.handler && !f.bundle.archive) throw new Error(`cloudgear config: function "${f.name}": handler only applies to an archive bundle; a script bundle is index.handler`);
+    if (f.bundle.archive && f.include?.length) throw new Error(`cloudgear config: function "${f.name}": an archive bundle is uploaded as it is, so it cannot have include`);
+    if (f.bundle.archive && !f.handler) throw new Error(`cloudgear config: function "${f.name}": an archive bundle needs a handler`);
+  }
   return config;
 }
 

@@ -66,6 +66,7 @@ Options (the command an option applies to is in parentheses):
 | `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
 | `--skip-env-check` | Deploy even if a declared secret is not stored (`apply`) |
+| `--permissions` | Also list the access each function gets, as a change from the state (`plan`, `apply`) |
 | `--local-env <file>`, `--no-local-env` | Dotenv file that gets the variables the functions read (`generate`; default `local.env` beside the config), or leave it alone |
 | `--allow-missing-env` | Generate even if the code reads variables nothing provides (`generate`) |
 | `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
@@ -1433,6 +1434,39 @@ memory, timeout, env) and `permissions`, and only the affected API calls are
 made. Changing a physical name is a replace. `apply` asks for confirmation
 (skip with `--auto-approve`), saves state after every step so a failure keeps
 what succeeded, and writes `.cloudgear/endpoints.json` for the router.
+
+### Permissions
+
+`cloudgear plan --permissions` (also accepted by `apply`) prints, after the plan, the access each
+function gets, as a change from what the state holds. A new function lists everything with `+`, a
+removed one lists everything with `-`, an unchanged one lists its access without a mark, and a
+changed grant shows `~` with the actions added (`+s3:PutObject`) or removed (`-s3:PutObject`).
+
+```
+Permissions (+ granted, - revoked):
+  ~ @aws.Lambda getFoo
+    ~ @aws.S3 assets under "img/": s3:GetObject, s3:ListBucket, s3:PutObject  [read, write, list] (+s3:PutObject)
+    - @aws.S3 uploads: s3:PutObject  [write]
+    + secret ssm /app/STRIPE_KEY as STRIPE_KEY
+```
+
+- A bucket line names the store, the key prefix the grant is limited to, the provider actions, and
+  the intents those actions cover. A GCS bucket also lists the predefined role that `apply` will
+  grant (`roles/storage.objectViewer on bucket assets under "img/"`). Secret bindings and policies
+  declared with `Policy` are listed too.
+- The intents are what the analyzer infers from the calls on a store (`get` and `getText` read,
+  `put` writes, `delete` deletes, `list` lists, `exists` reads and lists), and the schema declares
+  the same operations. Each provider maps an intent to its own actions:
+
+| Intent | `aws` (S3) | `gcp` (GCS) |
+| --- | --- | --- |
+| `read` | `s3:GetObject`, `s3:ListBucket` | `storage.objects.get` |
+| `write` | `s3:PutObject` | `storage.objects.create` |
+| `delete` | `s3:DeleteObject` | `storage.objects.delete` |
+| `list` | `s3:ListBucket` | `storage.objects.list` |
+
+- Only what the config describes is shown; nothing is read from the cloud. A function whose
+  permissions the config does not list shows `no permissions`.
 
 If a deploy step fails part-way through creating a function, what that call
 created is rolled back. Deleting a bucket that still has objects fails with a

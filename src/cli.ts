@@ -330,7 +330,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         const { GoogleAuth } = await import("google-auth-library");
         const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
         await invalidateGcpCdn({ http: httpFor(auth), sleep: (ms) => Bun.sleep(ms) }, distribution.outputs.project!, distribution.outputs.url_map!, distribution.name, paths);
-        console.log(`cloudgear: invalidation finished for ${paths.join(", ")}`);
+        console.log(`cloudgear: invalidation requested for ${paths.join(", ")}`);
         return;
       }
       const id = await invalidateDistribution(new CloudFrontClient({ region: "us-east-1" }), distribution.outputs.id!, paths);

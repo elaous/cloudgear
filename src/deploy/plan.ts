@@ -26,8 +26,11 @@ export const GLOBAL_REGION = "global";
 
 // The project the CDN of a certificate lives in: that of its bucket.
 function gcpCertificateProject(config: CloudgearConfig, domain: string): string {
-  const cdn = config.cdn.find((c) => (c.certificate ?? c.domain) === domain);
-  return config.resource.find((r) => r.name === cdn?.bucket)?.options?.project ?? "";
+  const projects = new Set(
+    config.cdn.filter((c) => (c.certificate ?? c.domain) === domain).map((c) => config.resource.find((r) => r.name === c.bucket)?.options?.project ?? ""),
+  );
+  if (projects.size > 1) throw new Error(`cloudgear config: the CDNs that share the certificate for ${domain} have buckets in different projects`);
+  return [...projects][0] ?? "";
 }
 
 export interface CertificateComparable {
@@ -309,6 +312,8 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const profile = capability(cdn.provider, "cdn");
     const bucket = resources.get(cdn.bucket);
     if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
+    const sharing = config.cdn.find((other) => other !== cdn && other.provider === "gcp" && other.bucket === cdn.bucket);
+    if (cdn.provider === "gcp" && sharing) throw new Error(`cloudgear config: the gcp CDNs "${cdn.domain}" and "${sharing.domain}" serve the same bucket "${cdn.bucket}"; give each its own`);
     if (cdn.provider === "gcp" && cdn.path) throw new Error(`cloudgear config: the gcp CDN "${cdn.domain}" serves the root of its bucket; remove the path "${cdn.path}"`);
     if (providerOfType(bucket.type) !== cdn.provider) throw new Error(`cloudgear config: the ${cdn.provider} CDN "${cdn.domain}" serves bucket "${cdn.bucket}", which is a ${bucket.type}`);
     if (certificate!.provider !== cdn.provider) throw new Error(`cloudgear config: the ${cdn.provider} CDN "${cdn.domain}" uses a ${certificate!.provider} certificate`);

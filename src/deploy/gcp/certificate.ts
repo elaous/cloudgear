@@ -1,7 +1,7 @@
 import { PartialApplyError, type Driver } from "../apply";
 import type { CertificateComparable } from "../plan";
 import { stateKey } from "../state";
-import { CERTIFICATE_MANAGER, edgeId, sameTarget, statusOf, waitCertificateOperation, type EdgeDeps } from "./edge";
+import { CERTIFICATE_MANAGER, edgeId, isInUse, sameTarget, statusOf, waitCertificateOperation, type EdgeDeps } from "./edge";
 import { resolveProject, type GcpDeps } from "./index";
 
 const ISSUE_ATTEMPTS = 180;
@@ -24,9 +24,15 @@ export function certificateDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
     const base = parent(project);
     try {
       if (!outputs.dns_authorization) {
-        await waitCertificateOperation(edge, await edge.http.request("POST", `${CERTIFICATE_MANAGER}/${base}/dnsAuthorizations?dnsAuthorizationId=${id}`, { domain: authorizedDomain(spec.domain) }));
         outputs.dns_authorization = `${base}/dnsAuthorizations/${id}`;
-        log(`created a DNS authorization for ${spec.domain}`);
+        try {
+          await waitCertificateOperation(edge, await edge.http.request("POST", `${CERTIFICATE_MANAGER}/${base}/dnsAuthorizations?dnsAuthorizationId=${id}`, { domain: authorizedDomain(spec.domain) }));
+          log(`created a DNS authorization for ${spec.domain}`);
+        } catch (err) {
+          if (statusOf(err) !== 409) throw err;
+          const found = await edge.http.request("GET", `${CERTIFICATE_MANAGER}/${outputs.dns_authorization}`);
+          if (found.domain !== authorizedDomain(spec.domain)) throw new Error(`The DNS authorization ${outputs.dns_authorization} exists for ${found.domain}, not ${authorizedDomain(spec.domain)}; remove it or use another name`);
+        }
       }
       if (!outputs.validation_name) {
         const authorization = await edge.http.request("GET", `${CERTIFICATE_MANAGER}/${outputs.dns_authorization}`);
@@ -44,24 +50,40 @@ export function certificateDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
         log(existing ? `authorization record ${name} is already in place` : `wrote authorization record ${name}`);
       }
       if (!outputs.certificate) {
-        await waitCertificateOperation(
-          edge,
-          await edge.http.request("POST", `${CERTIFICATE_MANAGER}/${base}/certificates?certificateId=${id}`, {
-            managed: { domains: [spec.domain], dnsAuthorizations: [outputs.dns_authorization] },
-          }),
-        );
         outputs.certificate = `${base}/certificates/${id}`;
-        log(`requested a certificate for ${spec.domain}`);
+        try {
+          await waitCertificateOperation(
+            edge,
+            await edge.http.request("POST", `${CERTIFICATE_MANAGER}/${base}/certificates?certificateId=${id}`, {
+              managed: { domains: [spec.domain], dnsAuthorizations: [outputs.dns_authorization] },
+            }),
+          );
+          log(`requested a certificate for ${spec.domain}`);
+        } catch (err) {
+          if (statusOf(err) !== 409) throw err;
+          const found = await edge.http.request("GET", `${CERTIFICATE_MANAGER}/${outputs.certificate}`);
+          if (!(found.managed?.domains as string[] | undefined)?.includes(spec.domain)) throw new Error(`The certificate ${outputs.certificate} exists for other domains; remove it or use another name`);
+        }
       }
       log("waiting for the certificate to be issued");
       for (let attempt = 0; attempt < ISSUE_ATTEMPTS; attempt++) {
-        const certificate = await edge.http.request("GET", `${CERTIFICATE_MANAGER}/${outputs.certificate}`);
+        const certificate = await edge.http.request("GET", `${CERTIFICATE_MANAGER}/${outputs.certificate}`).catch((err) => {
+          if (statusOf(err) !== 404) throw err;
+          delete outputs.certificate;
+          throw new Error(`Certificate for ${spec.domain} was not created; apply again`);
+        });
         const state = certificate.managed?.state as string | undefined;
         if (state === "ACTIVE") {
           log("certificate issued");
           return outputs;
         }
-        if (state === "FAILED") throw new Error(`Certificate ${outputs.certificate} failed: ${certificate.managed?.provisioningIssue?.details ?? certificate.managed?.provisioningIssue?.reason ?? "no reason given"}`);
+        if (state === "FAILED") {
+          const reason = certificate.managed?.provisioningIssue?.details ?? certificate.managed?.provisioningIssue?.reason ?? "no reason given";
+          // A failed certificate never recovers; the next apply requests a new one.
+          await waitCertificateOperation(edge, await edge.http.request("DELETE", `${CERTIFICATE_MANAGER}/${outputs.certificate}`)).catch(() => {});
+          delete outputs.certificate;
+          throw new Error(`Certificate for ${spec.domain} failed: ${reason}. It was deleted; fix the authorization record ${outputs.validation_name} and apply again`);
+        }
         await edge.sleep(ISSUE_WAIT_MS);
       }
       throw new Error(`Timed out waiting for certificate ${outputs.certificate}; check the authorization record ${outputs.validation_name}`);
@@ -103,7 +125,7 @@ export function certificateDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
           } catch (err) {
             const status = statusOf(err);
             if (status === 404) return;
-            if (!inUseRetries || (status !== 400 && status !== 409) || attempt >= IN_USE_ATTEMPTS) throw err;
+            if (!inUseRetries || !isInUse(err) || attempt >= IN_USE_ATTEMPTS) throw err;
             await edge.sleep(IN_USE_WAIT_MS);
           }
         }

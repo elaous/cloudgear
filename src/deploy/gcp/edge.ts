@@ -21,6 +21,12 @@ export const statusOf = (err: unknown): number | undefined => {
 
 export { edgeId };
 
+// A delete refused because something still uses the resource.
+export function isInUse(err: unknown): boolean {
+  const status = statusOf(err);
+  return status === 409 || (status === 400 && /in use|resourceInUse|being used|still referenced/i.test((err as Error).message));
+}
+
 export function sameTarget(a: string | undefined, b: string | undefined): boolean {
   const normalize = (value: string | undefined) => (value ?? "").trim().toLowerCase().replace(/\.$/, "");
   return normalize(a) === normalize(b);

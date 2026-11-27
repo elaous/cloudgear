@@ -2,7 +2,7 @@ import { PartialApplyError, type Driver, type DriverContext } from "../apply";
 import type { CdnComparable } from "../plan";
 import { stateKey } from "../state";
 import { changeGrant } from "./grants";
-import { CERTIFICATE_MANAGER, COMPUTE, edgeId, sameTarget, statusOf, waitCertificateOperation, waitComputeOperation, type EdgeDeps } from "./edge";
+import { CERTIFICATE_MANAGER, COMPUTE, edgeId, isInUse, sameTarget, statusOf, waitCertificateOperation, waitComputeOperation, type EdgeDeps } from "./edge";
 import { resolveProject, type GcpDeps } from "./index";
 
 const PUBLIC_ROLE = "roles/storage.legacyObjectReader";
@@ -39,12 +39,27 @@ export function cdnDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
 
   const compute = (project: string, collection: string, name?: string) => `${COMPUTE}/projects/${project}/global/${collection}${name ? `/${name}` : ""}`;
 
-  // Creates a global Compute resource; one that already exists under our name is taken as ours.
+  const relative = (value: unknown) => (typeof value === "string" ? value.replace(/^.*?(projects\/)/, "$1") : value);
+  const CHECKED: Record<string, string[]> = {
+    backendBuckets: ["bucketName"],
+    urlMaps: ["defaultService"],
+    targetHttpsProxies: ["urlMap", "certificateMap"],
+    targetHttpProxies: ["urlMap"],
+    forwardingRules: ["target", "portRange"],
+  };
+
+  // Creates a global Compute resource. One that already exists under our name is ours only if it matches.
   async function insert(project: string, collection: string, body: { name: string } & Record<string, unknown>): Promise<void> {
     try {
       await waitComputeOperation(edge, project, await edge.http.request("POST", compute(project, collection), body));
     } catch (err) {
       if (statusOf(err) !== 409) throw err;
+      const found = await edge.http.request("GET", compute(project, collection, body.name));
+      for (const field of CHECKED[collection] ?? []) {
+        if (body[field] !== undefined && relative(found?.[field]) !== relative(body[field])) {
+          throw new Error(`${collection} "${body.name}" already exists with a different ${field}; remove it or use another name`);
+        }
+      }
     }
   }
 
@@ -55,9 +70,8 @@ export function cdnDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
         await waitComputeOperation(edge, project, await edge.http.request("DELETE", compute(project, collection, name)));
         return;
       } catch (err) {
-        const status = statusOf(err);
-        if (status === 404) return;
-        if ((status !== 400 && status !== 409) || attempt >= IN_USE_ATTEMPTS) throw err;
+        if (statusOf(err) === 404) return;
+        if (!isInUse(err) || attempt >= IN_USE_ATTEMPTS) throw err;
         await edge.sleep(IN_USE_WAIT_MS);
       }
     }
@@ -98,21 +112,28 @@ export function cdnDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
 
   async function makePublic(project: string, bucket: string, outputs: Record<string, string>): Promise<void> {
     if (outputs.public_bucket === bucket) return;
-    if (outputs.public_bucket && outputs.public_binding === "added") {
-      await changeGrant(deps.storage(project), { bucket: outputs.public_bucket, role: PUBLIC_ROLE, path: "" }, ALL_USERS, false);
+    const storage = deps.storage(project);
+    const [metadata] = await storage.bucket(bucket).getMetadata();
+    if (metadata.iamConfiguration?.publicAccessPrevention === "enforced") {
+      throw new Error(`Bucket "${bucket}" has public access prevention enforced, and cloudgear never changes an imported bucket; set it to inherited yourself, or let cloudgear create the bucket with public_read`);
     }
-    delete outputs.public_binding;
-    delete outputs.public_bucket;
+    let added: boolean;
     try {
-      const added = await changeGrant(deps.storage(project), { bucket, role: PUBLIC_ROLE, path: "" }, ALL_USERS, true);
-      outputs.public_binding = added ? "added" : "existing";
-      outputs.public_bucket = bucket;
-      log(added ? `made bucket ${bucket} readable by everyone` : `bucket ${bucket} was already readable by everyone`);
+      added = await changeGrant(storage, { bucket, role: PUBLIC_ROLE, path: "" }, ALL_USERS, true);
     } catch (err) {
       const status = statusOf(err);
-      if (status === 400 || status === 403 || status === 412) throw new Error(`${PUBLIC_REFUSED(bucket)}: ${(err as Error).message}`);
+      if (status === 400 || status === 403 || status === 412) throw new Error(`${PUBLIC_REFUSED(bucket)}; a missing storage.buckets.setIamPolicy permission gives the same error: ${(err as Error).message}`);
       throw err;
     }
+    // The new bucket is readable before the old one is released, so the site stays up.
+    if (outputs.public_bucket && outputs.public_binding === "added") {
+      await changeGrant(storage, { bucket: outputs.public_bucket, role: PUBLIC_ROLE, path: "" }, ALL_USERS, false).catch((err) => {
+        if (statusOf(err) !== 404) throw err;
+      });
+    }
+    outputs.public_binding = added ? "added" : "existing";
+    outputs.public_bucket = bucket;
+    log(added ? `made bucket ${bucket} readable by everyone` : `bucket ${bucket} was already readable by everyone`);
   }
 
   async function converge(spec: CdnComparable, outputs: Record<string, string>, context: DriverContext): Promise<Record<string, string>> {
@@ -169,7 +190,7 @@ export function cdnDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
         outputs.http_rule = n.httpRule;
         log("created the HTTP to HTTPS redirect");
       }
-      if (!outputs.a_record) {
+      {
         const dns = await edge.dns(spec.dns_provider, spec.dns_zone, spec.dns_token);
         const taken = await dns.get(spec.domain, "CNAME");
         if (taken) throw new Error(`DNS record ${spec.domain} already exists (CNAME ${taken.values[0]}); remove it so the CDN can use the name`);
@@ -177,9 +198,11 @@ export function cdnDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
         if (existing && !sameTarget(existing.values[0], outputs.address)) {
           throw new Error(`DNS record ${spec.domain} already exists (A ${existing.values[0]}); remove it so the CDN can use the name`);
         }
-        if (!existing) await dns.upsert({ name: spec.domain, type: "A", values: [outputs.address], ttl: DNS_TTL });
+        if (!existing) {
+          await dns.upsert({ name: spec.domain, type: "A", values: [outputs.address], ttl: DNS_TTL });
+          log(`pointed ${spec.domain} at ${outputs.address}`);
+        }
         outputs.a_record = spec.domain;
-        log(`pointed ${spec.domain} at ${outputs.address}`);
       }
       outputs.url = `https://${spec.domain}`;
       return outputs;
@@ -227,7 +250,9 @@ export function cdnDriver(deps: GcpDeps, edge: EdgeDeps): Driver {
       await remove(project, "backendBuckets", o.backend_bucket && n.backendBucket);
       await remove(project, "addresses", o.address_name && n.address);
       if (o.public_binding === "added" && o.public_bucket) {
-        await changeGrant(deps.storage(project), { bucket: o.public_bucket, role: PUBLIC_ROLE, path: "" }, ALL_USERS, false);
+        await changeGrant(deps.storage(project), { bucket: o.public_bucket, role: PUBLIC_ROLE, path: "" }, ALL_USERS, false).catch((err) => {
+          if (statusOf(err) !== 404) throw err;
+        });
         log(`removed public read from bucket ${o.public_bucket}`);
       }
     },

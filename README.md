@@ -996,7 +996,8 @@ planned, one resource at a time.
   serves a bucket from Cloud CDN behind a global external HTTP(S) load balancer. The bucket MUST say
   `options: { public_read: "true" }`: the CDN reads it as an anonymous viewer, so `apply` sets
   `publicAccessPrevention` to `inherited` and grants `roles/storage.legacyObjectReader` to `allUsers`,
-  which makes every object in the bucket public (it does not allow listing). `plan` shows the option
+  which makes every object in the bucket public, and the role also lets anyone list the bucket through
+  the Storage API and read objects directly, around the CDN. `plan` shows the option
   as a bucket change. An organization policy (`constraints/storage.publicAccessPrevention` or
   domain-restricted sharing) can forbid this; `apply` names both when GCS refuses. A bucket that stays
   private needs a different design (see `docs/gcp-cdn.md`).
@@ -1015,6 +1016,9 @@ planned, one resource at a time.
   `storage.buckets.getIamPolicy` and `setIamPolicy` (for example `roles/compute.loadBalancerAdmin`,
   `roles/certificatemanager.editor` and `roles/storage.admin`). It costs a forwarding rule per port
   plus a reserved address, Cloud CDN cache fill and egress, and a per-request fee; check current pricing.
+  `status` looks in `GOOGLE_CLOUD_PROJECT` or the credentials' project, not the bucket's `project` option.
+  Two gcp CDNs cannot serve one bucket, and CDNs that share a wildcard certificate need buckets in one project.
+  A failed certificate is deleted and the next `apply` requests a new one.
   The Compute and Certificate Manager calls are tested against fakes only; the first run against a
   real project is not yet documented.
 - **Import and delete.** As with S3, `cloudgear import` only records a bucket;

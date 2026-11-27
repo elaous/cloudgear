@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MemoryDnsDriver } from "@cloudgear/dns/drivers/memory";
 import type { CloudgearConfig } from "../src/config/schema";
+import { edgeId } from "@cloudgear/cdn/gcp-names";
 import { apply, type Drivers } from "../src/deploy/apply";
 import { gcpDrivers } from "../src/deploy/gcp";
 import type { StorageLike } from "../src/deploy/gcp/storage";
@@ -10,6 +11,7 @@ import { baseConfig, emptyState } from "./helpers";
 const DOMAIN = "cdn.example.com";
 const CERT_KEY = `@gcp.Certificate.${DOMAIN}`;
 const CDN_KEY = `@gcp.CloudCdn.${DOMAIN}`;
+const id = (suffix = "") => edgeId(DOMAIN, suffix);
 const dnsSpec = { provider: "gandi", domain: DOMAIN, zone: "example.com" };
 
 class ApiError extends Error {
@@ -25,6 +27,7 @@ interface Options {
   certificateStates?: string[];
   fail?: (method: string, url: string) => Error | undefined;
   policies?: Record<string, { bindings: { role: string; members: string[] }[] }>;
+  enforced?: boolean;
 }
 
 function fakeGcp(options: Options = {}) {
@@ -100,7 +103,7 @@ function fakeGcp(options: Options = {}) {
             getPolicy: async () => [{ bindings: (policies.get(name)?.bindings ?? []).map((b) => ({ ...b, members: [...b.members] })) }],
             setPolicy: async (policy: { bindings: { role: string; members: string[] }[] }) => void policies.set(name, policy),
           },
-          getMetadata: async () => [{ location: "US" }],
+          getMetadata: async () => [{ location: "US", ...(options.enforced ? { iamConfiguration: { publicAccessPrevention: "enforced" } } : {}) }],
           setMetadata: async () => {},
           delete: async () => void buckets.delete(name),
         };
@@ -133,7 +136,7 @@ describe("gcp certificate", () => {
     const state = emptyState();
     await run(config(), state, gcp.drivers);
     const outputs = state.entries[CERT_KEY]!.outputs;
-    expect(outputs.certificate).toMatch(/^projects\/my-proj\/locations\/global\/certificates\/cg-cdn-example-com$/);
+    expect(outputs.certificate).toBe(`projects/my-proj/locations/global/certificates/${id()}`);
     expect(outputs.validation_name).toBe("_acme-challenge_abc.example.com");
     expect(await gcp.dns.get("_acme-challenge_abc.example.com", "CNAME")).toMatchObject({ values: ["abc.authorize.certificatemanager.goog."] });
     const created = gcp.calls.find((c) => c.method === "POST" && c.url.includes("/certificates?"))!;
@@ -150,15 +153,33 @@ describe("gcp certificate", () => {
     expect(gcp.calls.find((c) => c.url.includes("/certificates?"))!.url).toContain("certificateId=cg-wildcard-example-com");
   });
 
-  test("a failed certificate keeps its progress and the next apply resumes", async () => {
+  test("a failed certificate is deleted and the next apply requests a new one", async () => {
     const gcp = fakeGcp({ certificateStates: ["FAILED"] });
     const state = emptyState();
-    await expect(run(config(), state, gcp.drivers)).rejects.toThrow(/failed/);
-    expect(state.entries[CERT_KEY]!.outputs.certificate).toBeTruthy();
-    const before = gcp.calls.filter((c) => c.method === "POST").length;
+    await expect(run(config(), state, gcp.drivers)).rejects.toThrow(/failed.*It was deleted/);
+    expect(state.entries[CERT_KEY]!.outputs.certificate).toBeUndefined();
+    expect(state.entries[CERT_KEY]!.outputs.dns_authorization).toBeTruthy();
     await expect(run(config(), state, gcp.drivers)).rejects.toThrow(/failed/);
     expect(gcp.calls.filter((c) => c.method === "POST" && c.url.includes("dnsAuthorizations")).length).toBe(1);
-    expect(gcp.calls.filter((c) => c.method === "POST").length).toBe(before);
+    expect(gcp.calls.filter((c) => c.method === "POST" && c.url.includes("/certificates?")).length).toBe(2);
+  });
+
+  test("an existing authorization or certificate for another domain is refused", async () => {
+    const gcp = fakeGcp();
+    gcp.manager.set(`projects/my-proj/locations/global/dnsAuthorizations/${edgeId(DOMAIN)}`, { domain: "other.example.com" });
+    await expect(run(config(), emptyState(), gcp.drivers)).rejects.toThrow(/exists for other.example.com/);
+    const second = fakeGcp();
+    second.manager.set(`projects/my-proj/locations/global/certificates/${edgeId(DOMAIN)}`, { managed: { domains: ["other.example.com"] } });
+    await expect(run(config(), emptyState(), second.drivers)).rejects.toThrow(/exists for other domains/);
+  });
+
+  test("an existing authorization and certificate for this domain are taken over", async () => {
+    const gcp = fakeGcp();
+    gcp.manager.set(`projects/my-proj/locations/global/dnsAuthorizations/${edgeId(DOMAIN)}`, { domain: DOMAIN });
+    gcp.manager.set(`projects/my-proj/locations/global/certificates/${edgeId(DOMAIN)}`, { managed: { domains: [DOMAIN] } });
+    const state = emptyState();
+    await run(config(), state, gcp.drivers);
+    expect(state.entries[CERT_KEY]!.outputs.certificate).toBeTruthy();
   });
 
   test("an authorization record with another value is an error", async () => {
@@ -183,19 +204,19 @@ describe("gcp CDN", () => {
     const outputs = state.entries[CDN_KEY]!.outputs;
     expect(outputs).toMatchObject({ address: "34.0.0.1", project: "my-proj", public_binding: "added", public_bucket: "site", a_record: DOMAIN, url: `https://${DOMAIN}` });
     expect([...gcp.compute.keys()]).toEqual([
-      "addresses/cg-cdn-example-com-ip",
-      "backendBuckets/cg-cdn-example-com-bucket",
-      "urlMaps/cg-cdn-example-com-map",
-      "targetHttpsProxies/cg-cdn-example-com-https",
-      "forwardingRules/cg-cdn-example-com-https-rule",
-      "urlMaps/cg-cdn-example-com-redirect",
-      "targetHttpProxies/cg-cdn-example-com-http",
-      "forwardingRules/cg-cdn-example-com-http-rule",
+      `addresses/${id("-ip")}`,
+      `backendBuckets/${id("-bucket")}`,
+      `urlMaps/${id("-map")}`,
+      `targetHttpsProxies/${id("-https")}`,
+      `forwardingRules/${id("-https-rule")}`,
+      `urlMaps/${id("-redirect")}`,
+      `targetHttpProxies/${id("-http")}`,
+      `forwardingRules/${id("-http-rule")}`,
     ]);
-    expect(gcp.compute.get("backendBuckets/cg-cdn-example-com-bucket")).toMatchObject({ bucketName: "site", enableCdn: true });
-    expect(gcp.compute.get("forwardingRules/cg-cdn-example-com-https-rule")).toMatchObject({ IPAddress: "34.0.0.1", portRange: "443", loadBalancingScheme: "EXTERNAL_MANAGED" });
-    expect(gcp.compute.get("targetHttpsProxies/cg-cdn-example-com-https")!.certificateMap).toBe("//certificatemanager.googleapis.com/projects/my-proj/locations/global/certificateMaps/cg-cdn-example-com-certs");
-    expect(gcp.compute.get("urlMaps/cg-cdn-example-com-redirect")!.defaultUrlRedirect).toMatchObject({ httpsRedirect: true });
+    expect(gcp.compute.get(`backendBuckets/${id("-bucket")}`)).toMatchObject({ bucketName: "site", enableCdn: true });
+    expect(gcp.compute.get(`forwardingRules/${id("-https-rule")}`)).toMatchObject({ IPAddress: "34.0.0.1", portRange: "443", loadBalancingScheme: "EXTERNAL_MANAGED" });
+    expect(gcp.compute.get(`targetHttpsProxies/${id("-https")}`)!.certificateMap).toBe(`//certificatemanager.googleapis.com/projects/my-proj/locations/global/certificateMaps/${id("-certs")}`);
+    expect(gcp.compute.get(`urlMaps/${id("-redirect")}`)!.defaultUrlRedirect).toMatchObject({ httpsRedirect: true });
     expect(await gcp.dns.get(DOMAIN, "A")).toMatchObject({ values: ["34.0.0.1"] });
     expect(gcp.policies.get("site")!.bindings).toEqual([{ role: "roles/storage.legacyObjectReader", members: ["allUsers"] }]);
     expect(plan(config(), state).every((a) => a.op === "noop")).toBe(true);
@@ -241,7 +262,7 @@ describe("gcp CDN", () => {
     const gcp = fakeGcp({ fail: (method, url) => (failing && method === "POST" && url.includes("/targetHttpProxies") ? new ApiError(500, "boom") : undefined) });
     const state = emptyState();
     await expect(run(config(), state, gcp.drivers)).rejects.toThrow(/boom/);
-    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ https_rule: "cg-cdn-example-com-https-rule", redirect_map: "cg-cdn-example-com-redirect" });
+    expect(state.entries[CDN_KEY]!.outputs).toMatchObject({ https_rule: `${id("-https-rule")}`, redirect_map: `${id("-redirect")}` });
     expect(state.entries[CDN_KEY]!.outputs.http_proxy).toBeUndefined();
     failing = false;
     await run(config(), state, gcp.drivers);
@@ -267,7 +288,7 @@ describe("gcp CDN", () => {
     await run(config(), state, gcp.drivers);
     const other = config({ resource: [...config().resource, { name: "other", type: "@gcp.GCS", physical_name: "other", dry: false, source: "setup.ts:2", options: { project: "my-proj", public_read: "true" } }], cdn: [{ provider: "gcp", domain: DOMAIN, bucket: "other", path: "" }] });
     await run(other, state, gcp.drivers);
-    expect(gcp.compute.get("backendBuckets/cg-cdn-example-com-bucket")!.bucketName).toBe("other");
+    expect(gcp.compute.get(`backendBuckets/${id("-bucket")}`)!.bucketName).toBe("other");
     expect(gcp.policies.get("site")!.bindings).toEqual([]);
     expect(gcp.policies.get("other")!.bindings).toEqual([{ role: "roles/storage.legacyObjectReader", members: ["allUsers"] }]);
   });
@@ -286,7 +307,7 @@ describe("around the gcp CDN", () => {
     await run(config(), state, gcp.drivers);
     const { invalidateGcpCdn } = await import("../src/deploy/gcp/cdn");
     const http = { request: async (method: string, url: string, body?: any) => (gcp.calls.push({ method, url, body }), { name: "op", status: "DONE" }) } as never;
-    await invalidateGcpCdn({ http, sleep: async () => {} }, "my-proj", "cg-cdn-example-com-map", DOMAIN, ["/*", "/a.png"]);
+    await invalidateGcpCdn({ http, sleep: async () => {} }, "my-proj", `${id("-map")}`, DOMAIN, ["/*", "/a.png"]);
     const posts = gcp.calls.filter((c) => c.url.endsWith("/invalidateCache"));
     expect(posts.map((c) => c.body)).toEqual([{ host: DOMAIN, path: "/*" }, { host: DOMAIN, path: "/a.png" }]);
   });
@@ -313,8 +334,8 @@ describe("around the gcp CDN", () => {
       getProjectId: async () => "p",
       request: async ({ url }: { url: string }) => {
         seen.push(url);
-        if (url.includes("forwardingRules/cg-cdn-example-com-https-rule")) return { data: { name: "cg-cdn-example-com-https-rule" } };
-        if (url.includes("/certificates/cg-cdn-example-com")) return { data: { name: "projects/p/locations/global/certificates/cg-cdn-example-com", managed: { state: "PROVISIONING" } } };
+        if (url.includes(`forwardingRules/${id("-https-rule")}`)) return { data: { name: `${id("-https-rule")}` } };
+        if (url.includes(`/certificates/${id("")}`)) return { data: { name: `projects/p/locations/global/certificates/${id("")}`, managed: { state: "PROVISIONING" } } };
         throw Object.assign(new Error("not found"), { response: { status: 404 } });
       },
     };
@@ -322,5 +343,35 @@ describe("around the gcp CDN", () => {
     expect(await new GcpCdnDriver(auth).describe("other.example.com")).toEqual({ state: "none" });
     expect(await new GcpCertDriver(auth).describe(DOMAIN)).toMatchObject({ state: "pending" });
     expect(await new GcpCertDriver(auth).describe("other.example.com")).toEqual({ state: "none" });
+  });
+});
+
+describe("collisions and ownership", () => {
+  test("names that sanitize alike stay apart and fit the limit", () => {
+    expect(edgeId("a-b.example.com")).not.toBe(edgeId("a.b.example.com"));
+    expect(edgeId("*.example.com")).not.toBe(edgeId("wildcard-example.com"));
+    const long = edgeId(`${"x".repeat(80)}.example.com`, "-https-rule");
+    expect(long.length).toBeLessThanOrEqual(63);
+    expect(long).toMatch(/^[a-z][a-z0-9-]*[a-z0-9]$/);
+  });
+
+  test("a Compute resource with our name but another bucket is refused, and not deleted", async () => {
+    const gcp = fakeGcp();
+    gcp.compute.set(`backendBuckets/${id("-bucket")}`, { name: id("-bucket"), bucketName: "someone-elses" });
+    const state = emptyState();
+    await expect(run(config(), state, gcp.drivers)).rejects.toThrow(/already exists with a different bucketName/);
+    expect(state.entries[CDN_KEY]?.outputs.backend_bucket).toBeUndefined();
+  });
+
+  test("two gcp CDNs cannot serve one bucket", () => {
+    const cfg = config();
+    cfg.cdn.push({ provider: "gcp", domain: "other.example.com", bucket: "site", path: "" });
+    cfg.certificate.push({ provider: "gcp", domain: "other.example.com", dns: { ...dnsSpec, domain: "other.example.com" }, usage: "cdn" });
+    expect(() => plan(cfg, emptyState())).toThrow(/serve the same bucket "site"/);
+  });
+
+  test("a bucket with public access prevention enforced is refused with the real reason", async () => {
+    const gcp = fakeGcp({ enforced: true });
+    await expect(run(config(), emptyState(), gcp.drivers)).rejects.toThrow(/public access prevention enforced/);
   });
 });

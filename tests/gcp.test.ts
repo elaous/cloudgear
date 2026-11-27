@@ -610,3 +610,15 @@ describe("website buckets", () => {
     expect(() => validateOptions("gcp", "@gcp.GCS", { site_include: "[1]" }, "bucket")).toThrow("non-empty globs");
   });
 });
+
+describe("public_read", () => {
+  test("creates the bucket without public access prevention, and flips it on update", async () => {
+    const gcs = fakeGcs();
+    const state = emptyState();
+    await applyConfig(configWith({ project: "my-proj-123", public_read: "true" }), state, gcs.drivers);
+    expect(gcs.calls[0]!.input).toMatchObject({ iamConfiguration: { publicAccessPrevention: "inherited" } });
+
+    await applyConfig(configWith({ project: "my-proj-123" }), state, gcs.drivers);
+    expect(gcs.calls.find((c) => c.op === "set")!.input).toEqual({ iamConfiguration: { publicAccessPrevention: "enforced" } });
+  });
+});

@@ -108,6 +108,11 @@ export class CDN {
     if (options.router && options.router.provider !== provider) {
       throw new Error(`The CDN uses provider "${provider}" but its router uses "${options.router.provider}"`);
     }
+    if (provider === "gcp") {
+      if (options.router) throw new Error("A gcp CDN serves a bucket only: a router origin is not supported");
+      const cloudFrontOnly = [options.priceClass && "priceClass", options.webAcl !== undefined && "webAcl", options.methodRouting && "methodRouting"].filter(Boolean);
+      if (cloudFrontOnly.length) throw new Error(`${cloudFrontOnly.join(", ")} only apply to a CloudFront CDN`);
+    }
     if (options.methodRouting && !options.router) {
       throw new Error("methodRouting only applies to a CDN that serves a router");
     }
@@ -226,10 +231,12 @@ function findUp(dir: string, relativeFile: string): string | undefined {
   }
 }
 
+const SUPPORTED_PROVIDERS = ["aws", "gcp"];
+
 function assertCertProvider(provider: string): void {
-  if (provider !== "aws") throw new Error(`Certificate provider "${provider}" is not supported yet (supported: aws)`);
+  if (!SUPPORTED_PROVIDERS.includes(provider)) throw new Error(`Certificate provider "${provider}" is not supported yet (supported: ${SUPPORTED_PROVIDERS.join(", ")})`);
 }
 
 function assertProvider(provider: string): void {
-  if (provider !== "aws") throw new Error(`CDN provider "${provider}" is not supported yet (supported: aws)`);
+  if (!SUPPORTED_PROVIDERS.includes(provider)) throw new Error(`CDN provider "${provider}" is not supported yet (supported: ${SUPPORTED_PROVIDERS.join(", ")})`);
 }

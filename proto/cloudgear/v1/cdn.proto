@@ -7,6 +7,7 @@ import "cloudgear/v1/options.proto";
 enum CdnProvider {
   CDN_PROVIDER_UNSPECIFIED = 0;
   CDN_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+  CDN_PROVIDER_GCP = 2 [(cloudgear.v1.name) = "gcp"];
 }
 
 // Where CloudFront serves from: 100 is North America and Europe, 200 adds Asia, Middle East and Africa, All every location.

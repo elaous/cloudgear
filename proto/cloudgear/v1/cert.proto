@@ -7,6 +7,7 @@ import "cloudgear/v1/options.proto";
 enum CertProvider {
   CERT_PROVIDER_UNSPECIFIED = 0;
   CERT_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+  CERT_PROVIDER_GCP = 2 [(cloudgear.v1.name) = "gcp"];
 }
 
 // A certificate for the domain of a Dns, validated through that Dns.

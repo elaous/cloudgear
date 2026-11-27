@@ -1224,14 +1224,16 @@ function analyzeEntry(entryPath: string): AppModel {
     for (const certExpr of certExprs) {
       const at = where(certExpr);
       const [providerArg, dnsArg, optionsArg] = certExpr.getArguments();
-      if (stringLiteral(providerArg, `${at}: Cert provider`) !== "aws") throw new Error(`${at}: Cert provider must be "aws"`);
+      const certProvider = stringLiteral(providerArg, `${at}: Cert provider`);
+      if (certProvider !== "aws" && certProvider !== "gcp") throw new Error(`${at}: Cert provider must be "aws" or "gcp"`);
       const dnsExpr = initializerOf(dnsArg, "the Cert's DNS", at);
       if (!dnsExprs.includes(dnsExpr)) throw new Error(`${at}: the Cert's DNS must be a new DNS(...) declared in your project`);
       const dns = dnsOf(dnsExpr);
       const region = readRegion(optionsArg, `${at}: Cert`);
+      if (certProvider === "gcp" && region) throw new Error(`${at}: a gcp Cert is global; remove its region`);
       const clash = [...certificates.values()].find((c) => c.domain === dns.domain);
       if (clash) throw new Error(`${at}: a certificate for "${dns.domain}" is already declared`);
-      certificates.set(certExpr, { provider: "aws", domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
+      certificates.set(certExpr, { provider: certProvider, domain: dns.domain, dns, usage: "", region, options: readOptionsMap(optionsArg, "options", `${at}: Cert`) });
     }
 
     const certOf = (node: Node | undefined, what: string, at: string): CertificateModel => {
@@ -1272,8 +1274,10 @@ function analyzeEntry(entryPath: string): AppModel {
     for (const cdnExpr of siteCdnExprs) {
       const at = where(cdnExpr);
       const [providerArg, certArg, optionsArg] = cdnExpr.getArguments();
-      if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
+      const cdnProvider = stringLiteral(providerArg, `${at}: CDN provider`);
+      if (cdnProvider !== "aws" && cdnProvider !== "gcp") throw new Error(`${at}: CDN provider must be "aws" or "gcp"`);
       const cdnCert = certOf(certArg, "the CDN's cert", at);
+      if (cdnCert.provider !== cdnProvider) throw new Error(`${at}: the CDN uses provider "${cdnProvider}" but its Cert uses "${cdnCert.provider}"`);
       if (cdnCerts.has(cdnCert) && !isWildcardDomain(cdnCert.domain)) throw new Error(`${at}: two CDNs cannot share a Cert unless it is a wildcard (*.example.com); give each its own domain`);
       cdnCerts.add(cdnCert);
       const host = servedHost(cdnCert, optionsArg, at);
@@ -1290,8 +1294,16 @@ function analyzeEntry(entryPath: string): AppModel {
         }
       }
       if (!bucketStore) throw new Error(`${at}: the CDN's bucket must be a BlobStore variable declared in your project`);
-      if (bucketStore.resource.provider !== "aws") throw new Error(`${at}: the CDN's bucket must use provider "aws"`);
-      if (bucketStore.resource.name.includes(".")) {
+      if (bucketStore.resource.provider !== cdnProvider) throw new Error(`${at}: the CDN's bucket must use provider "${cdnProvider}"`);
+      if (cdnProvider === "gcp") {
+        if (bucketStore.resource.options?.public_read !== "true") {
+          throw new Error(`${at}: a gcp CDN serves its bucket to anyone, so the bucket MUST say so: options: { public_read: "true" } makes every object in "${bucketStore.resource.name}" readable by everyone`);
+        }
+        if (!bucketStore.resource.siteDir && !bucketStore.resource.options?.index_document) {
+          warnings.push(`${at}: bucket "${bucketStore.resource.name}" is not a BlobStoreWebSite, so the CDN serves objects by exact path only`);
+        }
+      }
+      if (cdnProvider === "aws" && bucketStore.resource.name.includes(".")) {
         warnings.push(`${at}: bucket "${bucketStore.resource.name}" contains dots; CloudFront's HTTPS connection to its S3 endpoint may fail certificate checks`);
       }
       if (bucketStore.resource.dry) {
@@ -1307,12 +1319,12 @@ function analyzeEntry(entryPath: string): AppModel {
           }
         }
       }
-      if (cdnCert.region && cdnCert.region !== "us-east-1") {
+      if (cdnProvider === "aws" && cdnCert.region && cdnCert.region !== "us-east-1") {
         throw new Error(`${at}: a CDN needs its certificate in us-east-1, but the Cert says ${cdnCert.region}`);
       }
       cdnCert.usage = "cdn";
       cdns.push({
-        provider: "aws",
+        provider: cdnProvider,
         domain: host,
         certificate: cdnCert.domain,
         options: readCdnOptions(optionsArg, `${at}: CDN`),
@@ -1361,7 +1373,9 @@ function analyzeEntry(entryPath: string): AppModel {
     if (routerCdnExpr) {
       const at = where(routerCdnExpr);
       const [providerArg, certArg, optionsArg] = routerCdnExpr.getArguments();
-      if (stringLiteral(providerArg, `${at}: CDN provider`) !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
+      const routerCdnProvider = stringLiteral(providerArg, `${at}: CDN provider`);
+      if (routerCdnProvider === "gcp") throw new Error(`${at}: a gcp CDN serves a bucket only; a router origin is not supported`);
+      if (routerCdnProvider !== "aws") throw new Error(`${at}: CDN provider must be "aws"`);
       const cert = certOf(certArg, "the CDN's cert", at);
       if (cdnCerts.has(cert) && !isWildcardDomain(cert.domain)) throw new Error(`${at}: two CDNs cannot share a Cert unless it is a wildcard (*.example.com); give each its own domain`);
       cdnCerts.add(cert);

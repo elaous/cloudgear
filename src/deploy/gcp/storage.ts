@@ -96,6 +96,8 @@ const statusOf = (err: unknown): number | undefined => {
   return typeof code === "number" ? code : undefined;
 };
 
+const accessPrevention = (options: Record<string, string>) => (options.public_read === "true" ? "inherited" : "enforced");
+
 const optionsOf = (spec: Record<string, unknown>): Record<string, string> => (spec.options ?? {}) as Record<string, string>;
 const locationOf = (spec: Record<string, unknown>): string => (optionsOf(spec).location || (spec.region as string | undefined) || DEFAULT_LOCATION).toUpperCase();
 
@@ -118,8 +120,8 @@ export function gcsDriver(deps: GcpDeps): Driver {
           location,
           ...(options.storage_class ? { storageClass: options.storage_class } : {}),
           versioning: { enabled: versioned && !hasFiles },
-          // Private by default: no public access and no per-object ACLs.
-          iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: "enforced" },
+          // Private unless public_read: no per-object ACLs either way.
+          iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: accessPrevention(options) },
           labels: labelsFrom(deps.labels, entry.name),
           ...settings,
         });
@@ -159,6 +161,7 @@ export function gcsDriver(deps: GcpDeps): Driver {
       const patch: Record<string, unknown> = {};
       if ((wantedOptions.versioning === "true") !== (hadOptions.versioning === "true")) patch.versioning = { enabled: wantedOptions.versioning === "true" };
       if (wantedOptions.storage_class && wantedOptions.storage_class !== hadOptions.storage_class) patch.storageClass = wantedOptions.storage_class;
+      if (accessPrevention(wantedOptions) !== accessPrevention(hadOptions)) patch.iamConfiguration = { publicAccessPrevention: accessPrevention(wantedOptions) };
       Object.assign(patch, siteMetadata(siteSettings(wantedOptions), siteSettings(hadOptions)));
       readSiteFiles(wantedOptions, deps.siteRoot);
       const bucket = deps.storage(project).bucket(entry.physical_name);

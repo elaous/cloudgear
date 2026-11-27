@@ -220,9 +220,12 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           project: (v) => (/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(v) ? undefined : 'must be a GCP project id such as "my-project-123"'),
           location: (v) => (/^[A-Za-z][A-Za-z0-9-]{1,30}$/.test(v) ? undefined : 'must be a bucket location such as "US" or "us-central1"'),
           storage_class: oneOf("STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"),
+          public_read: oneOf("true"),
           ...siteRules(gcsCorsRules),
         },
       },
+      "@gcp.CloudCdn": { keys: {} },
+      "@gcp.Certificate": { keys: {} },
       "@gcp.CloudFunction": {
         keys: {
           project: (v) => (/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(v) ? undefined : 'must be a GCP project id such as "my-project-123"'),
@@ -233,6 +236,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
     },
     reservedEnv: /^(CLOUDGEAR_|FUNCTION_|K_|GOOGLE_|GCP_|NODE_OPTIONS$|_)/,
     function: { type: "@gcp.CloudFunction", runtime: "nodejs22", memoryMb: 256, timeoutS: 60, identity: "service-account" },
+    cdn: { type: "@gcp.CloudCdn", certificate: "@gcp.Certificate" },
     blobStore: {
       type: "@gcp.GCS",
       actions: {

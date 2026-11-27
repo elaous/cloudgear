@@ -764,7 +764,9 @@ const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
   already uses.
 - On GCS the website settings are the bucket's `website` metadata (`mainPageSuffix` and
   `notFoundPage`) and the CORS rules are its `cors` metadata. GCS has one list of response
-  headers, so a rule's `headers` and `exposeHeaders` are joined into it. Files are saved with
+  headers, so a rule's `headers` and `exposeHeaders` are joined into it. An origin MUST be a full
+  origin or `*` alone on GCS (`generate` refuses `https://*.example.com`). A dropped error page or
+  CORS rule is cleared on the bucket, and uploads and deletes are retried. Files are saved with
   their content type, `cacheControl` and a `sha256` custom metadata entry. The bucket stays
   private (public access prevention is enforced) and cloudgear's CDN serves AWS buckets only, so
   the website metadata only matters if you make the bucket public yourself. A versioned GCS

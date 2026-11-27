@@ -45,7 +45,7 @@ class ApiError extends Error {
   }
 }
 
-function fakeGcs(initial: Record<string, Partial<Bucket>> = {}, opts: { forbidden?: string[]; failSave?: (key: string) => Error | undefined; siteRoot?: string } = {}) {
+function fakeGcs(initial: Record<string, Partial<Bucket>> = {}, opts: { forbidden?: string[]; failSave?: (key: string) => Error | undefined; failSet?: (metadata: Record<string, unknown>) => Error | undefined; siteRoot?: string } = {}) {
   const buckets = new Map<string, Bucket>(Object.entries(initial).map(([name, b]) => [name, { location: "US", versioning: false, objects: 0, metadata: {}, files: new Map(), ...b }]));
   const calls: { project: string; op: string; name: string; input?: any }[] = [];
   const clients: string[] = [];
@@ -90,10 +90,22 @@ function fakeGcs(initial: Record<string, Partial<Bucket>> = {}, opts: { forbidde
           },
           async setMetadata(metadata) {
             calls.push({ project, op: "set", name, input: metadata });
+            const injected = opts.failSet?.(metadata);
+            if (injected) throw injected;
             const found = buckets.get(name);
             if (!found) throw new ApiError(404, "Not Found");
             if ((metadata.versioning as { enabled: boolean } | undefined) !== undefined) found.versioning = (metadata.versioning as { enabled: boolean }).enabled;
-            for (const key of ["website", "cors"]) if (key in metadata) found.metadata[key] = metadata[key];
+            for (const key of ["website", "cors"]) {
+              if (!(key in metadata)) continue;
+              const value = metadata[key];
+              if (value === null) delete found.metadata[key];
+              else if (key === "website") {
+                // PATCH merges nested objects; a null field is removed.
+                const merged = { ...(found.metadata.website ?? {}), ...(value as Record<string, unknown>) };
+                for (const [field, v] of Object.entries(merged)) if (v === null) delete merged[field];
+                found.metadata.website = merged;
+              } else found.metadata[key] = value;
+            }
           },
           async delete() {
             calls.push({ project, op: "delete", name });
@@ -433,7 +445,7 @@ describe("website buckets", () => {
     expect(dropped.gcs.calls.filter((c) => c.op === "set").map((c) => c.input)).toEqual([{ website: null, cors: null }]);
   });
 
-  test("the same rules in another key order, with empty lists, are not a change", async () => {
+  test("the same rules in another key order are not a change", async () => {
     const root = project({});
     const first = await deploy(root, { index_document: "index.html", cors: JSON.stringify(RULES) });
     const reordered = JSON.stringify([{ max_age_seconds: 3600, expose_headers: ["etag"], headers: ["content-type"], methods: ["GET", "HEAD"], origins: ["https://example.com"] }]);
@@ -523,6 +535,74 @@ describe("website buckets", () => {
     const root = project(FILES);
     const actions = withSiteChanges(plan(configWith(siteOptions(root)), emptyState()), root);
     expect(formatPlan(actions)).toContain("(site files: 2 new, 0 changed, 0 no longer in the site (kept))");
+  });
+
+  test("dropping only the error document removes the error page from the bucket", async () => {
+    const root = project({});
+    const first = await deploy(root, { index_document: "index.html", error_document: "404.html" });
+    expect(first.gcs.buckets.get("assets")!.metadata.website).toEqual({ mainPageSuffix: "index.html", notFoundPage: "404.html" });
+    const gcs = fakeGcs({ assets: { metadata: { website: { mainPageSuffix: "index.html", notFoundPage: "404.html" } } } }, { siteRoot: root });
+    await apply(withSiteChanges(plan(configWith({ index_document: "index.html" }), first.state), root), first.state, gcs.drivers, { save: () => {}, log: () => {} });
+    expect(gcs.calls.filter((c) => c.op === "set").map((c) => c.input)).toEqual([{ website: { mainPageSuffix: "index.html", notFoundPage: null } }]);
+    expect(gcs.buckets.get("assets")!.metadata.website).toEqual({ mainPageSuffix: "index.html" });
+  });
+
+  test("dropping only the CORS rules clears them and keeps the website", async () => {
+    const root = project({});
+    const first = await deploy(root, { index_document: "index.html", cors: JSON.stringify(RULES) });
+    const gcs = fakeGcs({ assets: { metadata: { website: { mainPageSuffix: "index.html", notFoundPage: null }, cors: [{}] } } }, { siteRoot: root });
+    await apply(withSiteChanges(plan(configWith({ index_document: "index.html" }), first.state), root), first.state, gcs.drivers, { save: () => {}, log: () => {} });
+    expect(gcs.calls.filter((c) => c.op === "set").map((c) => c.input)).toEqual([{ cors: null }]);
+  });
+
+  test("a headers change that gives the same GCS rule patches nothing", async () => {
+    const root = project({});
+    const moved = JSON.stringify([{ origins: ["https://example.com"], methods: ["GET", "HEAD"], expose_headers: ["content-type", "etag"], max_age_seconds: 3600 }]);
+    const first = await deploy(root, { index_document: "index.html", cors: JSON.stringify(RULES) });
+    const again = await deploy(root, { index_document: "index.html", cors: moved }, first.state, {}, { assets: {} });
+    expect(again.gcs.calls).toEqual([]);
+  });
+
+  test("adding files to an existing plain bucket uploads them without touching the bucket settings", async () => {
+    const root = project(FILES);
+    const plain = await deploy(root, { index_document: "index.html" });
+    expect(plain.state.entries[KEY]!.outputs.site_manifest).toBeUndefined();
+    const { gcs, state } = await deploy(root, siteOptions(root, { error_document: "index.html", cors: JSON.stringify(RULES) }), plain.state, {}, { assets: {} });
+    expect(saves(gcs)).toHaveLength(2);
+    expect(manifestOf(state)).toEqual(["assets/app.js", "index.html"]);
+  });
+
+  test("an update that changes only the files patches nothing", async () => {
+    const root = project(FILES);
+    const { state } = await deploy(root, siteOptions(root));
+    write(root, { "index.html": "<h1>v2</h1>" });
+    const { gcs } = await deploy(root, siteOptions(root), state, {}, { assets: {} });
+    expect(gcs.calls.some((c) => c.op === "set")).toBe(false);
+    expect(saves(gcs)).toHaveLength(1);
+  });
+
+  test("a bucket that is not empty after its files are deleted is reported", async () => {
+    const root = project(FILES);
+    const { state } = await deploy(root, siteOptions(root));
+    const stranger: StoredFile = { body: "not ours", contentType: "text/plain" };
+    const gcs = fakeGcs({ assets: { files: new Map([["stranger.txt", stranger]]), objects: 1 } }, { siteRoot: root });
+    await expect(applyConfig(empty(), state, gcs.drivers)).rejects.toThrow("is not empty");
+  });
+
+  test("a failure turning versioning on after the upload removes the files and the bucket", async () => {
+    const root = project(FILES);
+    const gcs = fakeGcs({}, { siteRoot: root, failSet: (metadata) => ((metadata.versioning as { enabled: boolean } | undefined)?.enabled ? new Error("denied") : undefined) });
+    await expect(applyConfig(configWith(siteOptions(root, { versioning: "true" })), emptyState(), gcs.drivers)).rejects.toThrow("denied");
+    expect(gcs.buckets.has("assets")).toBe(false);
+    expect(gcs.calls.filter((c) => c.op === "delete-file")).toHaveLength(2);
+  });
+
+  test("CORS origins other than a full origin or * are refused for GCS but not for S3", () => {
+    const rules = (origin: string) => JSON.stringify([{ origins: [origin], methods: ["GET"] }]);
+    expect(() => validateOptions("gcp", "@gcp.GCS", { cors: rules("https://*.example.com") }, "bucket")).toThrow('GCS accepts a full origin or "*" alone');
+    expect(() => validateOptions("gcp", "@gcp.GCS", { cors: rules("*") }, "bucket")).not.toThrow();
+    expect(() => validateOptions("gcp", "@gcp.GCS", { cors: rules("https://a.example.com") }, "bucket")).not.toThrow();
+    expect(() => validateOptions("aws", "@aws.S3", { cors: rules("https://*.example.com") }, "bucket")).not.toThrow();
   });
 
   test("the option rules accept the site settings and reject a bad glob", () => {

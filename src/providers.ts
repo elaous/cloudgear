@@ -85,6 +85,14 @@ const corsRules: OptionRule = (value) => {
   return undefined;
 };
 
+// GCS allows a literal origin or "*" alone.
+const gcsCorsRules: OptionRule = (value) => {
+  const problem = corsRules(value);
+  if (problem) return problem;
+  const wildcard = (parsedJson(value) as { value: { origins: string[] }[] }).value.flatMap((r) => r.origins).find((o) => o.includes("*") && o !== "*");
+  return wildcard ? `has the origin "${wildcard}"; GCS accepts a full origin or "*" alone` : undefined;
+};
+
 const cacheControlRules: OptionRule = (value) => {
   const parsed = parsedJson(value);
   if (!parsed.ok) return parsed.reason;
@@ -111,11 +119,11 @@ export const ENV_OPTION_PREFIX = "env.";
 // A WAFv2 web ACL for CloudFront lives in us-east-1 under the global scope.
 export const WEB_ACL_ARN = /^arn:aws:wafv2:us-east-1:\d{12}:global\/webacl\/[\w-]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-// Website, CORS and site-file options, the same for every provider that serves a site.
-const SITE_RULES: Record<string, OptionRule> = {
+// Site options per provider; only the CORS rule differs.
+const siteRules = (cors: OptionRule): Record<string, OptionRule> => ({
   index_document: (v) => (/^[^/]{1,255}$/.test(v) ? undefined : 'must be a file name without "/"'),
   error_document: (v) => (/^[^/][^\r\n]{0,1023}$/.test(v) ? undefined : 'must be a key that does not start with "/"'),
-  cors: corsRules,
+  cors,
   site_dir: (v) => (v.length > 0 && v.length <= 4096 ? undefined : "must be a directory path"),
   site_include: jsonStrings("globs"),
   site_exclude: jsonStrings("globs"),
@@ -123,7 +131,7 @@ const SITE_RULES: Record<string, OptionRule> = {
   site_prune: oneOf("true"),
   site_files_hash: (v) => (/^[0-9a-f]{64}$/.test(v) ? undefined : "must be a SHA-256 in hex"),
   site_files_count: integerBetween(0, 10000),
-};
+});
 
 export const PROVIDERS: Record<string, ProviderProfile> = {
   aws: {
@@ -131,7 +139,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
       "@aws.S3": {
         keys: {
           versioning: oneOf("true", "false"),
-          ...SITE_RULES,
+          ...siteRules(corsRules),
         },
       },
       "@aws.Lambda": {
@@ -212,7 +220,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           project: (v) => (/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(v) ? undefined : 'must be a GCP project id such as "my-project-123"'),
           location: (v) => (/^[A-Za-z][A-Za-z0-9-]{1,30}$/.test(v) ? undefined : 'must be a bucket location such as "US" or "us-central1"'),
           storage_class: oneOf("STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"),
-          ...SITE_RULES,
+          ...siteRules(gcsCorsRules),
         },
       },
       "@gcp.CloudFunction": {

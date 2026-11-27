@@ -4,7 +4,6 @@ import {
   hasSiteSettings,
   inBatches,
   manifestOutput,
-  normalizeRule,
   readManifest,
   readSiteFiles,
   removeSiteFiles,
@@ -67,7 +66,7 @@ export function gcsTarget(bucket: BucketLike): SiteTarget {
 
 const websiteOf = (settings: SiteSettings) =>
   settings.indexDocument !== undefined || settings.errorDocument !== undefined
-    ? { mainPageSuffix: settings.indexDocument ?? "index.html", ...(settings.errorDocument !== undefined ? { notFoundPage: settings.errorDocument } : {}) }
+    ? { mainPageSuffix: settings.indexDocument ?? "index.html", notFoundPage: settings.errorDocument ?? null }
     : null;
 
 // GCS has one list for the headers a rule allows and exposes.
@@ -81,13 +80,16 @@ const corsOf = (settings: SiteSettings) =>
       }))
     : null;
 
-// The metadata that differs between `had` and `wanted`; null clears a setting.
+// The patch from `had` to `wanted`; PATCH clears a field only when it is null.
 export function siteMetadata(wanted: SiteSettings, had: SiteSettings): Record<string, unknown> {
   const patch: Record<string, unknown> = {};
   if (JSON.stringify(websiteOf(wanted)) !== JSON.stringify(websiteOf(had))) patch.website = websiteOf(wanted);
-  if (JSON.stringify(wanted.cors?.map(normalizeRule) ?? null) !== JSON.stringify(had.cors?.map(normalizeRule) ?? null)) patch.cors = corsOf(wanted);
+  if (JSON.stringify(corsOf(wanted)) !== JSON.stringify(corsOf(had))) patch.cors = corsOf(wanted);
   return patch;
 }
+
+// A creation body has no null fields.
+const withoutNulls = <T>(value: T): T => JSON.parse(JSON.stringify(value, (_key, v) => (v === null ? undefined : v)));
 
 const statusOf = (err: unknown): number | undefined => {
   const code = (err as { code?: unknown }).code;
@@ -106,10 +108,10 @@ export function gcsDriver(deps: GcpDeps): Driver {
       const options = optionsOf(entry.spec);
       const location = locationOf(entry.spec);
       readSiteFiles(options, deps.siteRoot);
-      // Versioning starts after the files, so cleaning up after a failure leaves no object versions behind.
+      // Versioning starts after the files so cleanup leaves no versions.
       const versioned = options.versioning === "true";
       const hasFiles = !!options.site_dir;
-      const settings = Object.fromEntries(Object.entries(siteMetadata(siteSettings(options), {})).filter(([, value]) => value !== null));
+      const settings = withoutNulls(siteMetadata(siteSettings(options), {}));
       const storage = deps.storage(project);
       try {
         await storage.createBucket(entry.physical_name, {

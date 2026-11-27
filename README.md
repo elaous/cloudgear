@@ -66,7 +66,7 @@ Options (the command an option applies to is in parentheses):
 | `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
 | `--skip-env-check` | Deploy even if a declared secret is not stored (`apply`) |
-| `--permissions` | Also list the access each function gets, as a change from the state (`plan`, `apply`) |
+| `--permissions` | Also list the access each function gets, as a change from the state (`plan`, `apply`, `destroy`) |
 | `--local-env <file>`, `--no-local-env` | Dotenv file that gets the variables the functions read (`generate`; default `local.env` beside the config), or leave it alone |
 | `--allow-missing-env` | Generate even if the code reads variables nothing provides (`generate`) |
 | `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
@@ -1437,7 +1437,7 @@ what succeeded, and writes `.cloudgear/endpoints.json` for the router.
 
 ### Permissions
 
-`cloudgear plan --permissions` (also accepted by `apply`) prints, after the plan, the access each
+`cloudgear plan --permissions` (also accepted by `apply` and `destroy`) prints, after the plan, the access each
 function gets, as a change from what the state holds. A new function lists everything with `+`, a
 removed one lists everything with `-`, an unchanged one lists its access without a mark, and a
 changed grant shows `~` with the actions added (`+s3:PutObject`) or removed (`-s3:PutObject`).
@@ -1452,9 +1452,15 @@ Permissions (+ granted, - revoked):
 
 - A bucket line names the store, the key prefix the grant is limited to, the provider actions, and
   the intents those actions cover. A GCS bucket also lists the predefined role that `apply` will
-  grant (`roles/storage.objectViewer on bucket assets under "img/"`). Secret bindings and policies
-  declared with `Policy` are listed too.
-- The intents are what the analyzer infers from the calls on a store (`get` and `getText` read,
+  grant (`roles/storage.objectViewer on bucket assets under "img/"`). Secret bindings (with their
+  region and KMS key), X-Ray tracing and the actions of policies declared with `Policy` are listed
+  too. Entries for the same store and path are merged, as `apply` grants them together.
+- A function replaced because its physical name changed shows `-/+`: the old grants as `-`, the new
+  ones as `+`. A function that was only half applied is compared with the access it had before. An
+  imported function's access is not managed, so it shows no change, and one that leaves the config
+  is forgotten without revoking anything. A GCS permission no predefined role covers is shown as
+  `! No GCS role covers ...` on its function (`apply` refuses it).
+- The intents are what the analyzer infers from the calls on a store (`get`, `getText` and `getJson` read,
   `put` writes, `delete` deletes, `list` lists, `exists` reads and lists), and the schema declares
   the same operations. Each provider maps an intent to its own actions:
 
@@ -1465,8 +1471,9 @@ Permissions (+ granted, - revoked):
 | `delete` | `s3:DeleteObject` | `storage.objects.delete` |
 | `list` | `s3:ListBucket` | `storage.objects.list` |
 
-- Only what the config describes is shown; nothing is read from the cloud. A function whose
-  permissions the config does not list shows `no permissions`.
+- Only what the config describes is shown; nothing is read from the cloud. On GCS a `-` line is
+  removed only if cloudgear granted it, since `apply` removes just the bindings it recorded. A function
+  with no access shows `no permissions`.
 
 If a deploy step fails part-way through creating a function, what that call
 created is rolled back. Deleting a bucket that still has objects fails with a

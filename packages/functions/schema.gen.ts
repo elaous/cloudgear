@@ -10,12 +10,10 @@ export const ROUTE_METHODS = ["GET","POST","PUT","PATCH","DELETE","HEAD","OPTION
 
 export const RESPONSE_KINDS = ["helper","vercel"] as const;
 
-export const SECRET_BINDING_FIELDS = ["store","path","names"] as const;
+export const SECRET_BINDING_FIELDS = ["store","path","names","renamed","all"] as const;
 
 export const SCHEDULE_RULE_FIELDS = ["cron","query"] as const;
 
-export const FUNCTION_ROUTER_FIELDS = ["provider","name","authenticated","mode","region","project","optional_env","routes","cert","function_options","network"] as const;
+export const FUNCTION_ROUTER_FIELDS = ["provider","name","authenticated","mode","region","secrets","project","optional_env","routes","cert","function_options","network"] as const;
 
-export const FUNCTION_ROUTER_DEFAULTS = {
-  authenticated: "iam",
-} as const;
+export const FUNCTION_ROUTER_ROUTE_FIELDS = ["method","path","handler","name","public","include","request","response","secrets","schedule","options"] as const;

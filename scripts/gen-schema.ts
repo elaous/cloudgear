@@ -8,7 +8,7 @@ import { FileDescriptorSetSchema } from "@bufbuild/protobuf/wkt";
 const ROOT = join(import.meta.dir, "..");
 const GENERATED_HEADER = "// Generated from proto/ by scripts/gen-schema.ts; do not edit.\n";
 
-// proto file -> package directory that receives the constants.
+// proto file -> generated file; several protos may share one.
 const TARGETS: Record<string, string> = {
   "cloudgear/v1/blob.proto": "packages/blob/schema.gen.ts",
   "cloudgear/v1/cache.proto": "packages/cache/schema.gen.ts",
@@ -67,21 +67,23 @@ export function generate(): Map<string, string> {
     return [`export const ${plural(snake(enumeration.name))} = ${literal(names)} as const;`, ""];
   };
 
+  // A nested message is named after its parents, such as FunctionRouterRoute.
+  const labelOf = (message: DescMessage): string => message.typeName.replace(/^cloudgear\.v1\./, "").replaceAll(".", "");
   const messageLines = (message: DescMessage): string[] => {
-    const lines: string[] = [`export const ${snake(message.name)}_FIELDS = ${literal(message.fields.map((f) => f.name))} as const;`, ""];
+    const lines: string[] = [`export const ${snake(labelOf(message))}_FIELDS = ${literal(message.fields.map((f) => f.name))} as const;`, ""];
     const ops = message.proto.options ? (getOption(message, operations) as { method: string; intents: number[] }[]) : [];
     if (ops.length) {
-      lines.push(`export const ${snake(message.name)}_OPERATIONS = {`);
+      lines.push(`export const ${snake(labelOf(message))}_OPERATIONS = {`);
       for (const op of ops) lines.push(`  ${op.method}: ${literal(op.intents.map(intentName))},`);
       lines.push("} as const;", "");
     }
     const defaults = message.fields.filter((f) => hasOption(f, defaultValue));
     if (defaults.length) {
-      lines.push(`export const ${snake(message.name)}_DEFAULTS = {`);
+      lines.push(`export const ${snake(labelOf(message))}_DEFAULTS = {`);
       for (const field of defaults) {
       const value = getOption(field, defaultValue) as string;
       const allowed = field.enum ? enumNames.get(field.enum.name) : undefined;
-      if (allowed && !allowed.includes(value)) throw new Error(`${message.name}.${field.name} defaults to "${value}", not one of ${allowed.join(", ")}`);
+      if (allowed && !allowed.includes(value)) throw new Error(`${labelOf(message)}.${field.name} defaults to "${value}", not one of ${allowed.join(", ")}`);
       lines.push(`  ${field.localName}: ${literal(value)},`);
     }
       lines.push("} as const;", "");
@@ -94,8 +96,12 @@ export function generate(): Map<string, string> {
     const file = registry.getFile(protoFile);
     if (!file) throw new Error(`${protoFile} is not in the schema`);
     if (file.messages.some((m) => m.nestedEnums.length)) throw new Error(`${protoFile}: nested enums are not supported; declare them at the top level`);
-    const body = [...file.enums.flatMap(enumLines), ...file.messages.flatMap(messageLines)];
-    bodies.set(target, [...(bodies.get(target) ?? []), ...body]);
+    const body = [...file.enums.flatMap(enumLines), ...file.messages.flatMap((m) => [m, ...m.nestedMessages]).flatMap(messageLines)];
+    const merged = [...(bodies.get(target) ?? []), ...body];
+    const names = merged.flatMap((line) => line.match(/^export const (\w+)/)?.[1] ?? []);
+    const repeated = names.find((name, i) => names.indexOf(name) !== i);
+    if (repeated) throw new Error(`${target}: ${repeated} is generated twice`);
+    bodies.set(target, merged);
   }
   return new Map([...bodies].map(([target, body]) => [target, `${GENERATED_HEADER}\n${body.join("\n").trimEnd()}\n`]));
 }

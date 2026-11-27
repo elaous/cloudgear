@@ -1,5 +1,5 @@
 export { FunctionRouter, request, DEFAULT_ENDPOINTS_FILE } from "./router";
-export { AUTHENTICATIONS, FUNCTION_ROUTER_FIELDS, ROUTE_METHODS, ROUTER_MODES, ROUTER_PROVIDERS, RESPONSE_KINDS } from "./schema.gen";
+export { AUTHENTICATIONS, FUNCTION_ROUTER_FIELDS, FUNCTION_ROUTER_ROUTE_FIELDS, ROUTE_METHODS, ROUTER_MODES, ROUTER_PROVIDERS, RESPONSE_KINDS } from "./schema.gen";
 export { jwtAuth } from "./auth";
 export { cron, schedule, normalizeCron, toEventBridgeCron } from "./cron";
 export type { CronSchedule, ScheduleSpec } from "./cron";

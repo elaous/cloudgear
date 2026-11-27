@@ -11,9 +11,10 @@ import { generate, loadRegistry } from "../scripts/gen-schema";
 import type { DnsOptions } from "@cloudgear/dns";
 import { DNS_FIELDS } from "@cloudgear/dns";
 import type { CdnOptions, CertOptions } from "@cloudgear/cdn";
-import { CDN_FIELDS, CERT_FIELDS, PRICE_CLASSES } from "@cloudgear/cdn";
+import { CDN_FIELDS, CERT_FIELDS, METHOD_ROUTINGS, PRICE_CLASSES } from "@cloudgear/cdn";
 import type { FunctionRouterOptions } from "@cloudgear/functions";
-import { AUTHENTICATIONS, FUNCTION_ROUTER_FIELDS, METHODS, ROUTE_METHODS, ROUTER_PROVIDERS } from "@cloudgear/functions";
+import type { RouteOptions } from "@cloudgear/functions";
+import { ANY_METHOD, AUTHENTICATIONS, FUNCTION_ROUTER_FIELDS, FUNCTION_ROUTER_ROUTE_FIELDS, METHODS, RESPONSE_KINDS, ROUTE_METHODS, ROUTER_MODES, ROUTER_PROVIDERS } from "@cloudgear/functions";
 import type { BlobStoreOptions, BlobStoreWebSiteOptions } from "@cloudgear/blob";
 import { BLOB_STORE_FIELDS, BLOB_STORE_WEB_SITE_FIELDS } from "@cloudgear/blob";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
@@ -49,12 +50,18 @@ describe("schema", () => {
     const cdn: Required<Omit<CdnOptions, "driver">> = { bucket: {} as never, router: {} as never, domain: "", methodRouting: "function", webAcl: true, priceClass: "PriceClass_All", options: {} };
     const schemaFields = CDN_FIELDS.filter((f) => !["provider", "name", "cert", "web_acl_arn"].includes(f)).map(camel);
     expect(Object.keys(cdn).sort()).toEqual(schemaFields.sort());
-    expect(PRICE_CLASSES).toEqual(["PriceClass_100", "PriceClass_200", "PriceClass_All"]);
+    expect(CDN_FIELDS).toContain("web_acl_arn");
+    expect([...PRICE_CLASSES]).toEqual(["PriceClass_100", "PriceClass_200", "PriceClass_All"]);
+    expect([...METHOD_ROUTINGS]).toEqual(["function"]);
   });
 
-  // Options only the TypeScript client has: they hold code, credentials or runtime values.
-  const RUNTIME_ONLY = ["endpoints", "endpointsFile", "credentials", "authenticate", "env", "policies", "rateLimit"];
-  test("FunctionRouter options are in the schema unless they are runtime only", () => {
+  // Hold code, credentials or runtime values.
+  const RUNTIME_ONLY = ["endpoints", "endpointsFile", "credentials", "authenticate", "rateLimit"];
+  // Refer to kinds the schema does not have yet (IAM policies, events).
+  const NOT_MODELED_YET = ["policies"];
+  // The TypeScript `env` is the schema's `secrets`.
+  const renamed = (key: string): string => (key === "env" ? "secrets" : key);
+  test("FunctionRouter options are in the schema unless they are runtime only or not modeled yet", () => {
     const options: Required<FunctionRouterOptions> = {
       mode: "local",
       endpoints: {},
@@ -73,10 +80,20 @@ describe("schema", () => {
       rateLimit: { limit: 1, windowMs: 1 },
     };
     const schemaFields = FUNCTION_ROUTER_FIELDS.filter((f) => !["provider", "name", "routes"].includes(f)).map(camel);
-    expect(Object.keys(options).filter((key) => !RUNTIME_ONLY.includes(key)).sort()).toEqual(schemaFields.sort());
-    expect((ROUTE_METHODS as readonly string[]).slice().sort()).toEqual([...METHODS, "*"].map(String).sort());
+    const modeled = Object.keys(options).filter((key) => ![...RUNTIME_ONLY, ...NOT_MODELED_YET].includes(key)).map(renamed);
+    expect(modeled.sort()).toEqual(schemaFields.sort());
+    expect((ROUTE_METHODS as readonly string[]).slice().sort()).toEqual([...METHODS, ANY_METHOD].map(String).sort());
     expect([...ROUTER_PROVIDERS]).toEqual(["aws", "gcp", "azure"]);
     expect([...AUTHENTICATIONS]).toEqual(["iam", "none"]);
+    expect([...ROUTER_MODES]).toEqual(["local", "remote"]);
+    expect([...RESPONSE_KINDS]).toEqual(["helper", "vercel"]);
+  });
+
+  // The method, path and handler are positional arguments of url(); `on` and `policies` are not modeled yet.
+  test("route options are in the schema unless they are not modeled yet", () => {
+    const route: Required<RouteOptions> = { name: "", public: true, options: {}, include: [], request: true, response: {} as never, schedule: [], on: [], env: [], policies: [] };
+    const modeled = Object.keys(route).filter((key) => !["on", "policies"].includes(key)).map(renamed);
+    expect(modeled.sort()).toEqual(FUNCTION_ROUTER_ROUTE_FIELDS.filter((f) => !["method", "path", "handler"].includes(f)).sort());
   });
 
   test("SecretStore options name the same fields as the schema", () => {

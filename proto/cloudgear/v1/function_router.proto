@@ -36,19 +36,24 @@ enum RouteMethod {
   ROUTE_METHOD_ANY = 8 [(cloudgear.v1.name) = "*"];
 }
 
-// How a handler receives the request and answers.
+// How a handler answers: the response helper, or a Vercel-style writer (the config calls it "writer").
 enum ResponseKind {
   RESPONSE_KIND_UNSPECIFIED = 0;
   RESPONSE_KIND_HELPER = 1 [(cloudgear.v1.name) = "helper"];
   RESPONSE_KIND_VERCEL = 2 [(cloudgear.v1.name) = "vercel"];
 }
 
-// Environment variables a function reads from a secret store; an env var has the name of its secret.
+// Environment variables a function reads from a secret store.
 message SecretBinding {
   string store = 1 [(cloudgear.v1.references) = "SecretStore", (cloudgear.v1.required) = true];
   // A prefix such as "/app": a leading slash, no trailing "/*".
   string path = 2 [(cloudgear.v1.required) = true];
-  repeated string names = 3 [(cloudgear.v1.required) = true];
+  // Env vars that have the name of their secret.
+  repeated string names = 3;
+  // Env var to secret name, for a secret under another name.
+  map<string, string> renamed = 4;
+  // Every secret under the path becomes an env var.
+  optional bool all = 5;
 }
 
 // A cron schedule, UTC, with the query the function is called with.
@@ -80,10 +85,13 @@ message FunctionRouter {
 
   RouterProvider provider = 1 [(cloudgear.v1.immutable) = true];
   string name = 2 [(cloudgear.v1.immutable) = true];
-  optional Authentication authenticated = 3 [(cloudgear.v1.default_value) = "iam"];
+  // Defaults to iam for aws and none for gcp and azure.
+  optional Authentication authenticated = 3;
   optional RouterMode mode = 4;
   // Defaults to the deploy region.
   optional string region = 5;
+  // Secrets every function gets as environment variables.
+  repeated SecretBinding secrets = 12;
   // GCP only: the project the functions deploy to.
   optional string project = 6;
   // Unset variables the functions tolerate.

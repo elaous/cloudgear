@@ -63,17 +63,17 @@ message ScheduleRule {
   map<string, string> query = 2;
 }
 
-// Functions behind one router; each route is a function.
-// What a function may do with a bucket.
+// What a function may do with a store.
 message Access {
   // A BlobStore, or a subtype such as a BlobStoreWebSite.
   string store = 1 [(cloudgear.v1.references) = "BlobStore", (cloudgear.v1.required) = true];
-  // At least one; the grant is exactly these.
+  // At least one; polymorph's generators reject an empty list. The grant is exactly these.
   repeated Intent intents = 2;
-  // Narrows the grant to keys under this path, which is inside the store's own path.
+  // Narrows the grant to keys under this path; polymorph's generators require it to be inside the store's own path.
   optional string path = 3;
 }
 
+// Functions behind one router; each route is a function.
 message FunctionRouter {
   message Route {
     RouteMethod method = 1;

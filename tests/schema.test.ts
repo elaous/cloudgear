@@ -93,6 +93,9 @@ describe("schema", () => {
 
   // `access` declares what a handler may do for languages without an analyzer; the TypeScript analyzer reads the calls.
   const SCHEMA_ONLY = ["access"];
+  test("the schema-only route fields exist in the schema", () => {
+    for (const field of SCHEMA_ONLY) expect(FUNCTION_ROUTER_ROUTE_FIELDS as readonly string[]).toContain(field);
+  });
   // The method, path and handler are positional arguments of url().
   test("route options are all in the schema", () => {
     const route: Required<RouteOptions> = { name: "", public: true, options: {}, include: [], request: true, response: {} as never, schedule: [], on: [], env: [], policies: [] };

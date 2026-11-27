@@ -14,6 +14,6 @@ export const SECRET_BINDING_FIELDS = ["store","path","names","renamed","all"] as
 
 export const SCHEDULE_RULE_FIELDS = ["cron","query"] as const;
 
-export const FUNCTION_ROUTER_FIELDS = ["provider","name","authenticated","mode","region","secrets","project","optional_env","routes","cert","function_options","network"] as const;
+export const FUNCTION_ROUTER_FIELDS = ["provider","name","authenticated","mode","region","secrets","project","optional_env","routes","cert","function_options","network","policies"] as const;
 
-export const FUNCTION_ROUTER_ROUTE_FIELDS = ["method","path","handler","name","public","include","request","response","secrets","schedule","options"] as const;
+export const FUNCTION_ROUTER_ROUTE_FIELDS = ["method","path","handler","name","public","include","request","response","secrets","schedule","options","on","policies"] as const;

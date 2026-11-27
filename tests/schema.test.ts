@@ -17,6 +17,10 @@ import type { RouteOptions } from "@cloudgear/functions";
 import { ANY_METHOD, AUTHENTICATIONS, FUNCTION_ROUTER_FIELDS, FUNCTION_ROUTER_ROUTE_FIELDS, METHODS, RESPONSE_KINDS, ROUTE_METHODS, ROUTER_MODES, ROUTER_PROVIDERS } from "@cloudgear/functions";
 import type { BlobStoreOptions, BlobStoreWebSiteOptions } from "@cloudgear/blob";
 import { BLOB_STORE_FIELDS, BLOB_STORE_WEB_SITE_FIELDS } from "@cloudgear/blob";
+import type { EventBusOptions, EventMatch } from "@cloudgear/events";
+import { EVENT_BUS_FIELDS, EVENT_PROVIDERS, EVENT_TRIGGER_FIELDS } from "@cloudgear/events";
+import type { PolicyOptions } from "@cloudgear/iam";
+import { POLICY_FIELDS, POLICY_PROVIDERS } from "@cloudgear/iam";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
 import { SECRET_STORE_FIELDS } from "@cloudgear/secrets";
 
@@ -57,11 +61,9 @@ describe("schema", () => {
 
   // Hold code, credentials or runtime values.
   const RUNTIME_ONLY = ["endpoints", "endpointsFile", "credentials", "authenticate", "rateLimit"];
-  // Refer to kinds the schema does not have yet (IAM policies, events).
-  const NOT_MODELED_YET = ["policies"];
   // The TypeScript `env` is the schema's `secrets`.
   const renamed = (key: string): string => (key === "env" ? "secrets" : key);
-  test("FunctionRouter options are in the schema unless they are runtime only or not modeled yet", () => {
+  test("FunctionRouter options are in the schema unless they are runtime only", () => {
     const options: Required<FunctionRouterOptions> = {
       mode: "local",
       endpoints: {},
@@ -80,7 +82,7 @@ describe("schema", () => {
       rateLimit: { limit: 1, windowMs: 1 },
     };
     const schemaFields = FUNCTION_ROUTER_FIELDS.filter((f) => !["provider", "name", "routes"].includes(f)).map(camel);
-    const modeled = Object.keys(options).filter((key) => ![...RUNTIME_ONLY, ...NOT_MODELED_YET].includes(key)).map(renamed);
+    const modeled = Object.keys(options).filter((key) => !RUNTIME_ONLY.includes(key)).map(renamed);
     expect(modeled.sort()).toEqual(schemaFields.sort());
     expect((ROUTE_METHODS as readonly string[]).slice().sort()).toEqual([...METHODS, ANY_METHOD].map(String).sort());
     expect([...ROUTER_PROVIDERS]).toEqual(["aws", "gcp", "azure"]);
@@ -89,11 +91,24 @@ describe("schema", () => {
     expect([...RESPONSE_KINDS]).toEqual(["helper", "vercel"]);
   });
 
-  // The method, path and handler are positional arguments of url(); `on` and `policies` are not modeled yet.
-  test("route options are in the schema unless they are not modeled yet", () => {
+  // The method, path and handler are positional arguments of url().
+  test("route options are all in the schema", () => {
     const route: Required<RouteOptions> = { name: "", public: true, options: {}, include: [], request: true, response: {} as never, schedule: [], on: [], env: [], policies: [] };
-    const modeled = Object.keys(route).filter((key) => !["on", "policies"].includes(key)).map(renamed);
+    const modeled = Object.keys(route).map(renamed);
     expect(modeled.sort()).toEqual(FUNCTION_ROUTER_ROUTE_FIELDS.filter((f) => !["method", "path", "handler"].includes(f)).sort());
+  });
+
+  // The bus name is the schema's name; the provider is the first argument.
+  test("EventBus and Policy options name the same fields as the schema", () => {
+    const bus: Required<Omit<EventBusOptions, "driver">> = { name: "" };
+    expect(Object.keys(bus).sort()).toEqual(EVENT_BUS_FIELDS.filter((f) => f !== "provider").sort());
+    const policy: Required<PolicyOptions> = { name: "", document: { Version: "2012-10-17", Statement: [] } };
+    expect(Object.keys(policy).sort()).toEqual(POLICY_FIELDS.filter((f) => f !== "provider").sort());
+    expect([...EVENT_PROVIDERS]).toEqual(["aws"]);
+    expect([...POLICY_PROVIDERS]).toEqual(["aws"]);
+    // A trigger is bus.event({ type, source }), with the bus as its receiver.
+    const trigger: Required<EventMatch> = { type: "", source: "" };
+    expect(Object.keys(trigger).sort()).toEqual(EVENT_TRIGGER_FIELDS.filter((f) => f !== "bus").sort());
   });
 
   test("SecretStore options name the same fields as the schema", () => {

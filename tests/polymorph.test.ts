@@ -98,8 +98,9 @@ describe("a second generated setup.ts: caches, networks, tokens and secret bindi
 
   test("the cache runs in the network it describes", async () => {
     const { config } = await analyzePlatform();
-    expect(config.resource).toHaveLength(1);
-    expect(config.resource[0]).toMatchObject({
+    const caches = config.resource.filter((r) => r.type === "@aws.ElastiCache");
+    expect(caches).toHaveLength(1);
+    expect(caches[0]).toMatchObject({
       name: "cache.sessions",
       type: "@aws.ElastiCache",
       options: { engine: "valkey", size: "small", vpc: "vpc-0123456789abcdef0", subnets: "subnet-0123456789abcdef0,subnet-0123456789abcdef1" },
@@ -131,16 +132,34 @@ describe("a second generated setup.ts: caches, networks, tokens and secret bindi
 
   test("only the known warnings are raised", async () => {
     const { warnings } = await analyzePlatform();
+    const known = /authenticated is "none"|reads every secret under \/shared|applies to every resource/;
     expect(warnings.filter((w) => /authenticated is "none"/.test(w))).toHaveLength(1);
-    expect(warnings.filter((w) => /reads every secret under \/shared/.test(w))).toHaveLength(2);
-    expect(warnings.filter((w) => !/authenticated is "none"|reads every secret under \/shared/.test(w))).toEqual([]);
+    expect(warnings.filter((w) => /reads every secret under \/shared/.test(w))).toHaveLength(3);
+    expect(warnings.filter((w) => /policy "read_logs".*applies to every resource/.test(w))).toHaveLength(1);
+    expect(warnings.filter((w) => !known.test(w))).toEqual([]);
+  });
+
+  test("the event bus, its triggers and the declared policy reach the functions", async () => {
+    const { config } = await analyzePlatform();
+    expect(config.resource.find((r) => r.name === "bus.orders")).toMatchObject({ type: "@aws.EventBus", physical_name: "platform-orders" });
+    const document = JSON.stringify({ Statement: [{ Action: ["logs:GetLogEvents", "logs:FilterLogEvents"], Effect: "Allow", Resource: "*" }], Version: "2012-10-17" });
+    for (const fn of config.function) expect(fn.policy).toEqual([{ name: "read_logs", document }]);
+    const orders = config.function.find((f) => f.route.some((r) => r.path === "/orders"))!;
+    expect(orders.event).toEqual([
+      { bus: "bus.orders", type: "order.created" },
+      { bus: "bus.orders", type: "order.paid", source: "shop" },
+    ]);
+    expect(config.function.filter((f) => f.event?.length)).toHaveLength(1);
   });
 
   test("the variables the handlers read are provided by the options and the bindings", async () => {
     const { env } = await analyzePlatform();
-    const variables = Object.fromEntries(Object.values(env.functions).flatMap((fn) => Object.entries(fn.variables).map(([name, use]) => [name, use.provided])));
-    expect(variables).toEqual({ API_KEY: "secret", STAGE: "option" });
+    const provided = (suffix: string) => Object.fromEntries(Object.entries(Object.entries(env.functions).find(([name]) => name.endsWith(suffix))![1].variables).map(([name, use]) => [name, use.provided]));
+    expect(provided("-health")).toEqual({ API_KEY: "secret" });
+    expect(provided("-tick")).toEqual({ STAGE: "option" });
+    expect(provided("-orders")).toEqual({ API_KEY: "secret-wildcard" });
   });
+
 
   test("the function options and the router network reach every function", async () => {
     const { config } = await analyzePlatform();

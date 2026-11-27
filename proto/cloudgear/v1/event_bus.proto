@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "cloudgear/v1/options.proto";
+
+enum EventProvider {
+  EVENT_PROVIDER_UNSPECIFIED = 0;
+  EVENT_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+}
+
+// An event bus. Its name is the bus name; "default" is the account's default bus.
+message EventBus {
+  EventProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+}
+
+// A function runs when an event of this type arrives on the bus.
+message EventTrigger {
+  string bus = 1 [(cloudgear.v1.references) = "EventBus", (cloudgear.v1.required) = true];
+  string type = 2 [(cloudgear.v1.required) = true];
+  // A trigger without a source matches any source.
+  optional string source = 3;
+}

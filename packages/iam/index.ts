@@ -1,3 +1,5 @@
+export { POLICY_FIELDS, POLICY_PROVIDERS } from "./schema.gen";
+
 export type PolicyProvider = "aws";
 
 export interface PolicyDocument {

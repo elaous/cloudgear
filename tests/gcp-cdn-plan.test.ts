@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CloudgearConfig } from "../src/config/schema";
+import { generate } from "../src/generate";
 import { apply } from "../src/deploy/apply";
 import { plan } from "../src/deploy/plan";
 import { CDN, Cert } from "@cloudgear/cdn";
@@ -63,5 +67,30 @@ describe("the CDN class", () => {
   test("rejects a router and the CloudFront-only options", () => {
     expect(() => new CDN("gcp", cert(), { router: { provider: "gcp" } })).toThrow(/bucket only/);
     expect(() => new CDN("gcp", cert(), { bucket, priceClass: "PriceClass_100" })).toThrow(/only apply to a CloudFront CDN/);
+  });
+});
+
+describe("analyzing a gcp CDN", () => {
+  const run = async (name: string) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cloudgear-gcp-cdn-"));
+    try {
+      return await generate({ entry: path.join(import.meta.dir, "fixtures/router/edge", name), configPath: path.join(dir, "c.prototxt"), buildDir: path.join(dir, "b"), project: "gcpcdn" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("a public bucket with a gcp certificate becomes a gcp CDN", async () => {
+    const { config } = await run("gcp-site.ts");
+    expect(config.cdn.map((c) => [c.provider, c.domain, c.bucket])).toEqual([["gcp", "www.example.org", "my-site"]]);
+    expect(config.certificate.map((c) => [c.provider, c.usage])).toEqual([["gcp", "cdn"]]);
+  });
+
+  test("a bucket that is not public_read is an error", async () => {
+    await expect(run("gcp-private.ts")).rejects.toThrow(/options: \{ public_read: "true" \}/);
+  });
+
+  test("the bucket must use the CDN's provider", async () => {
+    await expect(run("gcp-aws-bucket.ts")).rejects.toThrow(/bucket must use provider "gcp"/);
   });
 });

@@ -27,7 +27,8 @@ import { adoptByArn, adoptEntries, typeOfArn } from "./deploy/adopt";
 import { parseArn } from "./deploy/aws/arn";
 import { planPolicyFiles, writePolicyFiles } from "./policyfiles";
 import { pickDistribution, siteDistributions } from "./cdnselect";
-import { checkEnvironment, envWarnings } from "./envcheck";
+import { checkEnvironment } from "./envcheck";
+import { formatMissingEnv, missingEnv } from "./envreport";
 import { syncAttached } from "./attached";
 import { isBlobType } from "./providers";
 import { dumpDistributions } from "./dumpdistributions";
@@ -78,7 +79,10 @@ Options:
   --arn <arn>        Import exactly this certificate, distribution, function, rule or bucket (import only)
   --skip-dns-check   Deploy even if the DNS check finds a conflict or an undelegated zone (apply only)
   --dns-server <ip>  Resolver for the DNS check (default: the system's)
-  --skip-env-check   Deploy even if the code reads environment variables nothing provides, or secrets are not stored (apply only)
+  --skip-env-check   Deploy even if secrets are not stored (apply only)
+  --local-env <file>  Dotenv file generate adds the variables the functions read to (default: local.env beside the config; a relative path starts at the current directory)
+  --no-local-env     Leave the local dotenv file alone (generate only)
+  --allow-missing-env  Generate even if the code reads variables nothing provides (generate only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored
   --allow-unignored  Load an env file git does not ignore (secrets set)
   --env-file <file>  Dotenv file whose values setup.ts reads through process.env (generate); the shell wins
@@ -108,6 +112,9 @@ const CLI_OPTIONS = {
   "allow-unignored": { type: "boolean", default: false },
   "env-file": { type: "string" },
   "skip-env-check": { type: "boolean", default: false },
+  "local-env": { type: "string" },
+  "no-local-env": { type: "boolean", default: false },
+  "allow-missing-env": { type: "boolean", default: false },
   "skip-dns-check": { type: "boolean", default: false },
   "dns-server": { type: "string" },
   domain: { type: "string" },
@@ -183,7 +190,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
     case "generate": {
       const entry = args[0];
       if (!entry) throw new Error("Usage: cloudgear generate <entry.ts>");
-      const { config, warnings } = await generate({
+      const { config, warnings, env, localEnv } = await generate({
         entry,
         configPath,
         buildDir: path.join(workDir, "build"),
@@ -191,11 +198,15 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         invokers: values.invoker,
         reservedConcurrency: values["reserved-concurrency"] === undefined ? undefined : Number(values["reserved-concurrency"]),
         setupEnv: values["env-file"] ? { ...readEnvFile(values["env-file"]), ...process.env } : undefined,
+        localEnvPath: values["no-local-env"] ? undefined : path.resolve(values["local-env"] ?? path.join(path.dirname(configPath), "local.env")),
       });
       for (const warning of warnings) console.warn(`warning: ${warning}`);
       console.log(
         `cloudgear: ${config.function.length} function(s), ${config.resource.length} resource(s) -> ${path.relative(process.cwd(), configPath)}`,
       );
+      if (localEnv?.added.length) console.log(`cloudgear: ${localEnv.created ? "created" : "added"} ${localEnv.added.length} variable(s) ${localEnv.created ? "in" : "to"} ${path.relative(process.cwd(), localEnv.file)}: ${localEnv.added.join(", ")}`);
+      const missing = missingEnv(env);
+      if (missing.length && !values["allow-missing-env"]) throw new Error(`${formatMissingEnv(missing)}\nPass --allow-missing-env to generate anyway.`);
       return;
     }
     case "plan": {
@@ -204,8 +215,6 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const { state } = await store.load(config.project, config.provider);
       debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
       console.log(formatPlan(withSiteChanges(plan(config, state), path.dirname(configPath))));
-      const warning = envWarnings(config, configPath);
-      if (warning) console.warn(`\nwarning: ${warning}`);
       return;
     }
     case "check-dns": {
@@ -241,7 +250,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       });
       console.log(formatPlan(actions));
       if (command === "apply" && config.function.length && !values["skip-env-check"]) {
-        await checkEnvironment(config, configPath, values.region);
+        await checkEnvironment(config, values.region);
       }
       if (command === "apply" && hasChanges(actions) && !values["skip-dns-check"] && !fakeDrivers()) {
         const check = await checkDns(actions, systemLookup(values["dns-server"]));

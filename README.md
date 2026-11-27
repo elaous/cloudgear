@@ -44,7 +44,7 @@ cloudgear secrets set|list   # store and check the secrets the app declares
 ```
 
 `cloudgear --help` prints the commands and options. `generate` writes the
-config (`cloudgear.prototxt`) and `cloudgear.env.json`, and the function
+config (`cloudgear.prototxt`), adds the variables the functions read to `local.env`, and writes the function
 bundles under `.cloudgear/build/`; `apply` keeps `.cloudgear/state.json` and
 `.cloudgear/endpoints.json` next to the config. Try it on the example app:
 
@@ -65,7 +65,9 @@ Options (the command an option applies to is in parentheses):
 | `--region <region>` | Cloud region (default `$AWS_REGION` or `$AWS_DEFAULT_REGION`) |
 | `--env <name>`, `--author <name>`, `--tag <key=value>` | Tags on created resources (`apply`; `import` accepts them but adds no tags; see Tags) |
 | `--auto-approve` | Skip the confirmation prompt (`apply`, `destroy`) |
-| `--skip-env-check` | Deploy even if a variable or secret is missing (`apply`) |
+| `--skip-env-check` | Deploy even if a declared secret is not stored (`apply`) |
+| `--local-env <file>`, `--no-local-env` | Dotenv file that gets the variables the functions read (`generate`; default `local.env` beside the config), or leave it alone |
+| `--allow-missing-env` | Generate even if the code reads variables nothing provides (`generate`) |
 | `--skip-dns-check` | Deploy even if the DNS check finds a conflict or an undelegated zone (`apply`) |
 | `--env-file <file>` | Dotenv file whose values `setup.ts` reads through `process.env` (`generate`; variables already in the shell win) |
 | `--dns-server <ip>` | Resolver for the DNS check (`check-dns`, `apply`; default: the system's) |
@@ -1356,25 +1358,27 @@ authenticated: "iam"
 
 ### Environment variables the code reads
 
-`cloudgear generate` also lists what each function's code reads from the
+`cloudgear generate` also scans what each function's code reads from the
 environment (`process.env.X`, `process.env["X"]`, `Bun.env.X`, `import.meta.env.X`
-and destructuring) in `cloudgear.env.json`, next to the config, by function name:
+and destructuring), and does two things with it:
 
-```json
-{
-  "version": 1,
-  "functions": {
-    "api-items": {
-      "routes": ["GET /api/items"],
-      "variables": {
-        "ITEMS_CURSOR_SECRET": { "required": true, "files": ["api/items.ts"], "provided": "secret" },
-        "DB_URL": { "required": true, "files": ["lib/db.ts"], "provided": null }
-      },
-      "dynamic": []
-    }
-  }
-}
-```
+- It adds each variable to `local.env` beside the config (`--local-env <file>` picks
+  another file, relative to the current directory, and the directory is created if missing;
+  `--no-local-env` skips it and wins over `--local-env`). A required variable gets a line `NAME=`;
+  an optional one a commented line `# NAME=`. Variables the platform sets (`AWS_*`,
+  `TZ`, `NODE_ENV` and the like) and ones cloudgear sets for the function are left out.
+  The file is created if it does not exist. Existing lines are never changed or removed,
+  and a name that already appears, even commented out, is not added again. It is meant for
+  local development and holds names only until you fill in values, so keep it out of the
+  repository.
+- It fails when a required variable reaches the function by no route (see below), after
+  writing the config and `local.env`, and lists each variable with the function and files that
+  read it. `--allow-missing-env` generates anyway. A variable counts as provided when cloudgear
+  sets it (`resource`), a `functionOptions` entry sets it (`option`), a secret binding names it
+  (`secret`), a `/*` secret path may hold it (`secret-wildcard`) or the platform sets it
+  (`platform`). A value in `local.env` does not count: deployed functions never read that file.
+
+An older `cloudgear.env.json` beside the config is deleted by `generate`.
 
 - The scan follows the code the function runs: its body, what that calls
   (including helpers in other project files), and the top-level code of every
@@ -1398,19 +1402,13 @@ and destructuring) in `cloudgear.env.json`, next to the config, by function name
   router's `optionalEnv: ["SENTRY_DSN"]` (string literals), so it is no longer
   required. A conversion before a fallback (`Number(process.env.X) || 0`) is
   already optional.
-- A computed read (`process.env[name]`) or a spread is listed under `dynamic`
-  and warned about; those variables cannot be checked.
-- `cloudgear apply` reads the report and refuses to deploy while a required
-  variable has `provided: null`, and while a declared secret is not stored (see
-  `cloudgear secrets list`). `cloudgear plan` only warns. Pass
-  `--skip-env-check` to deploy anyway. Checking that secrets are stored needs
-  list access to the store (`ssm:GetParametersByPath` for SSM,
-  `secretsmanager:ListSecrets` for Secrets Manager, and `kms:Decrypt` for a
-  named key); without it `apply` explains and suggests the flag. The report
-  records the hash of the config it was made for, so commit both together; if
-  they differ, `apply` asks for `generate` again. If the report is missing, `apply` asks
-  for `generate` first. The report holds names and file paths, never values, so
-  it MAY be committed.
+- A computed read (`process.env[name]`) or a spread is warned about by `generate`;
+  those variables cannot be listed or checked.
+- `cloudgear apply` refuses to deploy while a declared secret is not stored (see
+  `cloudgear secrets list`). Pass `--skip-env-check` to deploy anyway. Checking that
+  secrets are stored needs list access to the store (`ssm:GetParametersByPath` for SSM,
+  `secretsmanager:ListSecrets` for Secrets Manager, and `kms:Decrypt` for a named key);
+  without it `apply` explains and suggests the flag.
 
 **DNS check.** `cloudgear check-dns` (which `apply` runs first) looks up public DNS for what the plan creates or changes. It blocks
 when a CDN or API host that is about to be created already resolves to something (a wildcard record that answers for
@@ -2248,7 +2246,7 @@ Where each moving part lives, since several are called across packages:
 | EventBridge bus and rule deployers | `src/deploy/aws/eventbus.ts`, `schedule.ts` | `awsDrivers` |
 | `SecretStore` | `packages/secrets/index.ts` | apps; `src/analyze/app.ts` |
 | `cloudgear secrets` (`setSecrets`, `secretStatus`), env file parsing | `src/secrets/` | `src/cli.ts` |
-| environment report, `checkEnvironment` | `src/analyze/envuse.ts`, `src/envreport.ts`, `src/envcheck.ts` | `generate`, `plan`, `apply` |
+| environment scan, `local.env`, `checkEnvironment` | `src/analyze/envuse.ts`, `src/envreport.ts`, `src/localenv.ts`, `src/envcheck.ts` | `generate`, `apply` |
 | `adoptEntries`, `adoptByArn` | `src/deploy/adopt.ts` | `cloudgear import` |
 | resource tags (`baseTags`) | `src/deploy/aws/tags.ts` | `src/cli.ts`, the AWS deployers |
 

@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { envReportPath, formatMissingEnv, missingEnv, readEnvReport, type EnvReport } from "../src/envreport";
-import { checkEnvironment, envWarnings } from "../src/envcheck";
+import { formatMissingEnv, missingEnv, type EnvReport } from "../src/envreport";
+import { checkEnvironment } from "../src/envcheck";
 import { decodeConfig } from "../src/config/schema";
 import { generate } from "../src/generate";
 import { resetMemorySecrets } from "@cloudgear/secrets/drivers/memory";
@@ -22,11 +22,11 @@ afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const generated = async (name: string) => {
   const configPath = path.join(dir, `${name}.prototxt`);
-  const { warnings } = await generate({ entry: fixture(name), configPath, buildDir: path.join(dir, `${name}-build`), project: "app" });
-  return { configPath, warnings, report: readEnvReport(envReportPath(configPath))! };
+  const { warnings, env } = await generate({ entry: fixture(name), configPath, buildDir: path.join(dir, `${name}-build`), project: "app" });
+  return { configPath, warnings, report: env };
 };
 
-describe("the environment report", () => {
+describe("the environment scan", () => {
   test("follows a dynamic import with a literal specifier, including what that file imports", async () => {
     const { report } = await generated("lazy");
     const v = Object.values(report.functions)[0]!.variables;
@@ -46,7 +46,7 @@ describe("the environment report", () => {
   test("lists what each function's code reads, with how it is provided", async () => {
     const { report, configPath } = await generated("main");
     expect(configPath.endsWith(".prototxt")).toBe(true);
-    expect(envReportPath(configPath)).toBe(path.join(dir, "main.env.json"));
+    expect(fs.existsSync(path.join(dir, "main.env.json"))).toBe(false);
     expect(report.functions.api!.routes).toEqual(["GET /api"]);
     const v = report.functions.api!.variables;
     expect(v.STRIPE_KEY).toMatchObject({ required: true, provided: "secret" });
@@ -155,15 +155,8 @@ describe("the environment report", () => {
   });
 
   test("the message names each function, variable and file", () => {
-    const report: EnvReport = { version: 1, config: "x", functions: { api: { routes: [], dynamic: [], variables: { A: { required: true, files: ["x.ts"], provided: null } } } } };
+    const report: EnvReport = { functions: { api: { routes: [], dynamic: [], variables: { A: { required: true, files: ["x.ts"], provided: null } } } } };
     expect(formatMissingEnv(missingEnv(report))).toContain("api: A (x.ts)");
-  });
-
-  test("a report of another version is refused", () => {
-    const file = path.join(dir, "old.env.json");
-    fs.writeFileSync(file, JSON.stringify({ version: 2, functions: {} }));
-    expect(() => readEnvReport(file)).toThrow(/re-run `cloudgear generate`/);
-    expect(readEnvReport(path.join(dir, "absent.env.json"))).toBeUndefined();
   });
 });
 
@@ -173,47 +166,62 @@ describe("the CLI", () => {
     return { code: proc.exitCode, out: proc.stdout.toString(), err: proc.stderr.toString() };
   };
 
-  test("apply refuses to deploy while required variables are not provided", async () => {
-    const { configPath } = await generated("main");
-    const res = cli("apply", configPath, "--auto-approve");
+  test("generate fails while required variables are not provided, after writing the config and local.env", () => {
+    const configPath = path.join(dir, "cli-main.prototxt");
+    const localEnv = path.join(dir, "cli-main.env");
+    const res = cli("generate", configPath, fixture("main"), "--project", "app", "--local-env", localEnv);
     expect(res.code).toBe(1);
     expect(res.err).toMatch(/nothing provides/);
     expect(res.err).toMatch(/api: .*DB_URL/);
-    expect(res.err).toMatch(/--skip-env-check/);
+    expect(res.err).toMatch(/--allow-missing-env/);
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(fs.readFileSync(localEnv, "utf8")).toMatch(/^DB_URL=$/m);
+    expect(res.out).toMatch(/created \d+ variable\(s\) in .*cli-main\.env: /);
   });
 
-  test("plan only warns", async () => {
-    const { configPath } = await generated("main");
-    const res = cli("plan", configPath);
+  test("--allow-missing-env generates anyway", () => {
+    const configPath = path.join(dir, "cli-allow.prototxt");
+    const res = cli("generate", configPath, fixture("main"), "--project", "app", "--no-local-env", "--allow-missing-env");
     expect(res.code).toBe(0);
-    expect(res.err).toMatch(/nothing provides/);
+    expect(fs.existsSync(path.join(dir, "local.env"))).toBe(false);
   });
 
-  test("apply without the report asks for generate, and a clean report passes the check", async () => {
-    const { configPath } = await generated("wildcard");
-    process.env.CLOUDGEAR_SECRETS_DRIVER = "memory";
-    try {
-      fs.rmSync(envReportPath(configPath));
-      const missing = cli("apply", configPath, "--auto-approve");
-      expect(missing.err).toMatch(/not found; run `cloudgear generate`/);
-    } finally {
-      delete process.env.CLOUDGEAR_SECRETS_DRIVER;
-    }
+  test("generate removes the old environment report", () => {
+    const configPath = path.join(dir, "cli-old.prototxt");
+    fs.writeFileSync(path.join(dir, "cli-old.env.json"), "{}");
+    expect(cli("generate", configPath, fixture("wildcard"), "--project", "app", "--no-local-env").code).toBe(0);
+    expect(fs.existsSync(path.join(dir, "cli-old.env.json"))).toBe(false);
+  });
+
+  test("--local-env creates a missing directory and a directory at the path is refused", () => {
+    const configPath = path.join(dir, "cli-dirs.prototxt");
+    const nested = path.join(dir, "nodir", "deeper", "x.env");
+    expect(cli("generate", configPath, fixture("main"), "--project", "app", "--allow-missing-env", "--local-env", nested).code).toBe(0);
+    expect(fs.readFileSync(nested, "utf8")).toMatch(/^DB_URL=$/m);
+    const res = cli("generate", configPath, fixture("main"), "--project", "app", "--allow-missing-env", "--local-env", path.join(dir, "nodir"));
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/is not a file/);
+  });
+
+  test("local.env beside the config is the default", () => {
+    const sub = path.join(dir, "default-env");
+    fs.mkdirSync(sub);
+    const res = cli("generate", path.join(sub, "cloudgear.prototxt"), fixture("main"), "--project", "app", "--allow-missing-env");
+    expect(res.code).toBe(0);
+    expect(fs.readFileSync(path.join(sub, "local.env"), "utf8")).toMatch(/^DB_URL=$/m);
   });
 });
 
 describe("checkEnvironment", () => {
   const load = (configPath: string) => decodeConfig(fs.readFileSync(configPath, "utf8"));
   const prior = process.env.CLOUDGEAR_SECRETS_DRIVER;
-  const warnings: string[] = [];
-  const warn = (message: string) => void warnings.push(message);
 
   test("passes when everything is provided and the secrets are stored", async () => {
     const { configPath } = await generated("wildcard");
     process.env.CLOUDGEAR_SECRETS_DRIVER = "memory";
     resetMemorySecrets();
     try {
-      await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).resolves.toBeUndefined();
+      await expect(checkEnvironment(load(configPath), "eu-west-1")).resolves.toBeUndefined();
     } finally {
       if (prior === undefined) delete process.env.CLOUDGEAR_SECRETS_DRIVER;
       else process.env.CLOUDGEAR_SECRETS_DRIVER = prior;
@@ -235,26 +243,13 @@ describe("checkEnvironment", () => {
 
   test("fails when a declared secret is not stored, naming it", async () => {
     await withStore({}, async (configPath) => {
-      await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).rejects.toThrow(/not stored: \/app\/STRIPE_KEY/);
+      await expect(checkEnvironment(load(configPath), "eu-west-1")).rejects.toThrow(/not stored: \/app\/STRIPE_KEY/);
     });
   });
 
   test("passes once the secret is stored", async () => {
     await withStore({ "/app/STRIPE_KEY": "sk" }, async (configPath) => {
-      await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).resolves.toBeUndefined();
+      await expect(checkEnvironment(load(configPath), "eu-west-1")).resolves.toBeUndefined();
     });
-  });
-
-  test("a report made for another config is refused, in apply and as a plan warning", async () => {
-    const { configPath } = await generated("main");
-    fs.appendFileSync(configPath, "\n# edited\n");
-    await expect(checkEnvironment(load(configPath), configPath, "eu-west-1", warn)).rejects.toThrow(/made for another config/);
-    expect(envWarnings(load(configPath), configPath)).toMatch(/made for another config/);
-  });
-
-  test("an unreadable report is a warning in plan, not a crash", async () => {
-    const { configPath } = await generated("main");
-    fs.writeFileSync(envReportPath(configPath), "{ not json");
-    expect(envWarnings(load(configPath), configPath)).toMatch(/not valid JSON/);
   });
 });

@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test, setDefaultTimeout } from "bun:test";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -143,8 +142,6 @@ describe("cloudgear CLI with a CDN", () => {
     fs.writeFileSync(config(), encodeConfig(parsed));
     expect(run("generate", cdnEntry, "--project", "edge").err).toBe("");
     expect(decodeConfig(fs.readFileSync(config(), "utf8")).cdn[0]!.attached).toEqual(attached);
-    const report = JSON.parse(fs.readFileSync(config().replace(/\.prototxt$/, ".env.json"), "utf8"));
-    expect(report.config).toBe(createHash("sha256").update(fs.readFileSync(config(), "utf8")).digest("hex"));
   });
 
   test("invalidate before anything is deployed explains what to do", () => {

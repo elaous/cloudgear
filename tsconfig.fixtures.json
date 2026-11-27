@@ -5,7 +5,8 @@
     "tests/fixtures/router/events/*.ts",
     "tests/fixtures/router/types/*.ts",
     "tests/fixtures/router/policies/*.ts",
-    "tests/fixtures/router/site/*.ts"
+    "tests/fixtures/router/site/*.ts",
+    "tests/fixtures/polymorph/**/*.ts"
   ],
   "exclude": [
     "node_modules",

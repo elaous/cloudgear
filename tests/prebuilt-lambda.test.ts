@@ -84,13 +84,51 @@ describe("planning", () => {
     expect(changes(archiveFn({ architecture: "x86_64" }))).toEqual(["code"]);
   });
 
-  test("only a Lambda can take a finished zip", () => {
-    const gcp = baseConfig({ provider: "gcp", function: [archiveFn({ type: "@gcp.CloudFunction" })], resource: [] });
-    expect(() => plan(gcp, emptyState())).toThrow(/cannot take a finished zip, a handler or an architecture; only @aws.Lambda can/);
+  test("only a Lambda can take a finished zip, a handler or an architecture", () => {
+    const gcp = (f: FunctionSpec) => baseConfig({ provider: "gcp", function: [f], resource: [] });
+    expect(() => plan(gcp(archiveFn({ type: "@gcp.CloudFunction" })), emptyState())).toThrow(/cannot take a finished zip, a handler or an architecture; only @aws.Lambda can/);
+    expect(() => plan(gcp(fn({ type: "@gcp.CloudFunction", architecture: "arm64" })), emptyState())).toThrow(/only @aws.Lambda can/);
+  });
+
+  test("a switch to an archive with the same hash is a code change, and an old state entry plans as no change", async () => {
+    const { real } = drivers();
+    const state = emptyState();
+    await run(config(fn({ bundle: { path: "b/index.mjs", sha256: "same" } })), state, real);
+    const next = archiveFn({ architecture: undefined, handler: "bootstrap", bundle: { path: "b/x.zip", sha256: "same", archive: true } });
+    const change = plan(config(next), state).find((a) => a.kind === "function")!;
+    expect(change.changes).toContain("code");
+    expect(plan(config(fn({ bundle: { path: "b/index.mjs", sha256: "same" } })), state).find((a) => a.kind === "function")!.changes).toEqual([]);
   });
 });
 
 describe("applying to Lambda", () => {
+  test("a function from a zip has no NODE_OPTIONS and a script bundle keeps it", async () => {
+    const { aws, real } = drivers();
+    await run(config(archiveFn()), emptyState(), real);
+    expect(aws.of("CreateFunctionCommand")[0].Environment.Variables.NODE_OPTIONS).toBeUndefined();
+    const script = fakeAws();
+    await run(config(fn()), emptyState(), script.drivers);
+    expect(script.of("CreateFunctionCommand")[0].Environment.Variables.NODE_OPTIONS).toBe("--enable-source-maps");
+  });
+
+  test("a code and a configuration change in one apply go in that order, each waited for", async () => {
+    const { aws, real } = drivers();
+    const state = emptyState();
+    await run(config(archiveFn()), state, real);
+    const before = aws.names().length;
+    await run(config(archiveFn({ handler: "main", architecture: "x86_64" })), state, real);
+    const order = aws.names().slice(before).filter((n) => n.startsWith("UpdateFunction") || n === "GetFunctionConfigurationCommand");
+    expect(order).toEqual(["UpdateFunctionCodeCommand", "GetFunctionConfigurationCommand", "UpdateFunctionConfigurationCommand", "GetFunctionConfigurationCommand"]);
+  });
+
+  test("dropping the architecture puts the function back on x86_64", async () => {
+    const { aws, real } = drivers();
+    const state = emptyState();
+    await run(config(archiveFn()), state, real);
+    await run(config(archiveFn({ architecture: undefined, bundle: { path: "bin/report.zip", sha256: "z2", archive: true } })), state, real);
+    expect(aws.of("UpdateFunctionCodeCommand").at(-1).Architectures).toEqual(["x86_64"]);
+  });
+
   test("the zip goes up unmodified with its handler, runtime and architecture", async () => {
     const { aws, real } = drivers();
     await run(config(archiveFn()), emptyState(), real);

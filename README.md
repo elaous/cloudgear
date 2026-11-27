@@ -1403,7 +1403,8 @@ authenticated: "iam"
 
 A function entry can name a finished zip instead of a script bundle. This is for handlers that are not
 TypeScript (polymorph's `docs/foreign-handlers.md` proposes how a setup declares one); `cloudgear generate` does not
-write these fields yet, but `plan` and `apply` honor them in a config you write:
+write these fields yet, and it rewrites the whole config, so running it drops a function you added by hand (the
+header of a generated config says not to edit it); `plan` and `apply` honor the fields in a config you write:
 
 ```
 function {
@@ -1412,10 +1413,13 @@ function {
   runtime: "provided.al2023"
   handler: "bootstrap"
   architecture: "arm64"
+  source { file: "report" export: "main" }
   bundle { path: "bin/report.zip" sha256: "..." archive: true }
   ...
 }
 ```
+
+`source` is required by the decoder and is only a label for an archive function.
 
 - With `archive: true` the Lambda driver uploads the zip as it is, instead of wrapping a script as `index.mjs`.
   The zip MUST contain whatever the runtime needs (for `provided.al2023` an executable `bootstrap`; cloudgear's zip
@@ -1423,6 +1427,10 @@ function {
   MUST have a `handler`.
 - `sha256` is the SHA-256 of the zip file. It is checked when the function is created or updated, as for a script
   bundle, so a changed file is caught after earlier resources were applied.
+- A zip is uploaded in the request, which Lambda limits to 50 MB; cloudgear has no S3 upload path, so a larger zip
+  fails at AWS, after earlier resources were applied.
+- A function from a finished zip does not get the `NODE_OPTIONS` variable that script bundles get.
+- Removing `architecture` from the config puts the function back on `x86_64`, Lambda's default.
 - A new `handler` is a configuration change; a new `architecture` (`x86_64` or `arm64`) is a code change, because
   Lambda sets the architecture with the code. A script bundle can set `architecture` too and keeps `index.handler`.
 - `cloudgear import` of a function whose handler differs from the config's says so in a note.

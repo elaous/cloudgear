@@ -356,7 +356,8 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
   }
 
   function environment(spec: FunctionComparable, context?: DriverContext) {
-    return { Variables: { NODE_OPTIONS: "--enable-source-maps", ...resolveOutputReferences(spec.env, context), ...environmentOptions(spec.options) } };
+    // A finished zip is not a Node program.
+    return { Variables: { ...(spec.archive ? {} : { NODE_OPTIONS: "--enable-source-maps" }), ...resolveOutputReferences(spec.env, context), ...environmentOptions(spec.options) } };
   }
 
   const networkFor = (spec: FunctionComparable) => resolveNetwork({ ec2, region: options.region, log }, spec.options);
@@ -632,7 +633,9 @@ export function awsDrivers(options: AwsDriverOptions): Drivers {
         if (changes.includes("permissions") || tracingChanged) await putPermissions(roleName, spec, current.outputs.role_arn, ((current.spec.policies as { name: string }[] | undefined) ?? []).map((p) => p.name), context);
         if (changes.includes("code")) {
           const code = codeFor(entry.source as FunctionSpec);
-          await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code, ...(spec.architecture ? { Architectures: [spec.architecture as any] } : {}) }));
+          // Dropping the architecture from the config puts the function back on Lambda's default.
+          const architecture = spec.architecture ?? (current.spec.architecture ? "x86_64" : undefined);
+          await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: entry.physical_name, ZipFile: code, ...(architecture ? { Architectures: [architecture as any] } : {}) }));
           await waitForFunction(entry.physical_name);
         }
         // A resource this function reads an output from was replaced; its new value has to be put in the environment.

@@ -16,6 +16,7 @@ import { neonApiKey, neonDrivers } from "./deploy/neon";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
 import { withSiteChanges } from "./deploy/site-plan";
+import { formatPermissions } from "./permissions";
 import { stateKey, type State } from "./deploy/state";
 import { ask, assertNoUnpushedLocalState, assertNoUnsavedState, createStateStore, holdLock, preserveOnFailure, stateLocation, type LockHandle, type StateStore } from "./deploy/state-store";
 import { stateCommand } from "./statecmd";
@@ -80,6 +81,7 @@ Options:
   --skip-dns-check   Deploy even if the DNS check finds a conflict or an undelegated zone (apply only)
   --dns-server <ip>  Resolver for the DNS check (default: the system's)
   --skip-env-check   Deploy even if secrets are not stored (apply only)
+  --permissions      Also list the access each function gets, as a change from the state (plan, apply, destroy)
   --local-env <file>  Dotenv file generate adds the variables the functions read to (default: local.env beside the config; a relative path starts at the current directory)
   --no-local-env     Leave the local dotenv file alone (generate only)
   --allow-missing-env  Generate even if the code reads variables nothing provides (generate only)
@@ -89,6 +91,11 @@ Options:
   --path <path>      Restrict secrets set to one declared path
   --all              Also store undeclared names from the env file under the path (secrets set)
 `;
+
+function printPermissions(actions: PlannedAction[]): void {
+  const text = formatPermissions(actions);
+  if (text) console.log(`\n${text}`);
+}
 
 function reportAttached(sync: ReturnType<typeof syncAttached>): void {
   for (const message of sync.written) console.log(`cloudgear: ${message}`);
@@ -112,6 +119,7 @@ const CLI_OPTIONS = {
   "allow-unignored": { type: "boolean", default: false },
   "env-file": { type: "string" },
   "skip-env-check": { type: "boolean", default: false },
+  permissions: { type: "boolean", default: false },
   "local-env": { type: "string" },
   "no-local-env": { type: "boolean", default: false },
   "allow-missing-env": { type: "boolean", default: false },
@@ -214,7 +222,9 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const store = await getStore();
       const { state } = await store.load(config.project, config.provider);
       debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
-      console.log(formatPlan(withSiteChanges(plan(config, state), path.dirname(configPath))));
+      const planned = withSiteChanges(plan(config, state), path.dirname(configPath));
+      console.log(formatPlan(planned));
+      if (values.permissions) printPermissions(planned);
       return;
     }
     case "check-dns": {
@@ -249,6 +259,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         return counts;
       });
       console.log(formatPlan(actions));
+      if (values.permissions) printPermissions(actions);
       if (command === "apply" && config.function.length && !values["skip-env-check"]) {
         await checkEnvironment(config, values.region);
       }

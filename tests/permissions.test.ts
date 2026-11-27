@@ -96,6 +96,17 @@ describe("formatPermissions", () => {
     expect(text).toContain("      no permissions");
   });
 
+  test("a GCS function lists the roles it is granted on the bucket", () => {
+    const config = baseConfig({
+      provider: "gcp",
+      resource: [{ name: "data", type: "@gcp.GCS", physical_name: "data", dry: false, source: "a.ts:1" }],
+      function: [fn({ type: "@gcp.CloudFunction", permission: [{ resource: "data", path: "img/", action: ["storage.objects.get", "storage.objects.list", "storage.objects.delete"] }] })],
+    });
+    const text = formatPermissions(plan(config, emptyState()));
+    expect(text).toContain('+ @gcp.GCS data under "img/": storage.objects.delete, storage.objects.get, storage.objects.list  [read, delete, list]');
+    expect(text).toContain('+ roles/storage.objectUser on bucket data under "img/"');
+  });
+
   test("secrets and declared policies are listed too", () => {
     const secret = { provider: "aws", service: "ssm", path: "/app", name: "STRIPE_KEY", env: "STRIPE_KEY" };
     const all = { provider: "aws", service: "ssm", path: "/shared", name: "", env: "", all: true };

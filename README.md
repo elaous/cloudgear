@@ -1363,7 +1363,8 @@ environment (`process.env.X`, `process.env["X"]`, `Bun.env.X`, `import.meta.env.
 and destructuring), and does two things with it:
 
 - It adds each variable to `local.env` beside the config (`--local-env <file>` picks
-  another file, `--no-local-env` skips it). A required variable gets a line `NAME=`;
+  another file, relative to the current directory, and the directory is created if missing;
+  `--no-local-env` skips it and wins over `--local-env`). A required variable gets a line `NAME=`;
   an optional one a commented line `# NAME=`. Variables the platform sets (`AWS_*`,
   `TZ`, `NODE_ENV` and the like) and ones cloudgear sets for the function are left out.
   The file is created if it does not exist. Existing lines are never changed or removed,

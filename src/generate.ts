@@ -366,6 +366,7 @@ export async function generate(options: GenerateOptions): Promise<{ config: Clou
   fs.writeFileSync(options.configPath, configText);
   fs.rmSync(`${options.configPath.replace(/\.prototxt$/, "")}.env.json`, { force: true });
   const localEnv = options.localEnvPath ? updateLocalEnv(options.localEnvPath, report) : undefined;
+  if (localEnv?.skipped.length) warnings.push(`not added to ${path.basename(localEnv.file)}: ${localEnv.skipped.map((name) => JSON.stringify(name)).join(", ")} (not valid variable names for a dotenv file)`);
   debug("generate", "config written", { path: options.configPath, functions: config.function.length, resources: config.resource.length });
   if (functions.some((f) => f.secret?.length) || config.certificate.some((c) => c.dns.token)) {
     for (const file of trackedEnvFiles(path.dirname(path.resolve(options.entry)))) {

@@ -26,7 +26,7 @@ const generated = async (name: string) => {
   return { configPath, warnings, report: env };
 };
 
-describe("the environment report", () => {
+describe("the environment scan", () => {
   test("follows a dynamic import with a literal specifier, including what that file imports", async () => {
     const { report } = await generated("lazy");
     const v = Object.values(report.functions)[0]!.variables;
@@ -191,6 +191,16 @@ describe("the CLI", () => {
     fs.writeFileSync(path.join(dir, "cli-old.env.json"), "{}");
     expect(cli("generate", configPath, fixture("wildcard"), "--project", "app", "--no-local-env").code).toBe(0);
     expect(fs.existsSync(path.join(dir, "cli-old.env.json"))).toBe(false);
+  });
+
+  test("--local-env creates a missing directory and a directory at the path is refused", () => {
+    const configPath = path.join(dir, "cli-dirs.prototxt");
+    const nested = path.join(dir, "nodir", "deeper", "x.env");
+    expect(cli("generate", configPath, fixture("main"), "--project", "app", "--allow-missing-env", "--local-env", nested).code).toBe(0);
+    expect(fs.readFileSync(nested, "utf8")).toMatch(/^DB_URL=$/m);
+    const res = cli("generate", configPath, fixture("main"), "--project", "app", "--allow-missing-env", "--local-env", path.join(dir, "nodir"));
+    expect(res.code).toBe(1);
+    expect(res.err).toMatch(/is not a file/);
   });
 
   test("local.env beside the config is the default", () => {

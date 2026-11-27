@@ -43,7 +43,7 @@ describe("updateLocalEnv", () => {
   test("creates the file with required names set empty and optional ones commented", () => {
     const file = fileIn();
     const update = updateLocalEnv(file, REPORT);
-    expect(update).toEqual({ file, created: true, added: ["DB_URL", "STRIPE_KEY", "SENTRY_DSN"] });
+    expect(update).toEqual({ file, created: true, added: ["DB_URL", "STRIPE_KEY", "SENTRY_DSN"], skipped: [] });
     expect(fs.readFileSync(file, "utf8")).toBe("# Added by `cloudgear generate`: variables the functions read. Values stay yours.\nDB_URL=\nSTRIPE_KEY=\n# SENTRY_DSN=\n");
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
   });
@@ -88,5 +88,45 @@ describe("updateLocalEnv", () => {
     fs.chmodSync(file, 0o644);
     updateLocalEnv(file, REPORT);
     expect(fs.statSync(file).mode & 0o777).toBe(0o644);
+  });
+
+  test("a byte order mark does not hide the first declaration, and it is kept", () => {
+    const file = fileIn("\uFEFFDB_URL=1\nSTRIPE_KEY=2\n");
+    expect(updateLocalEnv(file, REPORT).added).toEqual(["SENTRY_DSN"]);
+    expect(fs.readFileSync(file, "utf8").startsWith("\uFEFFDB_URL=1")).toBe(true);
+  });
+
+  test("a file with Windows line endings gets Windows line endings", () => {
+    const file = fileIn("DB_URL=1\r\n");
+    updateLocalEnv(file, REPORT);
+    const text = fs.readFileSync(file, "utf8");
+    expect(text).toBe("DB_URL=1\r\n\r\n# Added by `cloudgear generate`: variables the functions read. Values stay yours.\r\nSTRIPE_KEY=\r\n# SENTRY_DSN=\r\n");
+    expect(text.replace(/\r\n/g, "")).not.toContain("\n");
+  });
+
+  test("a file without a final newline gets a blank line, not a joined line", () => {
+    const file = fileIn("DB_URL=1");
+    updateLocalEnv(file, REPORT);
+    expect(fs.readFileSync(file, "utf8").startsWith("DB_URL=1\n\n# Added by")).toBe(true);
+  });
+
+  test("names that are not valid dotenv keys are skipped and reported", () => {
+    const file = fileIn();
+    const update = updateLocalEnv(file, report({ GOOD: use(true, null), "A\nB=secret": use(true, null), "1BAD": use(true, null) }));
+    expect(update.added).toEqual(["GOOD"]);
+    expect(update.skipped.sort()).toEqual(["1BAD", "A\nB=secret"].sort());
+    expect(fs.readFileSync(file, "utf8")).not.toContain("secret");
+  });
+
+  test("a missing parent directory is created and a directory at the path is an error", () => {
+    const file = path.join(path.dirname(fileIn()), "a", "b", "local.env");
+    expect(updateLocalEnv(file, REPORT).created).toBe(true);
+    expect(() => updateLocalEnv(path.dirname(file), REPORT)).toThrow("is not a file");
+  });
+
+  test("nothing needed means no file is created", () => {
+    const file = fileIn();
+    expect(updateLocalEnv(file, report({ AWS_REGION: use(true, "platform") }))).toEqual({ file, created: false, added: [], skipped: [] });
+    expect(fs.existsSync(file)).toBe(false);
   });
 });

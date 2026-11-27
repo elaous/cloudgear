@@ -80,7 +80,7 @@ Options:
   --skip-dns-check   Deploy even if the DNS check finds a conflict or an undelegated zone (apply only)
   --dns-server <ip>  Resolver for the DNS check (default: the system's)
   --skip-env-check   Deploy even if secrets are not stored (apply only)
-  --local-env <file> Dotenv file generate adds the variables the functions read to (default: local.env beside the config)
+  --local-env <file>  Dotenv file generate adds the variables the functions read to (default: local.env beside the config; a relative path starts at the current directory)
   --no-local-env     Leave the local dotenv file alone (generate only)
   --allow-missing-env  Generate even if the code reads variables nothing provides (generate only)
   --from-envfile <file>  Dotenv file to load secrets from (secrets set); it MUST be git-ignored

@@ -13,7 +13,8 @@ document's choice among A, B and C.
   project the Python one, and the generated setup MUST import that language's **client library** (the blob
   and secrets clients and the like that handler code calls). It does not import deploy drivers: those exist
   only in the CLI.
-- The CLI is a Go program that uses polymorph and applies changes as the TypeScript CLI does today. The
+- The CLI is a Go program named `cloudgear` that uses polymorph and applies changes as the TypeScript CLI does
+  today. The
   reason is distribution: a Go binary is better than a tree of `node_modules`.
 - The CLI lives in the cloudgear repository as a new Go module, if open question 1 allows it. The TypeScript
   CLI MUST stay until the Go CLI reaches parity and MUST NOT be removed before.
@@ -217,7 +218,9 @@ The owner MUST decide 1, 2 and 3 before step 1 and the others before the step th
    then needs the runtime module resolved), `Location()` and `blob.Open` (redundant or changed), and pulls the
    cloud SDKs into every consumer unless drivers stay in subpackages. `docs/go-runtime.md` and
    `docs/foreign-handlers.md` MUST be updated in the same change.
-4. **Names and versions.** The module path, the package names and the Go version (the polymorph module is on
-   `go 1.24`), settled before step 1 because they decide question 1.
+4. **Names and versions.** The CLI is `cloudgear`: the binary keeps the name of the TypeScript CLI it replaces,
+   and `polymorph` stays the name of the language and its tools. The module path, the package names and the Go
+   version (the polymorph module is on `go 1.24`) are still open, and MUST be settled before step 1 because they
+   decide question 1.
 5. **A TypeScript project's build step.** The settings mechanism above decides whether a plain `bun build`
    recipe is enough or cloudgear ships a bundling helper.

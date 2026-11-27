@@ -31,6 +31,13 @@ describe("BlobStoreWebSite in setup.ts", () => {
     expect(options.site_include).toBeUndefined();
   });
 
+  test("a gcp site becomes a @gcp.GCS bucket with the same options", () => {
+    const [resource] = analyzeApp(site("gcp.ts")).resources;
+    expect(resource).toMatchObject({ name: "gcs-site", provider: "gcp", siteDir: dist });
+    expect(resource!.options).toMatchObject({ location: "us-central1", index_document: "index.html", error_document: "404.html", site_exclude: '["**/*.map"]', site_files_count: "3" });
+    expect(JSON.parse(resource!.options!.cors!)).toEqual([{ origins: ["https://gcs.example.com"], methods: ["GET"], headers: ["content-type"], expose_headers: ["etag"] }]);
+  });
+
   test("a site with no settings still gets the default index document", () => {
     const [resource] = analyzeApp(site("minimal.ts")).resources;
     expect(resource!.options).toEqual({ index_document: "index.html" });
@@ -49,7 +56,7 @@ describe("BlobStoreWebSite in setup.ts", () => {
 
   test("mistakes are reported where they are", () => {
     const cases: Record<string, RegExp> = {
-      "bad-provider.ts": /BlobStoreWebSite supports provider "aws" for now/,
+      "bad-provider.ts": /BlobStoreWebSite supports providers "aws" and "gcp" for now/,
       "bad-missing-dir.ts": /site directory .*missing does not exist; build the site first/,
       "bad-empty.ts": /files: \.\/dist holds no files after include and exclude/,
       "bad-key.ts": /unknown BlobStoreWebSite option "corss"/,

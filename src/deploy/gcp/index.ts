@@ -11,6 +11,8 @@ export interface GcpDeps {
   labels?: Record<string, string>;
   log: (message: string) => void;
   env?: Record<string, string | undefined>;
+  // Directory the config's relative site paths start from.
+  siteRoot?: string;
   // Present when the functions can deploy.
   functions?: FunctionDeps;
 }

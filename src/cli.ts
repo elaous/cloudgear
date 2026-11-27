@@ -539,16 +539,17 @@ async function drivers(actions: PlannedAction[], config: CloudgearConfig, config
 const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, region: string | undefined, tags: Tags) => Promise<Drivers>> = {
   aws: awsDeployers,
   gcp: async (config, configPath, region, tags) => {
-    const { Storage } = await import("@google-cloud/storage");
+    const { Storage, IdempotencyStrategy } = await import("@google-cloud/storage");
     const { GoogleAuth } = await import("google-auth-library");
     const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
     const clients = new Map<string, StorageLike>();
     return gcpDrivers({
       storage: (project) => {
-        if (!clients.has(project)) clients.set(project, new Storage({ projectId: project, authClient: auth }) as unknown as StorageLike);
+        if (!clients.has(project)) clients.set(project, new Storage({ projectId: project, authClient: auth, retryOptions: { idempotencyStrategy: IdempotencyStrategy.RetryAlways } }) as unknown as StorageLike);
         return clients.get(project)!;
       },
       defaultProject: () => auth.getProjectId(),
+      siteRoot: path.dirname(configPath),
       labels: tags,
       log: (message) => console.log(`cloudgear: ${message}`),
       functions: {

@@ -1,10 +1,12 @@
-import { describeSiteDiff, diffSite, readManifest, readSiteFiles, SITE_MANIFEST } from "./aws/s3site";
+import { describeSiteDiff, diffSite, readManifest, readSiteFiles, SITE_MANIFEST } from "./site-sync";
 import type { PlannedAction } from "./plan";
+
+const SITE_TYPES = new Set(["@aws.S3", "@gcp.GCS"]);
 
 // Adds each site bucket's file changes to the plan, turning an unchanged bucket into an update when its files differ.
 export function withSiteChanges(actions: PlannedAction[], siteRoot: string): PlannedAction[] {
   return actions.map((action) => {
-    if (action.type !== "@aws.S3" || !action.desired || action.current?.imported) return action;
+    if (!SITE_TYPES.has(action.type) || !action.desired || action.current?.imported) return action;
     if (action.op !== "create" && action.op !== "update" && action.op !== "noop") return action;
     const options = action.desired.spec.options as Record<string, string> | undefined;
     const manifest = readManifest(action.current?.outputs[SITE_MANIFEST]);

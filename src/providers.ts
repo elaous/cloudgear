@@ -85,6 +85,14 @@ const corsRules: OptionRule = (value) => {
   return undefined;
 };
 
+// GCS allows a literal origin or "*" alone.
+const gcsCorsRules: OptionRule = (value) => {
+  const problem = corsRules(value);
+  if (problem) return problem;
+  const wildcard = (parsedJson(value) as { value: { origins: string[] }[] }).value.flatMap((r) => r.origins).find((o) => o.includes("*") && o !== "*");
+  return wildcard ? `has the origin "${wildcard}"; GCS accepts a full origin or "*" alone` : undefined;
+};
+
 const cacheControlRules: OptionRule = (value) => {
   const parsed = parsedJson(value);
   if (!parsed.ok) return parsed.reason;
@@ -111,22 +119,27 @@ export const ENV_OPTION_PREFIX = "env.";
 // A WAFv2 web ACL for CloudFront lives in us-east-1 under the global scope.
 export const WEB_ACL_ARN = /^arn:aws:wafv2:us-east-1:\d{12}:global\/webacl\/[\w-]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+// Site options per provider; only the CORS rule differs.
+const siteRules = (cors: OptionRule): Record<string, OptionRule> => ({
+  index_document: (v) => (/^[^/]{1,255}$/.test(v) ? undefined : 'must be a file name without "/"'),
+  error_document: (v) => (/^[^/][^\r\n]{0,1023}$/.test(v) ? undefined : 'must be a key that does not start with "/"'),
+  cors,
+  site_dir: (v) => (v.length > 0 && v.length <= 4096 ? undefined : "must be a directory path"),
+  site_include: jsonStrings("globs"),
+  site_exclude: jsonStrings("globs"),
+  site_cache_control: cacheControlRules,
+  site_prune: oneOf("true"),
+  site_files_hash: (v) => (/^[0-9a-f]{64}$/.test(v) ? undefined : "must be a SHA-256 in hex"),
+  site_files_count: integerBetween(0, 10000),
+});
+
 export const PROVIDERS: Record<string, ProviderProfile> = {
   aws: {
     options: {
       "@aws.S3": {
         keys: {
           versioning: oneOf("true", "false"),
-          index_document: (v) => (/^[^/]{1,255}$/.test(v) ? undefined : 'must be a file name without "/"'),
-          error_document: (v) => (/^[^/][^\r\n]{0,1023}$/.test(v) ? undefined : 'must be a key that does not start with "/"'),
-          cors: corsRules,
-          site_dir: (v) => (v.length > 0 && v.length <= 4096 ? undefined : "must be a directory path"),
-          site_include: jsonStrings("globs"),
-          site_exclude: jsonStrings("globs"),
-          site_cache_control: cacheControlRules,
-          site_prune: oneOf("true"),
-          site_files_hash: (v) => (/^[0-9a-f]{64}$/.test(v) ? undefined : "must be a SHA-256 in hex"),
-          site_files_count: integerBetween(0, 10000),
+          ...siteRules(corsRules),
         },
       },
       "@aws.Lambda": {
@@ -207,6 +220,7 @@ export const PROVIDERS: Record<string, ProviderProfile> = {
           project: (v) => (/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(v) ? undefined : 'must be a GCP project id such as "my-project-123"'),
           location: (v) => (/^[A-Za-z][A-Za-z0-9-]{1,30}$/.test(v) ? undefined : 'must be a bucket location such as "US" or "us-central1"'),
           storage_class: oneOf("STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"),
+          ...siteRules(gcsCorsRules),
         },
       },
       "@gcp.CloudFunction": {

@@ -1802,7 +1802,7 @@ function objectElements(node: Node, what: string, at: string): Node[] {
 
 // Site settings as string options, plus the upload directory.
 function readWebSiteOptions(options: Node | undefined, provider: string, at: string, callerFile: string): { options: Record<string, string>; dir?: string } {
-  if (provider !== "aws") throw new Error(`${at}: BlobStoreWebSite supports provider "aws" for now`);
+  if (provider !== "aws" && provider !== "gcp") throw new Error(`${at}: BlobStoreWebSite supports providers "aws" and "gcp" for now`);
   if (options) assertKnownKeys(options, SITE_OPTION_KEYS, "BlobStoreWebSite", at);
   const out: Record<string, string> = {};
   const indexDocument = readStringOption(options, "indexDocument", at) ?? BLOB_STORE_WEB_SITE_DEFAULTS.indexDocument;

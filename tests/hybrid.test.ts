@@ -36,7 +36,7 @@ describe("provider of a resource type", () => {
 
   test("options and reserved environment names follow the resource's provider", () => {
     expect(() => validateOptions("gcp", "@gcp.GCS", { versioning: "true" }, "x")).not.toThrow();
-    expect(() => validateOptions("gcp", "@gcp.GCS", { tracing: "Active" }, "x")).toThrow(/unknown option "tracing" for @gcp.GCS \(supported: versioning, project, location, storage_class\)/);
+    expect(() => validateOptions("gcp", "@gcp.GCS", { tracing: "Active" }, "x")).toThrow(/unknown option "tracing" for @gcp.GCS \(supported: versioning, project, location, storage_class, index_document, error_document, cors, site_dir, site_include, site_exclude, site_cache_control, site_prune, site_files_hash, site_files_count\)/);
     expect(() => validateOptions("gcp", "@gcp.CloudFunction", { "env.K_SERVICE": "x" }, "x")).toThrow(/not a usable environment variable name/);
     expect(() => validateOptions("gcp", "@gcp.CloudFunction", { "env.AWS_REGION": "x" }, "x")).not.toThrow();
     expect(() => validateOptions("aws", "@aws.Lambda", { "env.AWS_REGION": "x" }, "x")).toThrow(/not a usable environment variable name/);
@@ -94,7 +94,7 @@ describe("a GCP function with an AWS bucket and a GCS bucket", () => {
   test("options are validated against each resource's own provider", async () => {
     const { config } = await generated(fixture("gcp-function-aws-store.ts"));
     expect(config.resource.map((r) => r.options)).toEqual([{ versioning: "true" }, { versioning: "true" }]);
-    await expect(generated(fixture("gcs-bad-option.ts"))).rejects.toThrow(/unknown option "tracing" for @gcp\.GCS \(supported: versioning, project, location, storage_class\)/);
+    await expect(generated(fixture("gcs-bad-option.ts"))).rejects.toThrow(/unknown option "tracing" for @gcp\.GCS \(supported: versioning, project, location, storage_class, index_document, error_document, cors, site_dir, site_include, site_exclude, site_cache_control, site_prune, site_files_hash, site_files_count\)/);
   });
 
   test("a CDN on AWS may serve a site while the functions are on GCP", async () => {

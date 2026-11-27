@@ -142,9 +142,13 @@ describe("a second generated setup.ts: caches, networks, tokens and secret bindi
   test("the event bus, its triggers and the declared policy reach the functions", async () => {
     const { config } = await analyzePlatform();
     expect(config.resource.find((r) => r.name === "bus.orders")).toMatchObject({ type: "@aws.EventBus", physical_name: "platform-orders" });
-    const document = JSON.stringify({ Statement: [{ Action: ["logs:GetLogEvents", "logs:FilterLogEvents"], Effect: "Allow", Resource: "*" }], Version: "2012-10-17" });
-    for (const fn of config.function) expect(fn.policy).toEqual([{ name: "read_logs", document }]);
+    const document = (action: string, resource: string) => JSON.stringify({ Statement: [{ Action: [...action.split(",")], Effect: "Allow", Resource: resource }], Version: "2012-10-17" });
+    const readLogs = { name: "read_logs", document: document("logs:GetLogEvents,logs:FilterLogEvents", "*") };
+    const audit = { name: "audit_orders", document: document("logs:PutLogEvents", "arn:aws:logs:eu-west-1:123456789012:log-group:/orders:*") };
     const orders = config.function.find((f) => f.route.some((r) => r.path === "/orders"))!;
+    // The router's policy reaches every function; the route's own only the function of that route.
+    for (const fn of config.function.filter((f) => f !== orders)) expect(fn.policy).toEqual([readLogs]);
+    expect(orders.policy).toEqual([readLogs, audit]);
     expect(orders.event).toEqual([
       { bus: "bus.orders", type: "order.created" },
       { bus: "bus.orders", type: "order.paid", source: "shop" },
@@ -159,7 +163,6 @@ describe("a second generated setup.ts: caches, networks, tokens and secret bindi
     expect(provided("-tick")).toEqual({ STAGE: "option" });
     expect(provided("-orders")).toEqual({ API_KEY: "secret-wildcard" });
   });
-
 
   test("the function options and the router network reach every function", async () => {
     const { config } = await analyzePlatform();

@@ -983,6 +983,7 @@ planned, one resource at a time.
 | `location` | `US` | A multi-region such as `US` or `EU`, or a region such as `us-central1`; cannot change later |
 | `storage_class` | `STANDARD` | `STANDARD`, `NEARLINE`, `COLDLINE` or `ARCHIVE` |
 | `versioning` | `false` | Keep old object versions |
+| `public_read` | off | `"true"` lets everyone read every object; required by a `CDN` (see Serving a GCS bucket through Cloud CDN) |
 
   A new bucket is private: uniform bucket-level access is on and public access is
   prevented. cloudgear labels it with its tags, converted to GCP's label rules
@@ -991,6 +992,35 @@ planned, one resource at a time.
   global, so creating one that exists fails and points at `cloudgear import`.
   Changing `versioning` or `storage_class` updates the bucket; changing
   `location` or `project` is an error.
+- **Serving a GCS bucket through Cloud CDN.** `new CDN("gcp", cert, { bucket })` with a `Cert("gcp", dns)`
+  serves a bucket from Cloud CDN behind a global external HTTP(S) load balancer. The bucket MUST say
+  `options: { public_read: "true" }`: the CDN reads it as an anonymous viewer, so `apply` sets
+  `publicAccessPrevention` to `inherited` and grants `roles/storage.legacyObjectReader` to `allUsers`,
+  which makes every object in the bucket public, and the role also lets anyone list the bucket through
+  the Storage API and read objects directly, around the CDN. `plan` shows the option
+  as a bucket change. An organization policy (`constraints/storage.publicAccessPrevention` or
+  domain-restricted sharing) can forbid this; `apply` names both when GCS refuses. A bucket that stays
+  private needs a different design (see `docs/gcp-cdn.md`).
+  `apply` creates a Certificate Manager certificate validated through a `_acme-challenge` `CNAME`
+  written with the `DNS` driver (wildcards work), then a global address, a backend bucket with Cloud
+  CDN enabled, a certificate map, a URL map, an HTTPS proxy and forwarding rule on port 443, an
+  HTTP to HTTPS redirect on port 80, and an `A` record to the address. A record that already exists
+  on the name stops `apply`. `destroy` removes what `apply` created, the `A` record only if it still
+  points at the address, and the public binding only if `apply` added it. `invalidate` clears the
+  cache through the URL map; `status`, `url()` and `check-dns` work for it.
+  The CDN serves the bucket root only (no `path`), has no router origin, attached origins,
+  `priceClass`, `webAcl` or `methodRouting`, and `DNS` can be `gandi` or `aws` (no Cloud DNS driver).
+  The identity needs, in the bucket's project, `compute.addresses.*`, `compute.backendBuckets.*`,
+  `compute.urlMaps.*`, `compute.targetHttpsProxies.*`, `compute.targetHttpProxies.*`,
+  `compute.globalForwardingRules.*`, `compute.globalOperations.get`, `certificatemanager.*` and
+  `storage.buckets.getIamPolicy` and `setIamPolicy` (for example `roles/compute.loadBalancerAdmin`,
+  `roles/certificatemanager.editor` and `roles/storage.admin`). It costs a forwarding rule per port
+  plus a reserved address, Cloud CDN cache fill and egress, and a per-request fee; check current pricing.
+  `status` looks in `GOOGLE_CLOUD_PROJECT` or the credentials' project, not the bucket's `project` option.
+  Two gcp CDNs cannot serve one bucket, and CDNs that share a wildcard certificate need buckets in one project.
+  A failed certificate is deleted and the next `apply` requests a new one.
+  The Compute and Certificate Manager calls are tested against fakes only; the first run against a
+  real project is not yet documented.
 - **Import and delete.** As with S3, `cloudgear import` only records a bucket;
   `apply` and `destroy` never change or delete an imported one. A bucket cloudgear
   created is deleted only if it is empty, and never has its objects removed.
@@ -2280,6 +2310,10 @@ Where each moving part lives, since several are called across packages:
 | Bucket access for a function (`desiredGrants`, `changeGrant`) | `src/deploy/gcp/grants.ts` | the Cloud Functions driver |
 | GCS blob driver (runtime) | `packages/blob/drivers/gcs.ts` | `createBlobDriver("gcp", ...)` |
 | Cloud Functions driver | `src/deploy/gcp/functions.ts` | `gcpDrivers` |
+| Certificate Manager certificate driver | `src/deploy/gcp/certificate.ts` | `gcpDrivers` |
+| Cloud CDN driver, `invalidateGcpCdn` | `src/deploy/gcp/cdn.ts` | `gcpDrivers`; `cloudgear invalidate` |
+| Compute and Certificate Manager helpers | `src/deploy/gcp/edge.ts` | the two drivers above |
+| `GcpCdnDriver`, `GcpCertDriver` (status) | `packages/cdn/drivers/gcp-cdn.ts` | `CDN.status()`, `Cert.status()` |
 | `httpFor`, `GcpApiError` (authenticated Google API calls) | `src/deploy/gcp/http.ts` | the GCP deployers |
 | `resolveOutputReferences` | `src/deploy/environment.ts` | the Lambda and Cloud Functions drivers |
 | `Registry` | `packages/registry/index.ts` | apps; `src/analyze/app.ts` |
@@ -2310,7 +2344,7 @@ Early draft. `aws` has the deploy drivers; `gcp` deploys buckets and functions s
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has any number of
 CDNs for static sites but at most one that serves the router. Static sites upload to
-AWS and GCS buckets; a `CDN` can only serve an AWS bucket.
+AWS and GCS buckets; a `CDN` serves an AWS bucket through CloudFront or a public GCS bucket through Cloud CDN.
 
 ## Testing
 

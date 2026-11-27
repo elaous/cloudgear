@@ -22,12 +22,24 @@ export interface DesiredEntry {
 }
 
 export const CLOUDFRONT_REGION = "us-east-1";
+export const GLOBAL_REGION = "global";
+
+// The project the CDN of a certificate lives in: that of its bucket.
+function gcpCertificateProject(config: CloudgearConfig, domain: string): string {
+  const projects = new Set(
+    config.cdn.filter((c) => (c.certificate ?? c.domain) === domain).map((c) => config.resource.find((r) => r.name === c.bucket)?.options?.project ?? ""),
+  );
+  if (projects.size > 1) throw new Error(`cloudgear config: the CDNs that share the certificate for ${domain} have buckets in different projects`);
+  return [...projects][0] ?? "";
+}
 
 export interface CertificateComparable {
   domain: string;
   // Endpoint needs the domain free: it owns the record.
   for_endpoint: boolean;
   region: string;
+  // gcp only: the project of the CDN it serves.
+  project?: string;
   dns_provider: string;
   dns_zone: string;
   dns_token?: SecretRefSpec;
@@ -81,6 +93,8 @@ export interface CdnComparable {
   bucket: string;
   bucket_region: string;
   path: string;
+  // gcp only: the project of the bucket and of everything the CDN creates.
+  project?: string;
   options?: Record<string, string>;
   // Router CDNs have no bucket; one behavior per path.
   behaviors?: { pattern: string; methods: string[]; function: string }[];
@@ -260,7 +274,10 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
 
   for (const certificate of config.certificate) {
     const profile = capability(certificate.provider, "cdn");
-    if (certificate.usage === "cdn" && certificate.region && certificate.region !== CLOUDFRONT_REGION) {
+    if (certificate.provider === "gcp" && (certificate.usage === "api" || certificate.region)) {
+      throw new Error(`cloudgear config: the gcp certificate for ${certificate.domain} is global and only serves a CDN`);
+    }
+    if (certificate.provider === "aws" && certificate.usage === "cdn" && certificate.region && certificate.region !== CLOUDFRONT_REGION) {
       throw new Error(`cloudgear config: the certificate for ${certificate.domain} serves a CDN, so it must be in ${CLOUDFRONT_REGION}`);
     }
     if (certificate.usage === "api" && certificate.region && certificate.region !== (config.region ?? "")) {
@@ -275,7 +292,8 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       spec: {
         domain: certificate.domain,
         for_endpoint: !!certificate.usage,
-        region: certificate.region ?? (certificate.usage === "api" ? (config.region ?? "") : CLOUDFRONT_REGION),
+        ...(certificate.provider === "gcp" ? { project: gcpCertificateProject(config, certificate.domain) } : {}),
+        region: certificate.provider === "gcp" ? GLOBAL_REGION : (certificate.region ?? (certificate.usage === "api" ? (config.region ?? "") : CLOUDFRONT_REGION)),
         ...optionsSpec(certificate.options),
         dns_provider: certificate.dns.provider,
         dns_zone: certificate.dns.zone,
@@ -294,6 +312,15 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const profile = capability(cdn.provider, "cdn");
     const bucket = resources.get(cdn.bucket);
     if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
+    const sharing = config.cdn.find((other) => other !== cdn && other.provider === "gcp" && other.bucket === cdn.bucket);
+    if (cdn.provider === "gcp" && sharing) throw new Error(`cloudgear config: the gcp CDNs "${cdn.domain}" and "${sharing.domain}" serve the same bucket "${cdn.bucket}"; give each its own`);
+    if (cdn.provider === "gcp" && cdn.path) throw new Error(`cloudgear config: the gcp CDN "${cdn.domain}" serves the root of its bucket; remove the path "${cdn.path}"`);
+    if (providerOfType(bucket.type) !== cdn.provider) throw new Error(`cloudgear config: the ${cdn.provider} CDN "${cdn.domain}" serves bucket "${cdn.bucket}", which is a ${bucket.type}`);
+    if (certificate!.provider !== cdn.provider) throw new Error(`cloudgear config: the ${cdn.provider} CDN "${cdn.domain}" uses a ${certificate!.provider} certificate`);
+    const publicRead = cdn.provider === "gcp" ? (bucket as ResourceSpec).options?.public_read : undefined;
+    if (cdn.provider === "gcp" && publicRead !== "true") {
+      throw new Error(`cloudgear config: the gcp CDN "${cdn.domain}" makes bucket "${cdn.bucket}" public; set options public_read "true" on the bucket`);
+    }
     entries.push({
       kind: "resource",
       type: profile.type,
@@ -309,11 +336,13 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
         bucket: physicalOf(cdn.bucket),
         bucket_region: (bucket as ResourceSpec).region ?? "",
         path: cdn.path,
+        ...(cdn.provider === "gcp" ? { project: (bucket as ResourceSpec).options?.project ?? "" } : {}),
         ...optionsSpec(cdn.options),
-        ...attachedSpec(cdn.attached, cdn.domain, []),
+        ...(cdn.provider === "gcp" ? {} : attachedSpec(cdn.attached, cdn.domain, [])),
       } satisfies CdnComparable,
       source: cdn,
       deps: [certificateKey, stateKey(bucket)],
+      ...(cdn.provider === "gcp" ? { refresh: true } : {}),
     });
   }
 

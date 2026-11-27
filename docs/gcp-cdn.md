@@ -1,7 +1,12 @@
 # A CDN for GCS website buckets
 
-Status: proposal. Nothing in this document is built. Decision 1 belongs to the project owner and
-MUST be answered before any code is written; decision 2 is a recommendation that the owner may veto.
+Status: built, tested against fakes only. The owner approved decision 1 (public read behind an
+explicit opt-in) and decision 2 (Certificate Manager). Differences from this proposal: the
+certificate is its own `@gcp.Certificate` entry that `@gcp.CloudCdn` depends on, the bucket driver
+owns `publicAccessPrevention` (set from `public_read` on create and update), a `path` on a gcp CDN
+is rejected, and `status`, `invalidate` and `check-dns` are implemented. The run against a real
+project (build step 4) has not been done; request shapes follow the public API reference and are
+unverified against live services. The sections below keep the original proposal.
 
 ## What exists
 
@@ -86,6 +91,35 @@ MUST show the binding as a change. An imported bucket is never changed, so a `CD
 bucket MUST fail at `plan` unless the bucket is already public, and the error MUST say so. `destroy`
 MUST remove only the binding cloudgear added, through the existing `changeGrant` (get, modify, set with
 a retry), and MUST set `publicAccessPrevention` back to `enforced` only if cloudgear changed it.
+
+### Later option: a signing function in front of a private bucket
+
+Not built now. A GCP function takes a request such as `<function url>?path=<bucket>/path/to/image`,
+checks it, signs the object, and returns the image (by proxying the bytes) or a redirect to a
+short-lived signed URL. The bucket stays private with `publicAccessPrevention` `enforced`, so no
+`public_read` and no `allUsers` binding is needed, and the function's service account is the only
+reader.
+
+- **Fits** images and downloads that a page references by URL, where the owner wants the bucket to stay
+  private and does not need the whole bucket served as a website. It could be a `FunctionRouter`
+  route, so cloudgear already deploys it, and its service account gets read access through the
+  existing `permissions` and grants.
+- **Signing** uses the service account through IAM Credentials `signBlob`, so no key file exists;
+  that needs `roles/iam.serviceAccountTokenCreator` on the account itself. Signed URLs expire, so a
+  redirect response MUST NOT be cached longer than the signature lives.
+- **Must have** an allowed-bucket and allowed-prefix list, held in the function's declaration and not
+  taken from the request; otherwise the `path` parameter lets any caller sign any object the service
+  account can read. It MUST reject `..` segments and other buckets, and SHOULD restrict methods to
+  `GET` and `HEAD`.
+- **Cost** is a function invocation per image, which the CDN does not remove unless the function sits
+  behind Cloud CDN too (a serverless backend with a cache); proxying the bytes also costs egress and
+  latency through the function. Redirecting avoids both but exposes a signed URL that works until it
+  expires.
+- **Does not give** a website: index and not-found pages, clean paths and directory indexes would have
+  to be reimplemented in the function.
+
+This is an alternative to the public-read decision, not a replacement for the CDN: it could ship
+first for owners who refuse a public bucket. The owner decides whether it becomes a build step.
 
 ## What changes in cloudgear
 

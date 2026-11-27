@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": "./index.ts",
+    "./gcp-names": "./drivers/gcp-names.ts"
   },
   "dependencies": {
     "@aws-sdk/client-acm": "^3.700.0",
@@ -12,5 +13,13 @@
     "@cloudgear/blob": "workspace:*",
     "@cloudgear/debug": "workspace:*",
     "@cloudgear/dns": "workspace:*"
+  },
+  "peerDependencies": {
+    "google-auth-library": "^11.3.4"
+  },
+  "peerDependenciesMeta": {
+    "google-auth-library": {
+      "optional": true
+    }
   }
 }

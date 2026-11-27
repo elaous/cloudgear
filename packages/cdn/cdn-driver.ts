@@ -1,4 +1,6 @@
-export type CdnProvider = "aws";
+import type { CDN_PROVIDERS } from "./schema.gen";
+
+export type CdnProvider = (typeof CDN_PROVIDERS)[number];
 export type CdnState = "none" | "deploying" | "deployed";
 
 export interface CdnInfo {
@@ -15,8 +17,9 @@ export type CdnDriverFactory = () => CdnDriver | Promise<CdnDriver>;
 
 const factories = new Map<CdnProvider, CdnDriverFactory>();
 
-const BUILT_IN: Record<CdnProvider, () => Promise<CdnDriverFactory>> = {
+const BUILT_IN: Partial<Record<CdnProvider, () => Promise<CdnDriverFactory>>> = {
   aws: async () => (await import("./drivers/cloudfront")).createCloudFrontDriver,
+  gcp: async () => (await import("./drivers/gcp-cdn")).createGcpCdnDriver,
 };
 
 export function registerCdnDriver(provider: CdnProvider, factory: CdnDriverFactory): void {

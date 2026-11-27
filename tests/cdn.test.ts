@@ -31,8 +31,9 @@ describe("Cert and CDN", () => {
 
   test("reject another provider and a foreign bucket", () => {
     const cert = new Cert("aws", new DNS("gandi", "www.example.com"));
-    expect(() => new Cert("gcp" as "aws", new DNS("gandi", "x.example.com"))).toThrow(/not supported yet/);
-    expect(() => new CDN("gcp" as "aws", cert, { bucket: site() })).toThrow(/CDN provider "gcp" is not supported/);
+    expect(() => new Cert("azure" as "aws", new DNS("gandi", "x.example.com"))).toThrow(/not supported yet/);
+    expect(() => new CDN("azure" as "aws", cert, { bucket: site() })).toThrow(/CDN provider "azure" is not supported/);
+    expect(() => new CDN("gcp", cert as never, { bucket: site() as never })).toThrow(/The CDN uses provider "gcp" but its certificate uses "aws"/);
     expect(() => new CDN("aws", cert, { bucket: new BlobStore("gcp", "://b") })).toThrow(/bucket uses "gcp"/);
   });
 });

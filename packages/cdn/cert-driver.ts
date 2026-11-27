@@ -20,8 +20,9 @@ export type CertDriverFactory = (options: CertDriverOptions) => CertDriver | Pro
 
 const factories = new Map<CertProvider, CertDriverFactory>();
 
-const BUILT_IN: Record<CertProvider, () => Promise<CertDriverFactory>> = {
+const BUILT_IN: Partial<Record<CertProvider, () => Promise<CertDriverFactory>>> = {
   aws: async () => (await import("./drivers/acm")).createAcmDriver,
+  gcp: async () => (await import("./drivers/gcp-cdn")).createGcpCertDriver,
 };
 
 export function registerCertDriver(provider: CertProvider, factory: CertDriverFactory): void {

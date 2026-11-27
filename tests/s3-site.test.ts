@@ -46,14 +46,6 @@ describe("creating a website bucket", () => {
     await expect(applyAll(withOptions(siteOptions()), emptyState(), aws)).rejects.toThrow("denied");
     expect(aws.of("DeleteBucketCommand")).toEqual([{ Bucket: "site-bucket" }]);
   });
-
-  test("site files are refused before anything is created", async () => {
-    const aws = fakeAws();
-    await expect(applyAll(withOptions(siteOptions({ site_dir: "dist", site_files_hash: "a".repeat(64), site_files_count: "3" })), emptyState(), aws)).rejects.toThrow(
-      "uploading site files (dist) is not supported by apply yet",
-    );
-    expect(aws.names()).not.toContain("CreateBucketCommand");
-  });
 });
 
 describe("changing a website bucket", () => {
@@ -98,12 +90,6 @@ describe("changing a website bucket", () => {
   test("adding a website to a plain bucket configures it", async () => {
     const aws = await apply2(undefined, siteOptions());
     expect(aws.names().sort()).toEqual(["PutBucketCorsCommand", "PutBucketWebsiteCommand"]);
-  });
-
-  test("site files are refused on update too", async () => {
-    const state = emptyState();
-    await applyAll(withOptions(siteOptions()), state);
-    await expect(applyAll(withOptions(siteOptions({ site_dir: "dist" })), state)).rejects.toThrow("uploading site files");
   });
 });
 

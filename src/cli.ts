@@ -15,6 +15,7 @@ import type { StorageLike } from "./deploy/gcp/storage";
 import { neonApiKey, neonDrivers } from "./deploy/neon";
 import { invalidateDistribution } from "./deploy/aws/cloudfront";
 import { formatPlan, hasChanges, plan, type PlannedAction } from "./deploy/plan";
+import { withSiteChanges } from "./deploy/site-plan";
 import { stateKey, type State } from "./deploy/state";
 import { ask, assertNoUnpushedLocalState, assertNoUnsavedState, createStateStore, holdLock, preserveOnFailure, stateLocation, type LockHandle, type StateStore } from "./deploy/state-store";
 import { stateCommand } from "./statecmd";
@@ -202,7 +203,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const store = await getStore();
       const { state } = await store.load(config.project, config.provider);
       debug("cli", "state loaded", { entries: Object.keys(state.entries).length });
-      console.log(formatPlan(plan(config, state)));
+      console.log(formatPlan(withSiteChanges(plan(config, state), path.dirname(configPath))));
       const warning = envWarnings(config, configPath);
       if (warning) console.warn(`\nwarning: ${warning}`);
       return;
@@ -232,7 +233,7 @@ async function dispatch(command: string, args: string[], values: Values, { confi
         command === "destroy"
           ? { ...config, resource: [], function: [], certificate: [], cdn: [], api: undefined }
           : config;
-      const actions = plan(target, state);
+      const actions = withSiteChanges(plan(target, state), path.dirname(configPath));
       debug("cli", "planned", () => {
         const counts: Record<string, number> = {};
         for (const a of actions) counts[a.op] = (counts[a.op] ?? 0) + 1;
@@ -592,6 +593,7 @@ async function awsDeployers(config: CloudgearConfig, configPath: string, region:
     dns: async (provider, zone, token) =>
       createDnsDriver(provider as DnsProvider, zone, token ? { token: await readSecretRef(token, resolvedRegion) } : undefined),
     log: (message) => console.log(`cloudgear: ${message}`),
+    siteRoot: configDir,
     ...bundleReaders(configDir),
   });
 }

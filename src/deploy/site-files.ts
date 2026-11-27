@@ -85,6 +85,9 @@ export function listSiteFiles(dir: string, rules: SiteRules, root: string = dir)
   const target = path.resolve(dir);
   if (target !== base && !target.startsWith(base + path.sep)) throw new Error(`site directory ${dir} is outside ${root}`);
   if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error(`site directory ${dir} does not exist; build the site first`);
+  const realBase = fs.realpathSync(base);
+  const real = fs.realpathSync(target);
+  if (real !== realBase && !real.startsWith(realBase + path.sep)) throw new Error(`site directory ${dir} resolves outside ${root}`);
   const found: { key: string; file: string }[] = [];
   walk(target, "", rules, found);
   return found.map(({ key, file }): SiteFile => {

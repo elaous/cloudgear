@@ -6,8 +6,7 @@ export function siteDistributions(config: CloudgearConfig, state: State): StateE
   const declared = new Set(config.cdn.map((c) => c.domain));
   return Object.values(state.entries).filter(
     (entry) =>
-      entry.type === "@aws.CloudFront" &&
-      !!entry.outputs.id &&
+      ((entry.type === "@aws.CloudFront" && !!entry.outputs.id) || (entry.type === "@gcp.CloudCdn" && !!entry.outputs.url_map)) &&
       entry.name !== config.api?.domain &&
       (entry.spec as { bucket?: string }).bucket !== "" &&
       (declared.size === 0 || declared.has(entry.name)),

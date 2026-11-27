@@ -24,11 +24,19 @@ export interface DesiredEntry {
 export const CLOUDFRONT_REGION = "us-east-1";
 export const GLOBAL_REGION = "global";
 
+// The project the CDN of a certificate lives in: that of its bucket.
+function gcpCertificateProject(config: CloudgearConfig, domain: string): string {
+  const cdn = config.cdn.find((c) => (c.certificate ?? c.domain) === domain);
+  return config.resource.find((r) => r.name === cdn?.bucket)?.options?.project ?? "";
+}
+
 export interface CertificateComparable {
   domain: string;
   // Endpoint needs the domain free: it owns the record.
   for_endpoint: boolean;
   region: string;
+  // gcp only: the project of the CDN it serves.
+  project?: string;
   dns_provider: string;
   dns_zone: string;
   dns_token?: SecretRefSpec;
@@ -281,6 +289,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       spec: {
         domain: certificate.domain,
         for_endpoint: !!certificate.usage,
+        ...(certificate.provider === "gcp" ? { project: gcpCertificateProject(config, certificate.domain) } : {}),
         region: certificate.provider === "gcp" ? GLOBAL_REGION : (certificate.region ?? (certificate.usage === "api" ? (config.region ?? "") : CLOUDFRONT_REGION)),
         ...optionsSpec(certificate.options),
         dns_provider: certificate.dns.provider,
@@ -300,6 +309,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
     const profile = capability(cdn.provider, "cdn");
     const bucket = resources.get(cdn.bucket);
     if (!bucket) throw new Error(`cloudgear config: cdn bucket "${cdn.bucket}" is not a declared resource`);
+    if (cdn.provider === "gcp" && cdn.path) throw new Error(`cloudgear config: the gcp CDN "${cdn.domain}" serves the root of its bucket; remove the path "${cdn.path}"`);
     if (providerOfType(bucket.type) !== cdn.provider) throw new Error(`cloudgear config: the ${cdn.provider} CDN "${cdn.domain}" serves bucket "${cdn.bucket}", which is a ${bucket.type}`);
     if (certificate!.provider !== cdn.provider) throw new Error(`cloudgear config: the ${cdn.provider} CDN "${cdn.domain}" uses a ${certificate!.provider} certificate`);
     const publicRead = cdn.provider === "gcp" ? (bucket as ResourceSpec).options?.public_read : undefined;
@@ -327,6 +337,7 @@ export function desiredEntries(config: CloudgearConfig, state: State): DesiredEn
       } satisfies CdnComparable,
       source: cdn,
       deps: [certificateKey, stateKey(bucket)],
+      ...(cdn.provider === "gcp" ? { refresh: true } : {}),
     });
   }
 

@@ -10,6 +10,7 @@ import { decodeConfig, type CloudgearConfig, type FunctionSpec } from "./config/
 import { apply, endpointsFrom, hasEndpoints, providersNeeded, type Drivers } from "./deploy/apply";
 import { awsDrivers } from "./deploy/aws";
 import { gcpDrivers } from "./deploy/gcp";
+import { invalidateGcpCdn } from "./deploy/gcp/cdn";
 import { httpFor } from "./deploy/gcp/http";
 import type { StorageLike } from "./deploy/gcp/storage";
 import { neonApiKey, neonDrivers } from "./deploy/neon";
@@ -287,6 +288,10 @@ async function dispatch(command: string, args: string[], values: Values, { confi
               console.log(`cloudgear: api ${entry.outputs.url} (${entry.outputs.domain_name})`);
               continue;
             }
+            if (entry.type === "@gcp.CloudCdn" && entry.outputs.address) {
+              console.log(`cloudgear: site ${entry.outputs.url} (address ${entry.outputs.address}; HTTPS works once the certificate is active and the load balancer has propagated)`);
+              continue;
+            }
             if (entry.type !== "@aws.CloudFront" || !entry.outputs.domain_name) continue;
             const status = entry.outputs.status === "Deployed" ? "live" : "still deploying";
             console.log(`cloudgear: site https://${entry.name} (${status}; distribution ${entry.outputs.id}, ${entry.outputs.domain_name})`);
@@ -321,6 +326,13 @@ async function dispatch(command: string, args: string[], values: Values, { confi
       const distribution = pickDistribution(siteDistributions(config, state), values.domain);
       const paths = args.length ? args : ["/*"];
       for (const p of paths) if (!p.startsWith("/")) throw new Error(`Invalidation path "${p}" must start with "/"`);
+      if (distribution.type === "@gcp.CloudCdn") {
+        const { GoogleAuth } = await import("google-auth-library");
+        const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+        await invalidateGcpCdn({ http: httpFor(auth), sleep: (ms) => Bun.sleep(ms) }, distribution.outputs.project!, distribution.outputs.url_map!, distribution.name, paths);
+        console.log(`cloudgear: invalidation finished for ${paths.join(", ")}`);
+        return;
+      }
       const id = await invalidateDistribution(new CloudFrontClient({ region: "us-east-1" }), distribution.outputs.id!, paths);
       console.log(`cloudgear: invalidation ${id} started for ${paths.join(", ")}`);
       return;
@@ -569,6 +581,11 @@ const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, re
         region: config.region || region || process.env.GOOGLE_CLOUD_REGION || process.env.CLOUDSDK_COMPUTE_REGION,
         sleep: (ms) => Bun.sleep(ms),
         ...bundleReaders(path.dirname(configPath)),
+      },
+      edge: {
+        http: httpFor(auth),
+        sleep: (ms) => Bun.sleep(ms),
+        dns: async (provider, zone, token) => createDnsDriver(provider as DnsProvider, zone, token ? { token: await readSecretRef(token, region ?? "") } : undefined),
       },
     });
   },

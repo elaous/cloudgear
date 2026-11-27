@@ -1,4 +1,7 @@
 import type { Drivers } from "../apply";
+import { cdnDriver } from "./cdn";
+import { certificateDriver } from "./certificate";
+import type { EdgeDeps } from "./edge";
 import { functionDriver, type FunctionDeps } from "./functions";
 import { gcsDriver, type StorageLike } from "./storage";
 
@@ -15,6 +18,8 @@ export interface GcpDeps {
   siteRoot?: string;
   // Present when the functions can deploy.
   functions?: FunctionDeps;
+  // Present when certificates and CDNs can deploy.
+  edge?: EdgeDeps;
 }
 
 // Resolves the project a resource lives in: its own option, then GOOGLE_CLOUD_PROJECT, then the credentials'.
@@ -52,5 +57,9 @@ export function labelsFrom(tags: Record<string, string> | undefined, resource: s
 }
 
 export function gcpDrivers(deps: GcpDeps): Drivers {
-  return { "@gcp.GCS": gcsDriver(deps), ...(deps.functions ? { "@gcp.CloudFunction": functionDriver(deps, deps.functions) } : {}) };
+  return {
+    "@gcp.GCS": gcsDriver(deps),
+    ...(deps.functions ? { "@gcp.CloudFunction": functionDriver(deps, deps.functions) } : {}),
+    ...(deps.edge ? { "@gcp.Certificate": certificateDriver(deps, deps.edge), "@gcp.CloudCdn": cdnDriver(deps, deps.edge) } : {}),
+  };
 }

@@ -34,8 +34,8 @@ export function systemLookup(server?: string): DnsLookup {
   };
 }
 
-const ENDPOINTS = new Set(["@aws.CloudFront", "@aws.ApiGateway"]);
-const DNS_TYPES = new Set([...ENDPOINTS, "@aws.Certificate"]);
+const ENDPOINTS = new Set(["@aws.CloudFront", "@aws.ApiGateway", "@gcp.CloudCdn"]);
+const DNS_TYPES = new Set([...ENDPOINTS, "@aws.Certificate", "@gcp.Certificate"]);
 
 // Looks only at what the plan is about to create or change; destroys are not checked.
 export async function checkDns(actions: PlannedAction[], lookup: DnsLookup): Promise<DnsCheck> {

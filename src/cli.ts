@@ -549,6 +549,7 @@ const DEPLOYERS: Record<string, (config: CloudgearConfig, configPath: string, re
         return clients.get(project)!;
       },
       defaultProject: () => auth.getProjectId(),
+      siteRoot: path.dirname(configPath),
       labels: tags,
       log: (message) => console.log(`cloudgear: ${message}`),
       functions: {

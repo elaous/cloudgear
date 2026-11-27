@@ -741,7 +741,8 @@ const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
   directory, so build the site first, and stores a hash of the files and their count in the
   config. A symbolic link that would be uploaded is an error; excluded ones are skipped.
 - Everything is literal, as for `BlobStore`; strings may use environment variables as
-  elsewhere in `setup.ts`. The provider is `aws` for now.
+  elsewhere in `setup.ts`. The provider is `aws` or `gcp`; a GCS site is written
+  `new BlobStoreWebSite("gcp", "gs://name", { options: { location: "us-central1" }, ... })`.
 - `plan` and `apply` list the directory again and show `site files: N new, N changed, N
   removed` for each site bucket. If the directory no longer matches the hash `generate`
   stored, they stop and ask you to run `generate` again. Without `prune`, files the site no
@@ -761,6 +762,15 @@ const site = new BlobStoreWebSite("aws", `s3://web.${process.env.ENV_DOMAIN}`, {
   and `s3:DeleteBucketCORS` for the deploying principal, plus `s3:PutObject` for the files and
   `s3:DeleteObject` for `prune` and `destroy`, on top of the bucket permissions `apply`
   already uses.
+- On GCS the website settings are the bucket's `website` metadata (`mainPageSuffix` and
+  `notFoundPage`) and the CORS rules are its `cors` metadata. GCS has one list of response
+  headers, so a rule's `headers` and `exposeHeaders` are joined into it. Files are saved with
+  their content type, `cacheControl` and a `sha256` custom metadata entry. The bucket stays
+  private (public access prevention is enforced) and cloudgear's CDN serves AWS buckets only, so
+  the website metadata only matters if you make the bucket public yourself. A versioned GCS
+  bucket gets versioning after its files are uploaded. The deploying identity needs
+  `storage.buckets.update`, `storage.objects.create` and `storage.objects.delete` on top of what
+  `apply` already uses.
 
 ### Scheduled functions
 
@@ -2257,7 +2267,7 @@ Early draft. `aws` has the deploy drivers; `gcp` deploys buckets and functions s
 the router needs AWS credentials (see Authentication). Input objects are not
 validated against their TypeScript types at runtime. An app has any number of
 CDNs for static sites but at most one that serves the router. Static sites upload to
-AWS buckets only; Google Cloud is not supported yet.
+AWS and GCS buckets; a `CDN` can only serve an AWS bucket.
 
 ## Testing
 

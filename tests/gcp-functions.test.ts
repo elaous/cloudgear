@@ -135,6 +135,9 @@ function fakeGoogle(opts: { existingAccounts?: string[]; failBuild?: string; pro
     },
     bucket(name) {
       return {
+        file: () => {
+          throw new Error("this fake holds no objects");
+        },
         iam: {
           async getPolicy() {
             calls.push({ method: "BUCKET", url: `get ${name}` });

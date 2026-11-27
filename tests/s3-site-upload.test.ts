@@ -6,7 +6,7 @@ import { adoptEntries } from "../src/deploy/adopt";
 import { plan, formatPlan, hasChanges } from "../src/deploy/plan";
 import { listSiteFiles, siteFilesHash } from "../src/deploy/site-files";
 import { withSiteChanges } from "../src/deploy/site-plan";
-import { readManifest } from "../src/deploy/aws/s3site";
+import { readManifest } from "../src/deploy/site-sync";
 import type { CloudgearConfig } from "../src/config/schema";
 import { apply } from "../src/deploy/apply";
 import { baseConfig, emptyState, fakeAws } from "./helpers";

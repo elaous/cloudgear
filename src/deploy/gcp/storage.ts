@@ -1,4 +1,19 @@
-import type { Adopted, Driver } from "../apply";
+import { PartialApplyError, type Adopted, type Driver } from "../apply";
+import type { SiteFile } from "../site-files";
+import {
+  hasSiteSettings,
+  inBatches,
+  manifestOutput,
+  normalizeRule,
+  readManifest,
+  readSiteFiles,
+  removeSiteFiles,
+  SITE_MANIFEST,
+  siteSettings,
+  syncSiteFiles,
+  type SiteSettings,
+  type SiteTarget,
+} from "../site-sync";
 import { labelsFrom, resolveProject, type GcpDeps } from "./index";
 
 // The part of @google-cloud/storage this driver uses, so tests can stand in for it.
@@ -8,7 +23,13 @@ export interface BucketPolicy {
   etag?: string;
 }
 
+export interface FileLike {
+  save(data: Buffer, options: { contentType: string; resumable: false; metadata: { cacheControl?: string; metadata: Record<string, string> } }): Promise<unknown>;
+  delete(options?: { ignoreNotFound?: boolean }): Promise<unknown>;
+}
+
 export interface BucketLike {
+  file(name: string): FileLike;
   iam: {
     getPolicy(options?: { requestedPolicyVersion?: number }): Promise<[BucketPolicy, ...unknown[]]>;
     setPolicy(policy: BucketPolicy): Promise<unknown>;
@@ -24,6 +45,49 @@ export interface StorageLike {
 }
 
 const DEFAULT_LOCATION = "US";
+const DELETE_CONCURRENCY = 8;
+
+// The bucket as a place for site files.
+export function gcsTarget(bucket: BucketLike): SiteTarget {
+  return {
+    async put(file: SiteFile, body) {
+      await bucket.file(file.key).save(body, {
+        contentType: file.contentType,
+        resumable: false,
+        metadata: { ...(file.cacheControl ? { cacheControl: file.cacheControl } : {}), metadata: { sha256: file.sha256 } },
+      });
+    },
+    async deleteKeys(keys) {
+      await inBatches(keys, DELETE_CONCURRENCY, async (key) => {
+        await bucket.file(key).delete({ ignoreNotFound: true });
+      });
+    },
+  };
+}
+
+const websiteOf = (settings: SiteSettings) =>
+  settings.indexDocument !== undefined || settings.errorDocument !== undefined
+    ? { mainPageSuffix: settings.indexDocument ?? "index.html", ...(settings.errorDocument !== undefined ? { notFoundPage: settings.errorDocument } : {}) }
+    : null;
+
+// GCS has one list for the headers a rule allows and exposes.
+const corsOf = (settings: SiteSettings) =>
+  settings.cors
+    ? settings.cors.map((rule) => ({
+        origin: rule.origins,
+        method: rule.methods,
+        ...(rule.headers?.length || rule.expose_headers?.length ? { responseHeader: [...new Set([...(rule.headers ?? []), ...(rule.expose_headers ?? [])])] } : {}),
+        ...(rule.max_age_seconds !== undefined ? { maxAgeSeconds: rule.max_age_seconds } : {}),
+      }))
+    : null;
+
+// The metadata that differs between `had` and `wanted`; null clears a setting.
+export function siteMetadata(wanted: SiteSettings, had: SiteSettings): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (JSON.stringify(websiteOf(wanted)) !== JSON.stringify(websiteOf(had))) patch.website = websiteOf(wanted);
+  if (JSON.stringify(wanted.cors?.map(normalizeRule) ?? null) !== JSON.stringify(had.cors?.map(normalizeRule) ?? null)) patch.cors = corsOf(wanted);
+  return patch;
+}
 
 const statusOf = (err: unknown): number | undefined => {
   const code = (err as { code?: unknown }).code;
@@ -41,14 +105,21 @@ export function gcsDriver(deps: GcpDeps): Driver {
       const project = await projectFor(entry.spec, entry.physical_name);
       const options = optionsOf(entry.spec);
       const location = locationOf(entry.spec);
+      readSiteFiles(options, deps.siteRoot);
+      // Versioning starts after the files, so cleaning up after a failure leaves no object versions behind.
+      const versioned = options.versioning === "true";
+      const hasFiles = !!options.site_dir;
+      const settings = Object.fromEntries(Object.entries(siteMetadata(siteSettings(options), {})).filter(([, value]) => value !== null));
+      const storage = deps.storage(project);
       try {
-        await deps.storage(project).createBucket(entry.physical_name, {
+        await storage.createBucket(entry.physical_name, {
           location,
           ...(options.storage_class ? { storageClass: options.storage_class } : {}),
-          versioning: { enabled: options.versioning === "true" },
+          versioning: { enabled: versioned && !hasFiles },
           // Private by default: no public access and no per-object ACLs.
           iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: "enforced" },
           labels: labelsFrom(deps.labels, entry.name),
+          ...settings,
         });
       } catch (err) {
         if (statusOf(err) === 409) {
@@ -56,8 +127,18 @@ export function gcsDriver(deps: GcpDeps): Driver {
         }
         throw err;
       }
+      const bucket = storage.bucket(entry.physical_name);
+      const uploaded = readManifest(undefined);
+      try {
+        await syncSiteFiles(gcsTarget(bucket), options, deps.siteRoot, uploaded);
+        if (versioned && hasFiles) await bucket.setMetadata({ versioning: { enabled: true } });
+      } catch (err) {
+        await removeSiteFiles(gcsTarget(bucket), uploaded).catch(() => {});
+        await bucket.delete().catch(() => {});
+        throw err;
+      }
       deps.log(`created bucket ${entry.physical_name} in ${location}`);
-      return { name: entry.physical_name, location, project };
+      return { name: entry.physical_name, location, project, ...manifestOutput(uploaded) };
     },
 
     async update(entry, current) {
@@ -76,14 +157,30 @@ export function gcsDriver(deps: GcpDeps): Driver {
       const patch: Record<string, unknown> = {};
       if ((wantedOptions.versioning === "true") !== (hadOptions.versioning === "true")) patch.versioning = { enabled: wantedOptions.versioning === "true" };
       if (wantedOptions.storage_class && wantedOptions.storage_class !== hadOptions.storage_class) patch.storageClass = wantedOptions.storage_class;
-      if (Object.keys(patch).length) await deps.storage(project).bucket(entry.physical_name).setMetadata(patch);
-      return {};
+      Object.assign(patch, siteMetadata(siteSettings(wantedOptions), siteSettings(hadOptions)));
+      readSiteFiles(wantedOptions, deps.siteRoot);
+      const bucket = deps.storage(project).bucket(entry.physical_name);
+      if (Object.keys(patch).length) await bucket.setMetadata(patch);
+      const uploaded = readManifest(current.outputs[SITE_MANIFEST]);
+      const hadManifest = !!current.outputs[SITE_MANIFEST];
+      try {
+        await syncSiteFiles(gcsTarget(bucket), wantedOptions, deps.siteRoot, uploaded);
+      } catch (err) {
+        throw new PartialApplyError(err, { ...current.outputs, ...manifestOutput(uploaded, hadManifest) });
+      }
+      return manifestOutput(uploaded, hadManifest);
     },
 
     async delete(current) {
       const project = current.outputs.project || (await projectFor(current.spec, current.physical_name));
+      const uploaded = readManifest(current.outputs[SITE_MANIFEST]);
+      if (Object.keys(uploaded).length && optionsOf(current.spec).versioning === "true") {
+        throw new Error(`Bucket "${current.physical_name}" is versioned and holds site files whose versions cloudgear cannot delete; empty it, or run cloudgear import to keep it, then retry`);
+      }
+      const bucket = deps.storage(project).bucket(current.physical_name);
       try {
-        await deps.storage(project).bucket(current.physical_name).delete();
+        await removeSiteFiles(gcsTarget(bucket), uploaded);
+        await bucket.delete();
       } catch (err) {
         const status = statusOf(err);
         if (status === 404) return;
@@ -97,7 +194,12 @@ export function gcsDriver(deps: GcpDeps): Driver {
       const project = await projectFor(entry.spec, entry.physical_name);
       try {
         const [metadata] = await deps.storage(project).bucket(entry.physical_name).getMetadata();
-        return { outputs: { name: entry.physical_name, location: String(metadata.location ?? ""), project } };
+        const options = optionsOf(entry.spec);
+        const notes = [
+          ...(hasSiteSettings(siteSettings(options)) ? ["its website and CORS settings are not applied: cloudgear never changes an imported bucket"] : []),
+          ...(options.site_dir ? ["its site files are not uploaded: cloudgear never changes an imported bucket"] : []),
+        ];
+        return { outputs: { name: entry.physical_name, location: String(metadata.location ?? ""), project }, ...(notes.length ? { notes } : {}) };
       } catch (err) {
         const status = statusOf(err);
         if (status === 404) return undefined;

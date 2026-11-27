@@ -3,7 +3,9 @@
 import { Cache } from "@cloudgear/cache";
 import { Cert } from "@cloudgear/cdn";
 import { DNS } from "@cloudgear/dns";
+import { EventBus } from "@cloudgear/events";
 import { FunctionRouter, cron } from "@cloudgear/functions";
+import { Policy } from "@cloudgear/iam";
 import { Network } from "@cloudgear/network";
 import { SecretStore } from "@cloudgear/secrets";
 
@@ -17,8 +19,15 @@ const sessions_network = new Network("aws", { vpc: "vpc-0123456789abcdef0", subn
 
 export const sessions = new Cache("aws", "sessions", { engine: "valkey", size: "small", network: sessions_network });
 
+export const orders = new EventBus("aws", { name: "orders" });
+
+export const read_logs = new Policy("aws", { name: "read_logs", document: { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: ["logs:GetLogEvents", "logs:FilterLogEvents"], Resource: "*" }] } });
+
+export const audit_orders = new Policy("aws", { name: "audit_orders", document: { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: ["logs:PutLogEvents"], Resource: "arn:aws:logs:eu-west-1:123456789012:log-group:/orders:*" }] } });
+
 const api_network = new Network("aws", { vpc: "vpc-0123456789abcdef0" });
 
-export const api = new FunctionRouter("aws", { authenticated: "none", cert: api_cert, functionOptions: { "env.STAGE": "prod" }, network: api_network, env: secrets.path("/shared/*") });
+export const api = new FunctionRouter("aws", { authenticated: "none", cert: api_cert, functionOptions: { "env.STAGE": "prod" }, policies: [read_logs], network: api_network, env: secrets.path("/shared/*") });
 api.url("GET", "/health", "./health.ts", { public: true, env: secrets.path("/app")({ API_KEY: "API_KEY", DB_URL: "database-url" }) });
 api.url("GET", "/tick", "./tick.ts", { public: true, schedule: [cron`0 * * * *`] });
+api.url("POST", "/orders", "./orders.ts", { public: true, policies: [audit_orders], on: [orders.event("order.created"), orders.event({ type: "order.paid", source: "shop" })] });

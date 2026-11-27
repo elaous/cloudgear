@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "cloudgear/v1/options.proto";
+import "google/protobuf/struct.proto";
+
+enum PolicyProvider {
+  POLICY_PROVIDER_UNSPECIFIED = 0;
+  POLICY_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+}
+
+// An inline IAM policy put on the role of the functions that list it. Its name is the policy name.
+message Policy {
+  PolicyProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+  // The policy document: Version, Statement and the rest, as a literal.
+  google.protobuf.Struct document = 3 [(cloudgear.v1.required) = true];
+}

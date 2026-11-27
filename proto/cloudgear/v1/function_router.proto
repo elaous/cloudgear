@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package cloudgear.v1;
 
+import "cloudgear/v1/event_bus.proto";
 import "cloudgear/v1/network.proto";
 import "cloudgear/v1/options.proto";
 
@@ -81,6 +82,10 @@ message FunctionRouter {
     repeated SecretBinding secrets = 9;
     repeated ScheduleRule schedule = 10;
     map<string, string> options = 11;
+    // Events that run the function.
+    repeated EventTrigger on = 12;
+    // Inline policies put on the function's role.
+    repeated string policies = 13 [(cloudgear.v1.references) = "Policy"];
   }
 
   RouterProvider provider = 1 [(cloudgear.v1.immutable) = true];
@@ -102,4 +107,6 @@ message FunctionRouter {
   map<string, string> function_options = 10;
   // Runs every function inside an existing VPC.
   optional Network network = 11;
+  // Inline policies every function gets.
+  repeated string policies = 13 [(cloudgear.v1.references) = "Policy"];
 }

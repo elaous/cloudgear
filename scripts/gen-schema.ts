@@ -17,6 +17,8 @@ const TARGETS: Record<string, string> = {
   "cloudgear/v1/cert.proto": "packages/cdn/schema.gen.ts",
   "cloudgear/v1/cdn.proto": "packages/cdn/schema.gen.ts",
   "cloudgear/v1/function_router.proto": "packages/functions/schema.gen.ts",
+  "cloudgear/v1/event_bus.proto": "packages/events/schema.gen.ts",
+  "cloudgear/v1/policy.proto": "packages/iam/schema.gen.ts",
   "cloudgear/v1/secret.proto": "packages/secrets/schema.gen.ts",
 };
 

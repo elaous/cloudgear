@@ -4,6 +4,8 @@ import { assertBusName, assertEventSource, assertEventType, createEventDriver, t
 export { assertBusName, assertEventSource, assertEventType, createEventDriver, registerEventDriver } from "./driver";
 export type { EventDriver, EventDriverFactory, EventDriverOptions, EventProvider, PublishedEvent } from "./driver";
 
+export { EVENT_BUS_FIELDS, EVENT_PROVIDERS, EVENT_TRIGGER_FIELDS } from "./schema.gen";
+
 export const DEFAULT_SOURCE = "cloudgear";
 
 // PutEvents limit: 256 KB per entry, envelope included.

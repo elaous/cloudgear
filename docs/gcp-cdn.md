@@ -1,7 +1,12 @@
 # A CDN for GCS website buckets
 
-Status: proposal. Nothing in this document is built. Decision 1 belongs to the project owner and
-MUST be answered before any code is written; decision 2 is a recommendation that the owner may veto.
+Status: built, tested against fakes only. The owner approved decision 1 (public read behind an
+explicit opt-in) and decision 2 (Certificate Manager). Differences from this proposal: the
+certificate is its own `@gcp.Certificate` entry that `@gcp.CloudCdn` depends on, the bucket driver
+owns `publicAccessPrevention` (set from `public_read` on create and update), a `path` on a gcp CDN
+is rejected, and `status`, `invalidate` and `check-dns` are implemented. The run against a real
+project (build step 4) has not been done; request shapes follow the public API reference and are
+unverified against live services. The sections below keep the original proposal.
 
 ## What exists
 

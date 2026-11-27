@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "cloudgear/v1/options.proto";
+
+enum CdnProvider {
+  CDN_PROVIDER_UNSPECIFIED = 0;
+  CDN_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+}
+
+// Where CloudFront serves from: 100 is North America and Europe, 200 adds Asia, Middle East and Africa, All every location.
+enum PriceClass {
+  PRICE_CLASS_UNSPECIFIED = 0;
+  PRICE_CLASS_100 = 1 [(cloudgear.v1.name) = "PriceClass_100"];
+  PRICE_CLASS_200 = 2 [(cloudgear.v1.name) = "PriceClass_200"];
+  PRICE_CLASS_ALL = 3 [(cloudgear.v1.name) = "PriceClass_All"];
+}
+
+enum MethodRouting {
+  METHOD_ROUTING_UNSPECIFIED = 0;
+  // A CloudFront Function runs per request.
+  METHOD_ROUTING_FUNCTION = 1 [(cloudgear.v1.name) = "function"];
+}
+
+// A CDN in front of a bucket or a function router, on the domain of a Cert.
+message Cdn {
+  CdnProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+  string cert = 3 [(cloudgear.v1.references) = "Cert", (cloudgear.v1.required) = true];
+  // Exactly one origin: a BlobStore (or a subtype) or a FunctionRouter.
+  oneof origin {
+    string bucket = 4 [(cloudgear.v1.references) = "BlobStore"];
+    string router = 5 [(cloudgear.v1.references) = "FunctionRouter"];
+  }
+  // The hostname served when the Cert is a wildcard.
+  optional string domain = 6;
+  // Only for a router origin.
+  optional MethodRouting method_routing = 7;
+  // true keeps the web ACL the distribution has; set web_acl_arn to attach another.
+  optional bool web_acl = 8;
+  // A WAFv2 web ACL ARN in us-east-1.
+  optional string web_acl_arn = 9;
+  optional PriceClass price_class = 10;
+  map<string, string> options = 11;
+}

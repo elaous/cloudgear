@@ -8,7 +8,7 @@ import { createCertDriver, type CertDriver, type CertInfo, type CertProvider } f
 
 export type { ProviderOptions };
 export { createCertDriver, registerCertDriver } from "./cert-driver";
-export { CERT_FIELDS, CERT_PROVIDERS } from "./schema.gen";
+export { CDN_FIELDS, CDN_PROVIDERS, CERT_FIELDS, CERT_PROVIDERS, METHOD_ROUTINGS, PRICE_CLASSES } from "./schema.gen";
 export type { CertDriver, CertDriverFactory, CertDriverOptions, CertInfo, CertProvider, CertState } from "./cert-driver";
 
 export { createCdnDriver, registerCdnDriver } from "./cdn-driver";

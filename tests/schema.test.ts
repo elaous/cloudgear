@@ -10,8 +10,10 @@ import { FieldOptionsSchema, type FieldOptions } from "@bufbuild/protobuf/wkt";
 import { generate, loadRegistry } from "../scripts/gen-schema";
 import type { DnsOptions } from "@cloudgear/dns";
 import { DNS_FIELDS } from "@cloudgear/dns";
-import type { CertOptions } from "@cloudgear/cdn";
-import { CERT_FIELDS } from "@cloudgear/cdn";
+import type { CdnOptions, CertOptions } from "@cloudgear/cdn";
+import { CDN_FIELDS, CERT_FIELDS, PRICE_CLASSES } from "@cloudgear/cdn";
+import type { FunctionRouterOptions } from "@cloudgear/functions";
+import { AUTHENTICATIONS, FUNCTION_ROUTER_FIELDS, METHODS, ROUTE_METHODS, ROUTER_PROVIDERS } from "@cloudgear/functions";
 import type { BlobStoreOptions, BlobStoreWebSiteOptions } from "@cloudgear/blob";
 import { BLOB_STORE_FIELDS, BLOB_STORE_WEB_SITE_FIELDS } from "@cloudgear/blob";
 import type { SecretStoreOptions } from "@cloudgear/secrets";
@@ -40,6 +42,41 @@ describe("schema", () => {
     expect(Object.keys(dns).sort()).toEqual(DNS_FIELDS.filter((f) => !["provider", "name", "domain"].includes(f)).sort());
     const cert: Required<Omit<CertOptions, "driver">> = { region: "", options: {} };
     expect(Object.keys(cert).sort()).toEqual(CERT_FIELDS.filter((f) => !["provider", "name", "dns"].includes(f)).sort());
+  });
+
+  // The TypeScript webAcl is one option; the schema splits it into web_acl and web_acl_arn.
+  test("CDN options name the same fields as the schema", () => {
+    const cdn: Required<Omit<CdnOptions, "driver">> = { bucket: {} as never, router: {} as never, domain: "", methodRouting: "function", webAcl: true, priceClass: "PriceClass_All", options: {} };
+    const schemaFields = CDN_FIELDS.filter((f) => !["provider", "name", "cert", "web_acl_arn"].includes(f)).map(camel);
+    expect(Object.keys(cdn).sort()).toEqual(schemaFields.sort());
+    expect(PRICE_CLASSES).toEqual(["PriceClass_100", "PriceClass_200", "PriceClass_All"]);
+  });
+
+  // Options only the TypeScript client has: they hold code, credentials or runtime values.
+  const RUNTIME_ONLY = ["endpoints", "endpointsFile", "credentials", "authenticate", "env", "policies", "rateLimit"];
+  test("FunctionRouter options are in the schema unless they are runtime only", () => {
+    const options: Required<FunctionRouterOptions> = {
+      mode: "local",
+      endpoints: {},
+      endpointsFile: "",
+      authenticated: "iam",
+      credentials: {} as never,
+      region: "",
+      project: "",
+      authenticate: {} as never,
+      cert: { domain: "" },
+      functionOptions: {},
+      network: { provider: "aws" },
+      optionalEnv: [],
+      env: [],
+      policies: [],
+      rateLimit: { limit: 1, windowMs: 1 },
+    };
+    const schemaFields = FUNCTION_ROUTER_FIELDS.filter((f) => !["provider", "name", "routes"].includes(f)).map(camel);
+    expect(Object.keys(options).filter((key) => !RUNTIME_ONLY.includes(key)).sort()).toEqual(schemaFields.sort());
+    expect((ROUTE_METHODS as readonly string[]).slice().sort()).toEqual([...METHODS, "*"].map(String).sort());
+    expect([...ROUTER_PROVIDERS]).toEqual(["aws", "gcp", "azure"]);
+    expect([...AUTHENTICATIONS]).toEqual(["iam", "none"]);
   });
 
   test("SecretStore options name the same fields as the schema", () => {

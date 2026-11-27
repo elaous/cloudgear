@@ -15,6 +15,8 @@ const TARGETS: Record<string, string> = {
   "cloudgear/v1/network.proto": "packages/network/schema.gen.ts",
   "cloudgear/v1/dns.proto": "packages/dns/schema.gen.ts",
   "cloudgear/v1/cert.proto": "packages/cdn/schema.gen.ts",
+  "cloudgear/v1/cdn.proto": "packages/cdn/schema.gen.ts",
+  "cloudgear/v1/function_router.proto": "packages/functions/schema.gen.ts",
   "cloudgear/v1/secret.proto": "packages/secrets/schema.gen.ts",
 };
 
@@ -87,15 +89,15 @@ export function generate(): Map<string, string> {
     return lines;
   };
 
-  const out = new Map<string, string>();
+  const bodies = new Map<string, string[]>();
   for (const [protoFile, target] of Object.entries(TARGETS)) {
     const file = registry.getFile(protoFile);
     if (!file) throw new Error(`${protoFile} is not in the schema`);
     if (file.messages.some((m) => m.nestedEnums.length)) throw new Error(`${protoFile}: nested enums are not supported; declare them at the top level`);
     const body = [...file.enums.flatMap(enumLines), ...file.messages.flatMap(messageLines)];
-    out.set(target, `${GENERATED_HEADER}\n${body.join("\n").trimEnd()}\n`);
+    bodies.set(target, [...(bodies.get(target) ?? []), ...body]);
   }
-  return out;
+  return new Map([...bodies].map(([target, body]) => [target, `${GENERATED_HEADER}\n${body.join("\n").trimEnd()}\n`]));
 }
 
 if (import.meta.main) {

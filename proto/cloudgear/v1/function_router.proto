@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package cloudgear.v1;
+
+import "cloudgear/v1/network.proto";
+import "cloudgear/v1/options.proto";
+
+enum RouterProvider {
+  ROUTER_PROVIDER_UNSPECIFIED = 0;
+  ROUTER_PROVIDER_AWS = 1 [(cloudgear.v1.name) = "aws"];
+  ROUTER_PROVIDER_GCP = 2 [(cloudgear.v1.name) = "gcp"];
+  ROUTER_PROVIDER_AZURE = 3 [(cloudgear.v1.name) = "azure"];
+}
+
+enum Authentication {
+  AUTHENTICATION_UNSPECIFIED = 0;
+  AUTHENTICATION_IAM = 1 [(cloudgear.v1.name) = "iam"];
+  AUTHENTICATION_NONE = 2 [(cloudgear.v1.name) = "none"];
+}
+
+enum RouterMode {
+  ROUTER_MODE_UNSPECIFIED = 0;
+  ROUTER_MODE_LOCAL = 1 [(cloudgear.v1.name) = "local"];
+  ROUTER_MODE_REMOTE = 2 [(cloudgear.v1.name) = "remote"];
+}
+
+enum RouteMethod {
+  ROUTE_METHOD_UNSPECIFIED = 0;
+  ROUTE_METHOD_GET = 1 [(cloudgear.v1.name) = "GET"];
+  ROUTE_METHOD_POST = 2 [(cloudgear.v1.name) = "POST"];
+  ROUTE_METHOD_PUT = 3 [(cloudgear.v1.name) = "PUT"];
+  ROUTE_METHOD_PATCH = 4 [(cloudgear.v1.name) = "PATCH"];
+  ROUTE_METHOD_DELETE = 5 [(cloudgear.v1.name) = "DELETE"];
+  ROUTE_METHOD_HEAD = 6 [(cloudgear.v1.name) = "HEAD"];
+  ROUTE_METHOD_OPTIONS = 7 [(cloudgear.v1.name) = "OPTIONS"];
+  ROUTE_METHOD_ANY = 8 [(cloudgear.v1.name) = "*"];
+}
+
+// How a handler receives the request and answers.
+enum ResponseKind {
+  RESPONSE_KIND_UNSPECIFIED = 0;
+  RESPONSE_KIND_HELPER = 1 [(cloudgear.v1.name) = "helper"];
+  RESPONSE_KIND_VERCEL = 2 [(cloudgear.v1.name) = "vercel"];
+}
+
+// Environment variables a function reads from a secret store; an env var has the name of its secret.
+message SecretBinding {
+  string store = 1 [(cloudgear.v1.references) = "SecretStore", (cloudgear.v1.required) = true];
+  // A prefix such as "/app": a leading slash, no trailing "/*".
+  string path = 2 [(cloudgear.v1.required) = true];
+  repeated string names = 3 [(cloudgear.v1.required) = true];
+}
+
+// A cron schedule, UTC, with the query the function is called with.
+message ScheduleRule {
+  string cron = 1 [(cloudgear.v1.required) = true];
+  map<string, string> query = 2;
+}
+
+// Functions behind one router; each route is a function.
+message FunctionRouter {
+  message Route {
+    RouteMethod method = 1;
+    // May hold {placeholders}.
+    string path = 2 [(cloudgear.v1.required) = true];
+    // The script that handles the route, relative to the setup file.
+    string handler = 3 [(cloudgear.v1.required) = true];
+    optional string name = 4;
+    // Skips the router's authentication.
+    optional bool public = 5;
+    // Project-root files packaged with the function.
+    repeated string include = 6;
+    // The handler receives the request as its second argument.
+    optional bool request = 7;
+    optional ResponseKind response = 8;
+    repeated SecretBinding secrets = 9;
+    repeated ScheduleRule schedule = 10;
+    map<string, string> options = 11;
+  }
+
+  RouterProvider provider = 1 [(cloudgear.v1.immutable) = true];
+  string name = 2 [(cloudgear.v1.immutable) = true];
+  optional Authentication authenticated = 3 [(cloudgear.v1.default_value) = "iam"];
+  optional RouterMode mode = 4;
+  // Defaults to the deploy region.
+  optional string region = 5;
+  // GCP only: the project the functions deploy to.
+  optional string project = 6;
+  // Unset variables the functions tolerate.
+  repeated string optional_env = 7;
+  repeated Route routes = 8;
+  // Also serves the Cert's domain routes through API Gateway.
+  optional string cert = 9 [(cloudgear.v1.references) = "Cert"];
+  map<string, string> function_options = 10;
+  // Runs every function inside an existing VPC.
+  optional Network network = 11;
+}

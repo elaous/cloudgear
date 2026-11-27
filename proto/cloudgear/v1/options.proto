@@ -7,10 +7,10 @@ import "google/protobuf/descriptor.proto";
 // What a call on a resource needs permission to do.
 enum Intent {
   INTENT_UNSPECIFIED = 0;
-  INTENT_READ = 1;
-  INTENT_WRITE = 2;
-  INTENT_DELETE = 3;
-  INTENT_LIST = 4;
+  INTENT_READ = 1 [(cloudgear.v1.name) = "read"];
+  INTENT_WRITE = 2 [(cloudgear.v1.name) = "write"];
+  INTENT_DELETE = 3 [(cloudgear.v1.name) = "delete"];
+  INTENT_LIST = 4 [(cloudgear.v1.name) = "list"];
 }
 
 // A method of the resource's runtime class and the intents calling it implies.

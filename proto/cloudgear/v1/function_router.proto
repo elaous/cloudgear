@@ -63,6 +63,16 @@ message ScheduleRule {
   map<string, string> query = 2;
 }
 
+// What a function may do with a store.
+message Access {
+  // A BlobStore, or a subtype such as a BlobStoreWebSite.
+  string store = 1 [(cloudgear.v1.references) = "BlobStore", (cloudgear.v1.required) = true];
+  // At least one; polymorph's generators reject an empty list. The grant is exactly these.
+  repeated Intent intents = 2;
+  // Narrows the grant to keys under this path; polymorph's generators require it to be inside the store's own path.
+  optional string path = 3;
+}
+
 // Functions behind one router; each route is a function.
 message FunctionRouter {
   message Route {
@@ -86,6 +96,9 @@ message FunctionRouter {
     repeated EventTrigger on = 12;
     // Inline policies put on the function's role.
     repeated string policies = 13 [(cloudgear.v1.references) = "Policy"];
+    // What the function may do with a store. Setups whose handlers are not TypeScript declare it here,
+    // because no analyzer reads their calls.
+    repeated Access access = 14;
   }
 
   RouterProvider provider = 1 [(cloudgear.v1.immutable) = true];

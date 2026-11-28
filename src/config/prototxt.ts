@@ -1,4 +1,4 @@
-// Protobuf text format subset used by cloudgear.proto.
+// Protobuf text format subset used by proto/cloudgear/config/v1/config.proto.
 export type ProtoValue = string | number | boolean | ProtoMessage | ProtoValue[];
 export interface ProtoMessage {
   [field: string]: ProtoValue | undefined;

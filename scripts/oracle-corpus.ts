@@ -74,7 +74,7 @@ for (const file of files) {
     ? "polymorph file"
     : relative.startsWith("tests/fixtures/router/types/")
       ? "type-check only"
-      : scriptTargets.has(file)
+      : scriptTargets.has(file) && !/new\s+FunctionRouter\b/.test(source)
         ? "script handler"
         : importedBy.has(file)
           ? "imported by another file"

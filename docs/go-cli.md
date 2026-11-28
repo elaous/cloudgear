@@ -66,8 +66,8 @@ architecture rules, secret references, attached-origin JSON consistency). So:
 - Step 0 MUST specify one canonical encoding of the prototxt, with golden files, and every generator MUST emit
   it byte for byte; Go's `prototext.Marshal` is documented as unstable and MUST NOT be used to write it.
 - The Go reader MUST port `decodeConfig`'s validation, not only the parsing.
-- `cloudgear.proto` is outside the buf module (`proto/` only); step 0 MUST bring it under `buf lint` and
-  `buf breaking` so the contract has an owner.
+- The config proto lives at `proto/cloudgear/config/v1/config.proto` (package `cloudgear.config.v1`) under
+  `buf lint` and `buf breaking`, so the contract has an owner; the Go types are generated from it with `buf generate`.
 - Every generator MUST carry over the `attached` blocks of the existing file (`previousAttached`), or the next
   `apply` removes the attached origins from live distributions.
 - The side effects of `generate` are kept or dropped on purpose, each named in the port plan: the `local.env`

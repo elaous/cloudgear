@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { encodeConfig } from "../src/config/schema";
-import { baseConfig } from "./helpers";
+import { baseConfig, fn } from "./helpers";
 
 const root = path.join(import.meta.dir, "..");
 
@@ -26,16 +26,64 @@ describe("the config proto", () => {
     expect(text).toMatch(new RegExp(`^message ${message} \\{`, "m"));
   });
 
-  test("names every top-level field the encoder writes", () => {
+  test("declares every field the encoder writes, at every level, for a config that sets them all", () => {
     const text = fs.readFileSync(path.join(root, "proto", hint("proto-file")), "utf8");
-    const config = text.slice(text.indexOf("message Config {"), text.indexOf("\n}\n", text.indexOf("message Config {")));
-    const declared = [...config.matchAll(/^\s+(?:repeated\s+)?\w+\s+(\w+)\s*=\s*\d+;/gm)].map((m) => m[1]);
-    const written = new Set(
-      encodeConfig(baseConfig({ region: "eu-west-1" }))
-        .split("\n")
-        .filter((line) => /^\w/.test(line))
-        .map((line) => line.split(/[ :]/)[0]),
-    );
-    for (const field of written) expect(declared).toContain(field!);
+    const messages = new Map<string, Map<string, string>>();
+    let current: Map<string, string> | undefined;
+    for (const line of text.split("\n")) {
+      const open = /^message (\w+) \{/.exec(line);
+      if (open) messages.set(open[1]!, (current = new Map()));
+      else if (/^\}/.test(line)) current = undefined;
+      else {
+        const field = /^\s+(?:repeated\s+)?(map<\w+,\s*\w+>|\w+)\s+(\w+)\s*=\s*\d+;/.exec(line);
+        if (field && current) current.set(field[2]!, field[1]!);
+      }
+    }
+    const attached = [{ id: "o1", origin: '{"Id":"o1"}', behavior: [{ path_pattern: "/a/*", behavior: '{"PathPattern":"/a/*","TargetOriginId":"o1"}', position: 1 }] }];
+    const secret = { provider: "aws", service: "ssm", region: "eu-west-1", kms_key: "alias/k", path: "/app", name: "TOKEN" };
+    const config = baseConfig({
+      region: "eu-west-1",
+      invoker: ["arn:aws:iam::1:role/r"],
+      certificate: [{ provider: "aws", domain: "a.example.com", dns: { provider: "gandi", domain: "a.example.com", zone: "example.com", token: secret }, usage: "cdn", region: "us-east-1", options: { key_algorithm: "RSA_2048" } }],
+      cdn: [{ provider: "aws", domain: "a.example.com", certificate: "*.example.com", bucket: "data", path: "web/", options: { price_class: "PriceClass_100" }, attached }],
+      api: { provider: "aws", domain: "api.example.com", certificate: "*.example.com", via: "cloudfront", method_routing: true, options: { price_class: "PriceClass_100" }, attached },
+      function: [
+        {
+          ...fn({ options: { tracing: "Active" } }),
+          schedule: ["rate(1 hour)"],
+          include: ["dist/index.html"],
+          pass_request: true,
+          response_arg: "helper",
+          secret: [{ ...secret, env: "TOKEN", all: true }],
+          event: [{ bus: "orders", type: "created", source: "shop" }],
+          query_schedule: [{ cron: "0 * * * *", query: { job: "x" } }],
+          policy: [{ name: "p", document: "{}" }],
+          handler: "bootstrap",
+          architecture: "arm64",
+          bundle: { path: "bin/x.zip", sha256: "abc", archive: true },
+        },
+      ],
+    });
+    const stack: string[] = ["Config"];
+    const undeclared: string[] = [];
+    for (const raw of encodeConfig(config).split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      if (line === "}") {
+        stack.pop();
+        continue;
+      }
+      const key = /^(\w+)/.exec(line)![1]!;
+      // A map field is written as repeated entries of key and value.
+      if (stack.at(-1) === "Entry") {
+        if (key !== "key" && key !== "value") undeclared.push(`Entry.${key}`);
+        if (line.endsWith("{")) stack.push("Entry");
+        continue;
+      }
+      const type = messages.get(stack.at(-1)!)?.get(key);
+      if (type === undefined) undeclared.push(`${stack.at(-1)}.${key}`);
+      if (line.endsWith("{")) stack.push(type?.startsWith("map<") ? "Entry" : (type ?? "?"));
+    }
+    expect(undeclared).toEqual([]);
   });
 });

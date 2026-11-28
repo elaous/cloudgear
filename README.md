@@ -1347,7 +1347,7 @@ handler adapter (Lambda for `aws`, a Cloud Functions HTTP function for `gcp`).
 Bundles target Node.js.
 
 The output is `cloudgear.prototxt`, protobuf text format for the
-`cloudgear.Config` message in `src/config/cloudgear.proto`. This is
+`cloudgear.config.v1.Config` message in `proto/cloudgear/config/v1/config.proto`. This is
 `examples/router-app`, cut down to one resource and one function:
 
 ```

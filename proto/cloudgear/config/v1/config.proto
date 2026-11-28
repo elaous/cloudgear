@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package cloudgear;
+package cloudgear.config.v1;
 
 message Config {
   string project = 1;

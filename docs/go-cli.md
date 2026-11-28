@@ -1,40 +1,50 @@
 # A Go cloudgear CLI, with a library per language
 
 Status: proposal. Nothing in this document is built. It records what the owner decided, turns it into an
-architecture and a port plan, states what the port MUST match, and lists what is still open. It replaces two
+architecture and a port plan, states what the port MUST match, and lists what is still open. It replaces
 earlier versions. The first had the CLI read a `.polymorph` file; the owner rejected that, because a second
-schema language defeats the purpose of writing infrastructure in real code. Polymorph's language, schema,
-evaluator, generators and access checks are therefore legacy, and `docs/foreign-handlers.md` and
-`docs/go-runtime.md` in the polymorph repository MUST be marked superseded when this is adopted.
+schema language defeats the purpose of writing infrastructure in real code. The second had Go and Python
+setups dump their declarations by running them; this version replaces that with one static analyzer in Go,
+after a measurement (below) showed that the TypeScript analyzer does not need a type checker. Polymorph's
+language, schema, evaluator, generators and access checks are therefore legacy, and
+`docs/foreign-handlers.md` and `docs/go-runtime.md` in the polymorph repository MUST be marked superseded when
+this is adopted.
 
 ## What the owner decided
 
 - The setup is written in the project's own language, as real code: `setup.ts`, `setup.py` or `setup.go`.
   There is no neutral language and no schema a user writes. `cloudgear.prototxt` stays what it is today: a
   reviewable, committed configuration that `generate` writes and `plan` and `apply` read.
-- The CLI and the drivers are a Go program named `cloudgear`: `plan`, `apply`, `import`, `destroy`, `state`,
+- The CLI is a Go program named `cloudgear`: `generate`, `plan`, `apply`, `import`, `destroy`, `state`,
   `check-dns`, `invalidate`, `dump-distributions`, `secrets` and the drivers for every provider. It ships as one
-  binary and needs no Node, Bun, Python or Go toolchain to plan and apply.
-- `generate` is per language. The TypeScript one is the existing analyzer; Python and Go get their own,
-  written in their own language and run with the toolchain the user already has. The Go binary does not parse
-  TypeScript or Python; `cloudgear generate` MAY find `setup.ts`, `setup.py` or `setup.go` and run the matching
-  tool, and the user can run that tool directly.
+  binary and needs no Node, Python or Go toolchain to analyze, plan and apply (TypeScript handlers still need
+  Bun to be bundled; see "The settings a function bakes in").
+- `generate` is one static analyzer in Go. It parses `setup.ts`, `setup.py` and `setup.go` with tree-sitter
+  grammars that are translated to pure Go (`github.com/cgofree/tree-sitter` and its Python, TypeScript and Go
+  grammars), resolves names itself, and writes the prototxt. The Go binary never runs the user's code.
+- The proto of the configuration is under buf (`proto/cloudgear/config/v1/config.proto`, merged in cloudgear
+  PR 110). The Go types are generated from it with `buf generate`; the analyzer builds that message and a
+  canonical text emitter writes it.
 - The runtime library of each language is ported and served in that language's ecosystem: npm for TypeScript,
   the Go module proxy for Go, PyPI for Python. Each library holds both halves, as the TypeScript packages do:
   the declarations a setup uses (`new BlobStore("aws", ...)`) and the clients that handler code calls.
 - The state format stays compatible: a state last applied by the TypeScript CLI, from equivalent inputs, MUST
   plan as no change in the Go CLI, and a Go `apply` MUST leave a state the TypeScript CLI reads for as long as
   both exist. The TypeScript CLI MUST stay until the Go CLI reaches parity and MUST NOT be removed before.
+- The user MUST build the handler artifacts for Go and Python before `apply` (a binary zip, a Python zip); the
+  CLI hashes, checks and uploads them. A TypeScript handler is bundled as it is today (see below).
 
 ## Architecture
 
 ```
-setup.ts ──(static analysis, ts-morph: existing)──┐
-setup.py ──(dump by running, Python library)──────┼─> generate ─> cloudgear.prototxt ─┐
-setup.go ──(dump by running, Go library)──────────┘   (+ site hashes, bundle hashes)  │
-handler artifacts: TypeScript bundled by `generate`; Go and Python built by the user ──┤
-                                                                                      v
-                         cloudgear (Go): plan ─> apply ─> state, endpoints.json ─> drivers (AWS, GCP, Neon, DNS)
+setup.ts ──┐ tree-sitter (pure Go) ─> syntax tree ─> language front end ─┐
+setup.py ──┤  TypeScript, Python and Go grammars       (names, imports,   │
+setup.go ──┘                                            constants, uses)  v
+                          one Go derivation (names, options, usage, env) ─> config message (buf-generated types)
+                                                                                      │ canonical text emitter
+handler artifacts: TypeScript bundled with Bun; Go and Python built by the user       v
+                                                              cloudgear.prototxt ─> cloudgear (Go): plan ─> apply ─> state,
+                                                                                    endpoints.json ─> drivers (AWS, GCP, Neon, DNS)
 ```
 
 ### What the Go binary reads and writes
@@ -63,11 +73,15 @@ state, but the commands also use:
 order follows the keys of the object. `decodeConfig` also validates (bucket names, the archive, handler and
 architecture rules, secret references, attached-origin JSON consistency). So:
 
-- Step 0 MUST specify one canonical encoding of the prototxt, with golden files, and every generator MUST emit
-  it byte for byte; Go's `prototext.Marshal` is documented as unstable and MUST NOT be used to write it.
-- The Go reader MUST port `decodeConfig`'s validation, not only the parsing.
 - The config proto lives at `proto/cloudgear/config/v1/config.proto` (package `cloudgear.config.v1`) under
-  `buf lint` and `buf breaking`, so the contract has an owner; the Go types are generated from it with `buf generate`.
+  `buf lint` and `buf breaking`, so the contract has an owner; the Go types are generated from it with
+  `buf generate` and the analyzer builds that message.
+- The Go binary MUST write the prototxt with a canonical emitter of its own that walks the generated message in
+  the order the TypeScript writes it and quotes strings the way `JSON.stringify` does; protobuf-go's
+  `prototext.Marshal` deliberately varies its whitespace between builds and MUST NOT be used to write it. Reading
+  MAY use `prototext.Unmarshal`, which accepts the TypeScript output (72 generated configs and an all-fields
+  config parsed without error in the review of PR 110). Step 1 MUST add golden files that both writers produce.
+- The Go reader MUST port `decodeConfig`'s validation, not only the parsing.
 - Every generator MUST carry over the `attached` blocks of the existing file (`previousAttached`), or the next
   `apply` removes the attached origins from live distributions.
 - The side effects of `generate` are kept or dropped on purpose, each named in the port plan: the `local.env`
@@ -113,63 +127,80 @@ drivers, `wildcardCovers`, the cron conversion, the blob, CORS and site validato
 placed on purpose: runtime code in the library module, deploy-only code in the CLI module, and the CLI module
 MAY import the library module for shared constants. Step 0 records which is which.
 
-### Go and Python generators
+### The analyzer
 
-- **TypeScript** keeps static analysis: it never runs the user's code, reads literals and call graphs with the
-  type checker, and infers permissions from the calls handlers make. It does not change.
-- **Go and Python SHOULD dump by running.** `cloudgear generate` runs the setup in a dump mode; the
-  constructors record their declarations and an explicit call writes the result (Go has no exit hook, so
-  `cloudgear.Dump(setup)` from a `main`; Python MAY use `atexit` or the same explicit call). Parsing Go and
-  Python constructor calls statically is fragile (aliases, loops, helpers) and execution is exact.
-- **The dump SHOULD emit a neutral model, and one Go implementation SHOULD derive the prototxt from it.**
-  The prototxt is not a transcript of constructor calls: `generate.ts`, `providers.ts`, `names.ts` and the model
-  half of the analyzer derive physical names and clash checks, variable names, option serialization, provider
-  defaults, certificate usage, the API domain and CDN options. If each library derived them there would be three
-  implementations. A model (JSON, internal, never written by a user) that the Go binary's `generate` turns into
-  the prototxt leaves two (TypeScript and Go), and the TypeScript analyzer MAY emit the same model later to leave
-  one. This costs the derivation port that the version of this plan without it avoided, about 4,000 to 5,000
-  lines.
-- **Permissions** in Go and Python come from explicit declarations (`grant(store, "read")` style, as `grant()`
-  and `@policy` in TypeScript), checked by the Go binary against the plan; a vet pass for Go that derives them
-  from calls is later work. A cross-language oracle MUST use explicit grants in its TypeScript fixture too.
-- **Handlers and hashes.** A route names the built artifact, runtime, handler and architecture (the
-  finished-zip fields of PR 107). The finished-zip hash is today written by hand (`generate` does not write
-  archive functions). The contract MUST be: the user builds the artifact, then `generate` records its path and
-  SHA-256, then `plan` and `apply` check it (the order is build, generate, plan, apply, and every code change
-  rewrites the committed prototxt, as a TypeScript bundle does). CDK and Pulumi hash assets themselves at synth or
-  `up`; computing it at apply time would change what `Bundle.sha256` means and is not proposed.
-- **`dry`** cannot come from a comment in Go or Python: it is an explicit option (`Resource.dry` exists).
-- **`env` values.** A TypeScript setup reads `process.env` at generate time from the shell and `--env-file`
-  (the shell wins; an empty value is unset; an unset variable fails with its name and line), and the resolved
-  value is written to the committed prototxt, which MUST NOT hold credentials. The Go and Python generators MUST
-  keep these rules: `cloudgear generate` loads `--env-file` into the child's environment with the same
-  precedence and the library reports the missing variable by name.
-- **Running user code is a risk:** the setup runs with the developer's credentials and network, and `init()` and
-  import-time work execute. The setup MUST live in a package that imports only the library (a Go `main` of its
-  own, a Python module that imports no handler), the library's clients MUST refuse network and credentials when
-  the dump variable is set, and CI SHOULD check that regenerating gives no diff. CDK also runs the app at synth
-  and caches context lookups to keep it deterministic; Pulumi runs it on every preview and has an unknown-value
-  model that this design lacks, so every option MUST be concrete at dump time. `plan` stays hermetic because
-  `generate` is a separate step, which is an advantage over both.
-- **Divergence.** A TypeScript setup is limited to what the static analyzer reads; Go and Python accept strictly
-  more programs. The dump SHOULD enforce a reviewable subset (concrete values, no I/O) so the prototxt oracle
-  has the same inputs in all three languages, and the document does not promise that a program valid in Go is
-  valid in TypeScript.
+The TypeScript analyzer reads literals and call graphs; it never runs the user's code, and that is a property
+to keep ("reviewable, credential-free, deterministic"). The Go analyzer does the same for all three languages.
+
+**It does not need a type checker.** The TypeScript analyzer (`src/analyze/app.ts`) makes no use of
+`getTypeAtLocation`, call signatures, return types or assignability. It resolves names: `getSymbol()` 21 times,
+`getDeclarations()` 25, `getAliasedSymbol()` once, `findReferencesAsNodes()` twice. It finds the uses of a store
+by the references to the variable declared with `new BlobStore(...)` and classifies each reference by its
+syntax (`store.get` is a read, passing the store as a value widens it). The only two real type calls are in
+`checkPathParams`, which compares a handler's input type with the `{placeholders}` of its route path; that is
+validation and the prototxt does not depend on it. A measurement on 28 November 2026:
+
+| Measure | Result |
+| --- | --- |
+| Fixture and example files | 316; 291 import `@cloudgear/*`, 17 use relative imports, 3 use a `baseUrl` path, none re-exports, 2 alias an import, 2 use `import * as` |
+| Top-level declarations compared, syntax-only resolver against the type-aware analyzer | 788 declarations, 784 references; 4 differences, all bare imports (`server/api`) that need the tsconfig `baseUrl`; 0 differences once it is read |
+| Member accesses on classes declared in the fixtures (`Class.m`, `new C().m`, `this.m`, a parameter typed as a class) | 30; all resolved identically by syntactic rules; the other 450 or so go to cloudgear's own classes, which the analyzer handles by name |
+
+The resolver was about 230 lines of TypeScript on ts-morph's parser, without the checker. The measurement has
+limits: the corpus is mostly single-file test fixtures and one multi-file example, cross-file resolution was
+exercised on about 20 import edges, there were no re-export chains, no tsconfig `paths` and no copy of a real
+project, the parser was not tree-sitter's, and the analyzer's call-following logic was not re-implemented, only
+the primitive it depends on (an identifier's declaration and a declaration's references). The first step of the
+port MUST repeat the comparison with the Go resolver on tree-sitter trees; it is the oracle below.
+
+**What the analyzer is.**
+
+- **Front ends, one per language,** over tree-sitter trees: a binder (scopes, imports with module resolution:
+  relative paths, the tsconfig `baseUrl` and `paths`, Python's package paths, Go import paths and the module
+  path), constant folding (same-file and imported constants, string concatenation and templates,
+  `process.env.X` or `os.environ` and `os.Getenv` resolved from the shell and `--env-file` with the TypeScript
+  rules), initializer chasing, and recognition of the library's constructors by their import. A front end
+  rejects what it cannot know, with a position, as the TypeScript analyzer does.
+- **A shared model and one derivation in Go,** a port of what `generate.ts`, `providers.ts`, `names.ts` and
+  `routes.ts` derive: physical names and clash checks, option serialization and validation, certificate usage,
+  the API domain, the variables that name a resource, secret bindings, schedules, event triggers. There is one
+  implementation for all three languages and TypeScript's is retired with the TypeScript CLI.
+- **Permissions** are inferred from the references to each declared store, in all three languages, by the
+  rules of the TypeScript analyzer (direct operations; `client()` and a store passed as a value widen it, with a
+  warning, unless `grant(store, ...)` narrows it; `@policy` and `grant` equivalents for Python and Go). They are
+  checked against the plan by the Go binary.
+- **`checkPathParams`** is not ported at first: a path placeholder missing from the handler's input type is
+  reported by the compiler's own checks only if the project writes them. A best-effort version (an inline object
+  type, or a type alias in the same file) MAY come later.
+- **`dry`** cannot come from a comment in Go or Python: it is an explicit option (`Resource.dry` exists), and
+  the TypeScript directive keeps working.
+
+**Tree-sitter's cost.** The `cgofree` modules are version 0.1.0, MIT licensed and translate the C runtime to Go;
+they build with `CGO_ENABLED=0` (a spike produced a 5 MB binary that parsed equivalent setups in all three
+languages in about 3 ms) and need Go 1.26. A dependency that young MUST be pinned, and its grammars (TypeScript
+0.23.2, Python 0.25.0, Go 0.25.0) MUST be covered by the oracle. `microsoft/typescript-go` is not an option:
+its parser and checker are `internal/` packages that Go refuses to import, its repository is closed in favor of
+`microsoft/TypeScript`, and its README marks the API "not ready". `Pogo` is a transpiler for a Python subset and
+is not a parser to depend on.
 
 ### The settings a function bakes in
 
 `bundleFunction` writes an `entry.ts` that compiles the route table, `trustContext`, the JWT settings,
-`request` and `response` modes and the secret bindings into a TypeScript function. A Go or Python function
-has no such wrapper, so how these reach it (environment variables or a config field the runtime reads) MUST be
-decided before any non-TypeScript function is deployed, and the Go and Python functions runtimes (about 2,000
-lines each, ported from `packages/functions` and `packages/core`) MUST land before or with it. Until a runtime
-that verifies tokens exists, a function that is not TypeScript MUST be refused on a router with `jwtAuth` or
-`authenticated: none`, because it has a public Function URL. Go and Python functions on GCP are unsupported
-until a source-deploy path exists (the GCP driver builds its own `index.mjs`). A TypeScript function keeps the
-script-bundle mode (hash of `index.mjs` and includes, handler `index.handler`, `NODE_OPTIONS` set);
-finished-zip mode is for non-TypeScript Lambda functions (a zip goes up in the request, 50 MB at most). Local
-mode (`FunctionRouter.listen` and `fetch`) needs the in-process function in Go and Python, so one declaration
-has to serve both.
+`request` and `response` modes and the secret bindings into a TypeScript function, and bundles it with
+`Bun.build`. With a Go analyzer the Go binary knows all of that; what it cannot do without Bun is bundle. So for
+TypeScript `cloudgear generate` MUST write the `entry.ts` and MAY run `bun build` as a subprocess, which makes
+Bun a requirement for TypeScript projects only (they need Bun or Node to write handlers anyway); the bundle,
+its hash and the `.cloudgear/build/` layout stay as they are, so the hash contract does not move. A Go or
+Python function has no such wrapper, so how these settings reach it (environment variables or a config field the
+runtime reads) MUST be decided before any non-TypeScript function is deployed, and the Go and Python functions
+runtimes (about 2,000 lines each, ported from `packages/functions` and `packages/core`) MUST land before or with
+it. Until a runtime that verifies tokens exists, a function that is not TypeScript MUST be refused on a router
+with `jwtAuth` or `authenticated: none`, because it has a public Function URL. Go and Python functions on GCP
+are unsupported until a source-deploy path exists (the GCP driver builds its own `index.mjs`). A TypeScript
+function keeps the script-bundle mode (hash of `index.mjs` and includes, handler `index.handler`,
+`NODE_OPTIONS` set); finished-zip mode is for non-TypeScript Lambda functions (a zip goes up in the request,
+50 MB at most). Local mode (`FunctionRouter.listen` and `fetch`) needs the in-process function in Go and
+Python, so one declaration has to serve both.
 
 ## Compatibility
 
@@ -211,15 +242,21 @@ The Go binary MUST reproduce or read:
 
 ### The oracle
 
-1. **Config to entries.** Hook `plan()` and `desiredEntries` in the TypeScript tests (`tests/helpers.ts` builds
+1. **The analyzer against the TypeScript analyzer.** The 316 fixture and example files are the corpus: for each
+   entry, the TypeScript CLI's `generate` output (prototxt, warnings and error texts) is recorded as a golden
+   file, and the Go analyzer, given the same setup, MUST produce a byte-identical prototxt through the canonical
+   emitter and the same errors with the same positions. Cases the TypeScript analyzer rejects for type reasons
+   (`checkPathParams`) are listed as exceptions, and every exception is named. This is the strongest oracle in
+   the plan and exists before any Go code does.
+2. **Config to entries.** Hook `plan()` and `desiredEntries` in the TypeScript tests (`tests/helpers.ts` builds
    `CloudgearConfig` objects directly), record each `(config, state)` pair and its entries, and require the Go
    planner, given the same prototxt, to produce the same entries after key sorting, array order preserved.
-2. **Cross-language generation.** The same infrastructure written as `setup.ts`, `setup.py` and `setup.go` MUST
+3. **Cross-language generation.** The same infrastructure written as `setup.ts`, `setup.py` and `setup.go` MUST
    produce the same prototxt after a defined normalization. The normalization list MUST name every
    language-specific field (`source` as `file:line`, `Function.source`, `bundle.path`, function names, which a
    TypeScript setup takes from the export or member name and Go and Python state explicitly) and the oracle
    MUST NOT silently ignore anything else.
-3. **The rest of the contract,** each with a named check: the text of `plan` and `--permissions` and the
+4. **The rest of the contract,** each with a named check: the text of `plan` and `--permissions` and the
    warnings and errors that tests assert, the state store's lock and conditional-write behavior, driver call
    order and retries, site-file hashing, the state file's bytes, the CloudFront Function text. The AWS test
    doubles (`fakeAws`, one `send(command)` stub with SDK v3 inputs) are rewritten for the Go SDK's per-service
@@ -228,27 +265,33 @@ The Go binary MUST reproduce or read:
 ## Port plan
 
 Each step MUST be a pull request with an independent review, the TypeScript CLI MUST keep working, and each
-step MUST name the oracle that proves parity. Steps 1 to 3 give TypeScript users a Go `plan` and `apply` and are
-shippable alone; nothing ships to Go or Python users before step 6.
+step MUST name the oracle that proves parity. The analyzer comes first because it carries the risk and has the
+best oracle; the planner and the drivers are independent of it, since both read the prototxt. Steps 1 to 4 give
+TypeScript users a Go `generate`, `plan` and `apply` and are shippable alone; nothing ships to Go or Python
+users before step 6.
 
-0. **Inventory and contract.** The compatibility items above as a checklist with the oracle for each, the
-   canonical prototxt encoding with golden files, `cloudgear.proto` under buf, where each shared piece of code
-   lives, and the decisions on the neutral model, the settings mechanism and the build-then-generate order. No
-   code beyond the contract files.
-1. **Module and harness.** The Go module in this repository, the state types and stores (file and S3 with the
-   lock), the fixture export hook on the TypeScript side, the comparison test. No user value yet.
-2. **Plan:** the prototxt reader with `decodeConfig`'s validation, the planner for resources, certificates, CDNs
-   and API domains, `readSecretRef`, `check-dns`, `state`, `plan` and `plan --permissions`.
-3. **Drivers and `apply`, `destroy`, `import`,** one pull request per family, each against recorded transcripts:
+0. **Inventory.** The compatibility items above as a checklist with the oracle for each, where each shared piece
+   of code lives, and the decisions on the settings mechanism and the build-then-generate order. The config
+   proto under buf is done (PR 110). No code.
+1. **Module and harness.** The Go module in this repository, `buf generate` for the config types, the
+   canonical emitter and the reader with `decodeConfig`'s validation and golden files, the state types and
+   stores (file and S3 with the lock), and the recording of the TypeScript analyzer's outputs for the 316
+   fixtures. No user value yet; oracles 1 and 2 are set up here.
+2. **The analyzer for TypeScript.** The tree-sitter front end (binder, module resolution with `baseUrl` and
+   `paths`, constant folding, initializer chasing, reference classification), the shared model, and the Go
+   derivation (a port of `generate.ts`, `providers.ts`, `names.ts`, `routes.ts`), against oracle 1, with
+   `local.env`, the environment report and the missing-variable check. The Go binary writes `cloudgear.prototxt`;
+   TypeScript handlers are bundled by a Bun subprocess.
+3. **Plan:** the planner for resources, certificates, CDNs, API domains and functions, `readSecretRef`,
+   `check-dns`, `state`, `plan` and `plan --permissions`, against oracle 2.
+4. **Drivers and `apply`, `destroy`, `import`,** one pull request per family, each against recorded transcripts:
    S3 and sites; certificates, DNS and CloudFront; API Gateway and schedules; the rest of AWS; GCP; Neon. This
    includes bundle reading and the hash check, `--env-file`, `secrets`, the confirmation prompt with the lock and
    the interrupt handling, `invalidate`, `dump-distributions` and the flags listed above.
-4. **TypeScript functions:** the function plan, the script-bundle upload, secrets, schedules and event triggers.
-   A standalone entry point for the TypeScript generator (`generate` is a case inside `src/cli.ts` today).
-5. **Libraries, runtimes and generators:** the declaration half of the Go and Python libraries with constants
-   generated from the protos, the dump mode and the neutral model with the Go derivation, the Go and Python
-   functions runtimes and the settings mechanism, then non-TypeScript function deploy (finished-zip), then
-   events, cache and the remaining libraries, with the cross-language oracle.
+5. **Python and Go:** the front ends over the same model, the declaration half of the Go and Python libraries
+   with constants generated from the protos, the cross-language oracle (3), the Go and Python functions runtimes
+   and the settings mechanism, then non-TypeScript function deploy (finished-zip), then events, cache and the
+   remaining libraries.
 6. **Serving the libraries:** npm (build to `.js` and `.d.ts`, rewrite `workspace:*`, an organization for the
    `@cloudgear` scope, provenance), a Go module with its own `go.mod` and path-prefixed version tags (the
    module proxy needs this repository public), a PyPI package renamed from `polymorph-runtime`, release workflows,
@@ -256,18 +299,18 @@ shippable alone; nothing ships to Go or Python users before step 6.
    a per-language mapping in `scripts/changed-tests.ts`, CONTRIBUTING). Publishing needs the owner's registry
    accounts and decision and MUST NOT be done without them. The CLI resolves `@cloudgear/secrets` with
    `Bun.resolveSync` when bundling; that MUST keep working from a user project.
-7. **Removal of the TypeScript CLI,** keeping the TypeScript generator and library, after every oracle matches
-   and the owner has moved a live deployment; the generator then needs Bun or Node, and `bun build --compile`
-   MAY package it as one binary. `tests/polymorph.test.ts` and `tests/fixtures/polymorph/` are retired with
-   polymorph.
+7. **Removal of the TypeScript CLI and analyzer,** keeping the TypeScript library, after every oracle matches and
+   the owner has moved a live deployment. `tests/polymorph.test.ts` and `tests/fixtures/polymorph/` are retired
+   with polymorph.
 
-Size, from the TypeScript line counts at a ratio of about 1.3 to 1.5: the CLI and drivers (about 8,600 lines)
-plus the shared package code (about 1,500) give steps 1 to 4 about 13,000 to 17,000 lines of Go. Step 5 is about
-14,000: the declaration and client halves of the packages other than `functions` (about 3,700 Go, 3,000 Python),
-the functions runtimes (about 2,000 each), and a dump and derivation layer (about 1,500 per library, plus about
-4,000 to 5,000 once in the Go binary if the neutral model is chosen). In all about 27,000 to 31,000 lines of
-production Go and Python and 12,000 to 15,000 of tests, against about 11,600 lines of TypeScript to port. The
-earlier version of this plan claimed about 5,000 lines fewer; once the derivation is counted, it does not.
+Size, from the TypeScript line counts at a ratio of about 1.3 to 1.5, as estimates and not measurements: the
+CLI, drivers and shared package code (about 10,000 lines) give about 13,000 to 15,000 lines of Go for steps 3
+and 4; the analyzer's TypeScript front end and derivation (about 2,400 lines of `app.ts` and about 1,300 of
+`generate.ts`, `providers.ts`, `names.ts` and `routes.ts`, less what only ts-morph needed) about 4,500 to 5,500
+lines of Go, with a binder of about 400 (the prototype was 230 lines of TypeScript); the Python and Go front
+ends about 1,000 to 1,500 each; the declaration and client halves of the libraries (about 3,700 Go, 3,000
+Python) and the functions runtimes (about 2,000 each). In all about 30,000 to 36,000 lines of production Go and
+Python and 12,000 to 15,000 of tests, against about 11,600 lines of TypeScript to port.
 
 ## What happens to polymorph
 
@@ -283,20 +326,22 @@ cloudgear PR 106 (`Access`, named intents) are unused by the new design; removin
 
 ## Open questions
 
-The owner MUST decide 1 and 2 before step 0 ends, 3 before step 5, 4 before step 6 and 5 before step 1.
+The owner confirmed on 28 November 2026 ("Continue", after the measurement) that the Go analyzer covers
+TypeScript as well as Python and Go. The rest MUST be decided before the step that needs it: 1 before step 5, 2
+before step 6, 3 before step 2, 4 before step 1.
 
-1. **Dump by running or static analysis for Go and Python, and the neutral model.** The recommendation is dump
-   by running with explicit grants, emitting a neutral model that one Go implementation derives into the
-   prototxt. Static analysis per language needs a type checker in that language (Go can use `go/types` through
-   `golang.org/x/tools/go/packages` in the user's build; Python has no equivalent) and finds only direct calls on
-   declared stores. Three implementations of the derivation is the alternative and costs about 4,000 to 5,000
-   lines more in the libraries.
-2. **The settings mechanism** for non-TypeScript functions (environment variables or a config field), and
-   whether a router that uses `jwtAuth` may hold non-TypeScript functions before a verifying runtime exists.
-3. **Handler declaration in Go and Python:** the shape of a route that names an artifact, how one declaration
-   serves local mode, and whether handler source is also located so `generate` can report environment variables
-   as `local.env` does for TypeScript.
-4. **Names and registries:** the npm scope (private today), the Go module path and layout under this repository,
-   the PyPI name, and the registry accounts and credentials, which only the owner can create.
-5. **The Go version** the binary requires and the module paths, and whether the TypeScript generator ships as a
-   compiled binary once the TypeScript CLI is removed.
+1. **The settings mechanism and the handler declaration for Go and Python.** How the route table,
+   authentication settings and secret bindings reach a non-TypeScript function (environment variables or a
+   config field), the shape of a route that names a built artifact (path, runtime, handler, architecture), how
+   one declaration serves local mode, whether handler source is located so `generate` can report environment
+   variables as `local.env` does for TypeScript, and whether a router that uses `jwtAuth` may hold
+   non-TypeScript functions before a verifying runtime exists.
+2. **Names and registries:** the npm scope (private today), the Go module path and layout under this repository
+   (and that the proxy needs it public), the PyPI name, and the registry accounts and credentials, which only
+   the owner can create.
+3. **How TypeScript projects bundle:** a Bun subprocess of `cloudgear generate` (proposed), a compiled helper,
+   or the user's own build step; and whether the loss of `checkPathParams` is acceptable.
+4. **The Go version and the module path.** `cgofree` requires Go 1.26, so the CLI MUST be built with it; the
+   polymorph module is on `go 1.24`.
+5. **A third-party parser at 0.1.0.** Whether the owner accepts `cgofree/tree-sitter` pinned and covered by the
+   oracle, or wants a fallback plan (vendoring the translated grammars into this repository, which MIT permits).
